@@ -4,8 +4,8 @@
 //
 // Niche routes fully wired: /list, /:ih/peers, /stream alias, /get-https (cert
 // fetch from api.strem.io), /yt (yt-dlp shell-out), /casting (SSDP discovery),
-// /local-addon (local-files Stremio addon). HLS transcoding and thumb.jpg remain
-// stubs; thumb.jpg returns 404 (cosmetic).
+// /local-addon (local-files Stremio addon), and HLS transcoding (/hlsv2 via the
+// ffmpeg transcoder in internal/media). thumb.jpg is a cosmetic 404 stub.
 package api
 
 import (

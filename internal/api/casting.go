@@ -47,6 +47,7 @@ import (
 type CastingDevice struct {
 	ID         string `json:"id"`       // USN from SSDP (unique service name)
 	Name       string `json:"name"`     // friendlyName from device description XML
+	Type       string `json:"type"`     // device type reported to clients (required by stremio-core's PlaybackDevice)
 	Model      string `json:"model"`    // modelName from device description XML
 	Location   string `json:"location"` // URL of device description XML
 	controlURL string // AVTransport service controlURL — not exported via JSON
@@ -520,6 +521,7 @@ func ssdpDiscover() []CastingDevice {
 	devices := make([]CastingDevice, 0, len(results))
 	for _, res := range results {
 		if res.ok {
+			res.dev.Type = "dlna" // SSDP-discovered UPnP MediaRenderer
 			devices = append(devices, res.dev)
 		}
 	}
