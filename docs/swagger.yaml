@@ -1,0 +1,696 @@
+basePath: /
+definitions:
+  types.FileInfo:
+    properties:
+      length:
+        type: integer
+      name:
+        type: string
+      offset:
+        type: integer
+      path:
+        type: string
+    type: object
+  types.Stats:
+    properties:
+      connectionTries:
+        type: integer
+      downloadSpeed:
+        type: number
+      downloaded:
+        type: integer
+      files:
+        items:
+          $ref: '#/definitions/types.FileInfo'
+        type: array
+      guessedFileIdx:
+        description: |-
+          GuessedFileIdx is set only in the /create response when the client asked
+          the server to guess (guessFileIdx) or a fileMustInclude matched.
+        type: integer
+      infoHash:
+        type: string
+      name:
+        type: string
+      opts: {}
+      peerSearchRunning:
+        description: PeerSearchRunning is REQUIRED (non-null) by stremio-core's Statistics.
+        type: boolean
+      peers:
+        type: integer
+      queued:
+        type: integer
+      selections: {}
+      sources: {}
+      streamLen:
+        description: Per-file extras (only when a file index is requested).
+        type: integer
+      streamName:
+        type: string
+      streamProgress:
+        type: number
+      swarmConnections:
+        type: integer
+      swarmPaused:
+        type: boolean
+      swarmSize:
+        type: integer
+      unchoked:
+        type: integer
+      unique:
+        type: integer
+      uploadSpeed:
+        type: number
+      uploaded:
+        type: integer
+      wires:
+        items:
+          $ref: '#/definitions/types.Wire'
+        type: array
+    type: object
+  types.Wire:
+    properties:
+      address:
+        type: string
+      amInterested:
+        type: boolean
+      downSpeed:
+        type: number
+      isSeeder:
+        type: boolean
+      requests:
+        type: integer
+      upSpeed:
+        type: number
+    type: object
+host: 127.0.0.1:11470
+info:
+  contact: {}
+  description: HTTP API served by stremio-server-go, a pure-Go drop-in for Stremio's
+    streaming server (server.js). serverVersion is reported as 4.21.0 for client feature-gating;
+    it is independent of the binary build version.
+  license:
+    name: MIT
+    url: https://github.com/M0Rf30/stremio-server-go/blob/main/LICENSE
+  title: stremio-server-go enginefs API
+  version: 4.21.0
+paths:
+  /:
+    get:
+      responses:
+        "307":
+          description: Temporary Redirect
+      summary: Redirect to the Stremio web UI
+      tags:
+      - System
+  /{infoHash}/{fileIdx}:
+    get:
+      parameters:
+      - description: 40-hex info hash
+        in: path
+        name: infoHash
+        required: true
+        type: string
+      - description: file index
+        in: path
+        name: fileIdx
+        required: true
+        type: integer
+      - description: byte range
+        in: header
+        name: Range
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: OK
+        "206":
+          description: partial content
+          schema:
+            type: string
+        "416":
+          description: Requested Range Not Satisfiable
+      summary: Stream a torrent file by info hash and file index
+      tags:
+      - Streaming
+  /{infoHash}/{fileIdx}/stats.json:
+    get:
+      parameters:
+      - description: info hash
+        in: path
+        name: infoHash
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.Stats'
+      summary: Get stats for a specific torrent engine file
+      tags:
+      - Stats
+  /{infoHash}/{fileIdx}/subtitles.vtt:
+    get:
+      produces:
+      - text/vtt
+      responses:
+        "200":
+          description: WebVTT
+          schema:
+            type: string
+      summary: Stream subtitles as WebVTT for a torrent file
+      tags:
+      - Media
+  /{infoHash}/create:
+    get:
+      consumes:
+      - application/json
+      parameters:
+      - description: info hash
+        in: path
+        name: infoHash
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.Stats'
+      summary: Create or attach a torrent engine
+      tags:
+      - Engine
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: info hash
+        in: path
+        name: infoHash
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.Stats'
+      summary: Create or attach a torrent engine
+      tags:
+      - Engine
+  /{infoHash}/peers:
+    get:
+      parameters:
+      - description: info hash
+        in: path
+        name: infoHash
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              type: object
+            type: array
+      summary: List connected peers for a torrent engine
+      tags:
+      - Stats
+  /{infoHash}/remove:
+    get:
+      parameters:
+      - description: info hash
+        in: path
+        name: infoHash
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Remove a torrent engine by info hash
+      tags:
+      - Engine
+  /{infoHash}/stats.json:
+    get:
+      parameters:
+      - description: info hash
+        in: path
+        name: infoHash
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.Stats'
+      summary: Get stats for a specific torrent engine file
+      tags:
+      - Stats
+  /casting:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              type: object
+            type: array
+      summary: Discover DLNA renderers via SSDP
+      tags:
+      - Casting
+  /casting/{id}/player:
+    get:
+      parameters:
+      - description: device id
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: load|play|pause|stop|seek|status
+        in: query
+        name: command
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+      summary: UPnP AVTransport control
+      tags:
+      - Casting
+    post:
+      parameters:
+      - description: device id
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: load|play|pause|stop|seek|status
+        in: query
+        name: command
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+      summary: UPnP AVTransport control
+      tags:
+      - Casting
+  /create:
+    get:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.Stats'
+      summary: Create a torrent engine from URL or hex blob
+      tags:
+      - Engine
+    post:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.Stats'
+      summary: Create a torrent engine from URL or hex blob
+      tags:
+      - Engine
+  /device-info:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Report available hardware acceleration devices
+      tags:
+      - System
+  /get-https:
+    get:
+      parameters:
+      - description: public IP
+        in: query
+        name: ipAddress
+        required: true
+        type: string
+      - description: Stremio auth key (or X-Stremio-AuthKey header)
+        in: query
+        name: authKey
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+      summary: Provision a TLS cert from api.strem.io
+      tags:
+      - System
+  /heartbeat:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Liveness probe
+      tags:
+      - System
+  /hlsv2/{id}/{file}:
+    get:
+      parameters:
+      - description: session id
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: playlist or segment
+        in: path
+        name: file
+        required: true
+        type: string
+      produces:
+      - application/vnd.apple.mpegurl
+      responses:
+        "200":
+          description: m3u8 / MPEG-TS / WebVTT
+          schema:
+            type: string
+      summary: Serve HLS playlist or segment
+      tags:
+      - HLS
+  /hlsv2/probe:
+    get:
+      parameters:
+      - description: media URL
+        in: query
+        name: mediaURL
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Probe a media URL for HLS transcoding
+      tags:
+      - HLS
+  /hwaccel-profiler:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              type: string
+            type: array
+      summary: List available hardware acceleration profiles
+      tags:
+      - System
+  /list:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              type: string
+            type: array
+      summary: List active info hashes
+      tags:
+      - Engine
+  /local-addon/manifest.json:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Local-files Stremio add-on (manifest/catalog/meta/stream)
+      tags:
+      - LocalAddon
+  /network-info:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List available network interfaces
+      tags:
+      - System
+  /opensubHash:
+    get:
+      parameters:
+      - description: video URL
+        in: query
+        name: videoUrl
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Compute OpenSubtitles hash for a video URL
+      tags:
+      - Media
+  /probe:
+    get:
+      parameters:
+      - description: stream URL
+        in: query
+        name: url
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Probe a stream URL with ffprobe
+      tags:
+      - Media
+  /proxy/{rest}:
+    get:
+      parameters:
+      - description: opts/path
+        in: path
+        name: rest
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: Reverse-proxy an external stream URL
+      tags:
+      - Proxy
+  /removeAll:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Remove all active torrent engines
+      tags:
+      - Engine
+  /settings:
+    get:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get or update server settings
+      tags:
+      - Settings
+    post:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get or update server settings
+      tags:
+      - Settings
+  /stats.json:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              $ref: '#/definitions/types.Stats'
+            type: object
+      summary: Get stats for all active torrent engines
+      tags:
+      - Stats
+  /subtitles.{ext}:
+    get:
+      parameters:
+      - description: vtt|srt
+        in: path
+        name: ext
+        required: true
+        type: string
+      - description: subtitle URL
+        in: query
+        name: from
+        required: true
+        type: string
+      - description: ms offset
+        in: query
+        name: offset
+        type: integer
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: Fetch and convert subtitles
+      tags:
+      - Media
+  /subtitlesTracks:
+    get:
+      parameters:
+      - description: subtitle URL
+        in: query
+        name: subsUrl
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List subtitle tracks for a subtitle URL
+      tags:
+      - Media
+  /tracks/{url}:
+    get:
+      parameters:
+      - description: stream URL
+        in: path
+        name: url
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              type: object
+            type: array
+      summary: List media tracks for a URL
+      tags:
+      - Media
+  /yt/{id}:
+    get:
+      parameters:
+      - description: YouTube video id (optionally .json)
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: format JSON for .json
+          schema:
+            additionalProperties: true
+            type: object
+        "307":
+          description: redirect
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+        "501":
+          description: Not Implemented
+      summary: Resolve a YouTube id via yt-dlp
+      tags:
+      - YouTube
+schemes:
+- http
+- https
+swagger: "2.0"

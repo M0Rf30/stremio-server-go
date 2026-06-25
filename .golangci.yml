@@ -1,0 +1,87 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - whitespace
+
+  settings:
+    gosec:
+      # This is a localhost media server: it deliberately shells out to
+      # ffmpeg/yt-dlp, proxies/fetches client-supplied URLs, and reads
+      # client-selected file paths. Those gosec rules are by-design here.
+      excludes:
+        - G107 # http request with variable URL (proxy / subtitle / casting)
+        - G204 # subprocess with variable args (ffmpeg / ffprobe / yt-dlp)
+        - G301 # mkdir perms
+        - G302 # chmod perms
+        - G304 # file path from variable (local-addon / hls / subtitles)
+        - G306 # WriteFile perms
+        - G104 # unhandled errors (errcheck reports these canonically)
+        - G115 # integer overflow conversion (opensub hash uint64 math is intentional)
+        - G702 # command injection via taint (ffmpeg/yt-dlp; validated, by-design)
+        - G703 # path traversal via taint (file paths sanitized at the boundary)
+        - G704 # SSRF via taint (proxy/subtitle/casting fetch — by-design)
+        - G705 # XSS via taint (playlist text is server-generated m3u8, not HTML)
+        - G706 # log injection via taint (local diagnostic logs only)
+        - G710 # open redirect via taint (GET / -> configured WebUI; loc is server-set)
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: superfluous-else
+        - name: var-naming
+
+    errcheck:
+      # Read-side Close on response bodies / connections / files: the error is
+      # not actionable. Writes that matter are checked explicitly in code.
+      exclude-functions:
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (net.Conn).Close
+        - (*os.File).Close
+
+  exclusions:
+    generated: strict
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+          - gosec
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/M0Rf30/stremio-server-go
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

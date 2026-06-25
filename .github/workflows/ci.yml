@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore: ["**/*.md", "docs/**", ".gitignore", "LICENSE"]
+  pull_request:
+    branches: ["main"]
+    paths-ignore: ["**/*.md", "docs/**", ".gitignore", "LICENSE"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint & vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -s -l . || true)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt -s formatted:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+      - name: markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: "**/*.md"
+        continue-on-error: true
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod verify
+      - name: Build (CGO disabled)
+        run: CGO_ENABLED=0 go build -v ./...
+      - name: Test
+        run: go test -p 1 -race ./...
+
+  build:
+    name: Cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [quality]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: arm, goarm: "7" }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: windows, goarch: arm64, ext: ".exe" }
+          - { goos: android, goarch: arm64, ldextra: "-checklinkname=0" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          out="dist/stremio-server_${GOOS}_${GOARCH}${{ matrix.ext }}"
+          go build -trimpath \
+            -ldflags "-s -w ${{ matrix.ldextra }} -X main.buildVersion=${GITHUB_REF_NAME} -X main.buildCommit=${GITHUB_SHA::8}" \
+            -o "$out" ./cmd/stremio-server
+          ls -la "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stremio-server_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/
+          retention-days: 7
+
+  govulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+        continue-on-error: true

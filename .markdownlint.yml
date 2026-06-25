@@ -1,0 +1,13 @@
+# markdownlint config — relaxed for prose-heavy docs.
+default: true
+# Line length: prose wraps freely.
+MD013: false
+# Allow inline HTML (badges, details blocks).
+MD033: false
+# Allow duplicate headings in different sections.
+MD024:
+  siblings_only: true
+# First line need not be a top-level heading.
+MD041: false
+# Bare URLs are fine in tables/docs.
+MD034: false

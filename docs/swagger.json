@@ -1,0 +1,1058 @@
+{
+    "schemes": [
+        "http",
+        "https"
+    ],
+    "swagger": "2.0",
+    "info": {
+        "description": "HTTP API served by stremio-server-go, a pure-Go drop-in for Stremio's streaming server (server.js). serverVersion is reported as 4.21.0 for client feature-gating; it is independent of the binary build version.",
+        "title": "stremio-server-go enginefs API",
+        "contact": {},
+        "license": {
+            "name": "MIT",
+            "url": "https://github.com/M0Rf30/stremio-server-go/blob/main/LICENSE"
+        },
+        "version": "4.21.0"
+    },
+    "host": "127.0.0.1:11470",
+    "basePath": "/",
+    "paths": {
+        "/": {
+            "get": {
+                "tags": [
+                    "System"
+                ],
+                "summary": "Redirect to the Stremio web UI",
+                "responses": {
+                    "307": {
+                        "description": "Temporary Redirect"
+                    }
+                }
+            }
+        },
+        "/casting": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Casting"
+                ],
+                "summary": "Discover DLNA renderers via SSDP",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/casting/{id}/player": {
+            "get": {
+                "tags": [
+                    "Casting"
+                ],
+                "summary": "UPnP AVTransport control",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "device id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "load|play|pause|stop|seek|status",
+                        "name": "command",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            },
+            "post": {
+                "tags": [
+                    "Casting"
+                ],
+                "summary": "UPnP AVTransport control",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "device id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "load|play|pause|stop|seek|status",
+                        "name": "command",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            }
+        },
+        "/create": {
+            "get": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Engine"
+                ],
+                "summary": "Create a torrent engine from URL or hex blob",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.Stats"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Engine"
+                ],
+                "summary": "Create a torrent engine from URL or hex blob",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.Stats"
+                        }
+                    }
+                }
+            }
+        },
+        "/device-info": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "Report available hardware acceleration devices",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/get-https": {
+            "get": {
+                "tags": [
+                    "System"
+                ],
+                "summary": "Provision a TLS cert from api.strem.io",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "public IP",
+                        "name": "ipAddress",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Stremio auth key (or X-Stremio-AuthKey header)",
+                        "name": "authKey",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    }
+                }
+            }
+        },
+        "/heartbeat": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "Liveness probe",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/hlsv2/probe": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "HLS"
+                ],
+                "summary": "Probe a media URL for HLS transcoding",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "media URL",
+                        "name": "mediaURL",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/hlsv2/{id}/{file}": {
+            "get": {
+                "produces": [
+                    "application/vnd.apple.mpegurl"
+                ],
+                "tags": [
+                    "HLS"
+                ],
+                "summary": "Serve HLS playlist or segment",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "session id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "playlist or segment",
+                        "name": "file",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "m3u8 / MPEG-TS / WebVTT",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/hwaccel-profiler": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "List available hardware acceleration profiles",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/list": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Engine"
+                ],
+                "summary": "List active info hashes",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/local-addon/manifest.json": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "LocalAddon"
+                ],
+                "summary": "Local-files Stremio add-on (manifest/catalog/meta/stream)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/network-info": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "List available network interfaces",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/opensubHash": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Media"
+                ],
+                "summary": "Compute OpenSubtitles hash for a video URL",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "video URL",
+                        "name": "videoUrl",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/probe": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Media"
+                ],
+                "summary": "Probe a stream URL with ffprobe",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "stream URL",
+                        "name": "url",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/proxy/{rest}": {
+            "get": {
+                "tags": [
+                    "Proxy"
+                ],
+                "summary": "Reverse-proxy an external stream URL",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "opts/path",
+                        "name": "rest",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/removeAll": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Engine"
+                ],
+                "summary": "Remove all active torrent engines",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/settings": {
+            "get": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Settings"
+                ],
+                "summary": "Get or update server settings",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Settings"
+                ],
+                "summary": "Get or update server settings",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/stats.json": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Stats"
+                ],
+                "summary": "Get stats for all active torrent engines",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "$ref": "#/definitions/types.Stats"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/subtitles.{ext}": {
+            "get": {
+                "tags": [
+                    "Media"
+                ],
+                "summary": "Fetch and convert subtitles",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "vtt|srt",
+                        "name": "ext",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "subtitle URL",
+                        "name": "from",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "ms offset",
+                        "name": "offset",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/subtitlesTracks": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Media"
+                ],
+                "summary": "List subtitle tracks for a subtitle URL",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "subtitle URL",
+                        "name": "subsUrl",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/tracks/{url}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Media"
+                ],
+                "summary": "List media tracks for a URL",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "stream URL",
+                        "name": "url",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/yt/{id}": {
+            "get": {
+                "tags": [
+                    "YouTube"
+                ],
+                "summary": "Resolve a YouTube id via yt-dlp",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "YouTube video id (optionally .json)",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "format JSON for .json",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "307": {
+                        "description": "redirect",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "501": {
+                        "description": "Not Implemented"
+                    }
+                }
+            }
+        },
+        "/{infoHash}/create": {
+            "get": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Engine"
+                ],
+                "summary": "Create or attach a torrent engine",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "info hash",
+                        "name": "infoHash",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.Stats"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Engine"
+                ],
+                "summary": "Create or attach a torrent engine",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "info hash",
+                        "name": "infoHash",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.Stats"
+                        }
+                    }
+                }
+            }
+        },
+        "/{infoHash}/peers": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Stats"
+                ],
+                "summary": "List connected peers for a torrent engine",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "info hash",
+                        "name": "infoHash",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/{infoHash}/remove": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Engine"
+                ],
+                "summary": "Remove a torrent engine by info hash",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "info hash",
+                        "name": "infoHash",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/{infoHash}/stats.json": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Stats"
+                ],
+                "summary": "Get stats for a specific torrent engine file",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "info hash",
+                        "name": "infoHash",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.Stats"
+                        }
+                    }
+                }
+            }
+        },
+        "/{infoHash}/{fileIdx}": {
+            "get": {
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "Streaming"
+                ],
+                "summary": "Stream a torrent file by info hash and file index",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "40-hex info hash",
+                        "name": "infoHash",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "file index",
+                        "name": "fileIdx",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "byte range",
+                        "name": "Range",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "206": {
+                        "description": "partial content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "416": {
+                        "description": "Requested Range Not Satisfiable"
+                    }
+                }
+            }
+        },
+        "/{infoHash}/{fileIdx}/stats.json": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Stats"
+                ],
+                "summary": "Get stats for a specific torrent engine file",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "info hash",
+                        "name": "infoHash",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.Stats"
+                        }
+                    }
+                }
+            }
+        },
+        "/{infoHash}/{fileIdx}/subtitles.vtt": {
+            "get": {
+                "produces": [
+                    "text/vtt"
+                ],
+                "tags": [
+                    "Media"
+                ],
+                "summary": "Stream subtitles as WebVTT for a torrent file",
+                "responses": {
+                    "200": {
+                        "description": "WebVTT",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "types.FileInfo": {
+            "type": "object",
+            "properties": {
+                "length": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "offset": {
+                    "type": "integer"
+                },
+                "path": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.Stats": {
+            "type": "object",
+            "properties": {
+                "connectionTries": {
+                    "type": "integer"
+                },
+                "downloadSpeed": {
+                    "type": "number"
+                },
+                "downloaded": {
+                    "type": "integer"
+                },
+                "files": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.FileInfo"
+                    }
+                },
+                "guessedFileIdx": {
+                    "description": "GuessedFileIdx is set only in the /create response when the client asked\nthe server to guess (guessFileIdx) or a fileMustInclude matched.",
+                    "type": "integer"
+                },
+                "infoHash": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "opts": {},
+                "peerSearchRunning": {
+                    "description": "PeerSearchRunning is REQUIRED (non-null) by stremio-core's Statistics.",
+                    "type": "boolean"
+                },
+                "peers": {
+                    "type": "integer"
+                },
+                "queued": {
+                    "type": "integer"
+                },
+                "selections": {},
+                "sources": {},
+                "streamLen": {
+                    "description": "Per-file extras (only when a file index is requested).",
+                    "type": "integer"
+                },
+                "streamName": {
+                    "type": "string"
+                },
+                "streamProgress": {
+                    "type": "number"
+                },
+                "swarmConnections": {
+                    "type": "integer"
+                },
+                "swarmPaused": {
+                    "type": "boolean"
+                },
+                "swarmSize": {
+                    "type": "integer"
+                },
+                "unchoked": {
+                    "type": "integer"
+                },
+                "unique": {
+                    "type": "integer"
+                },
+                "uploadSpeed": {
+                    "type": "number"
+                },
+                "uploaded": {
+                    "type": "integer"
+                },
+                "wires": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.Wire"
+                    }
+                }
+            }
+        },
+        "types.Wire": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "amInterested": {
+                    "type": "boolean"
+                },
+                "downSpeed": {
+                    "type": "number"
+                },
+                "isSeeder": {
+                    "type": "boolean"
+                },
+                "requests": {
+                    "type": "integer"
+                },
+                "upSpeed": {
+                    "type": "number"
+                }
+            }
+        }
+    }
+}

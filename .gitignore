@@ -1,0 +1,22 @@
+# Build output
+/stremio-server
+/stremio-server-*
+*.exe
+/bin/
+/dist/
+/releases/
+
+# Test / coverage
+*.test
+*.out
+coverage.html
+
+# Local runtime / app data
+*.log
+/.stremio-server/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*~

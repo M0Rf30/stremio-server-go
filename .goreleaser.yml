@@ -1,0 +1,106 @@
+version: 2
+
+project_name: stremio-server
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  # Desktop / server targets.
+  - id: stremio-server
+    main: ./cmd/stremio-server
+    binary: stremio-server
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      # -checklinkname=0 is harmless on these platforms and required so the
+      # android build (separate id below) links github.com/wlynxg/anet on Go 1.23+.
+      - -s -w -checklinkname=0
+      - -X main.buildVersion={{ .Version }}
+      - -X main.buildCommit={{ .ShortCommit }}
+      - -X main.buildDate={{ .Date }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      - "7"
+    ignore:
+      - { goos: darwin, goarch: arm }
+      - { goos: windows, goarch: arm }
+
+  # Android (arm64) — runs standalone / under Termux. Pure-Go, CGO disabled.
+  - id: stremio-server-android
+    main: ./cmd/stremio-server
+    binary: stremio-server
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -checklinkname=0
+      - -X main.buildVersion={{ .Version }}
+      - -X main.buildCommit={{ .ShortCommit }}
+      - -X main.buildDate={{ .Date }}
+    goos:
+      - android
+    goarch:
+      - arm64
+
+upx:
+  # Linux only: macOS Gatekeeper rejects upx-packed Mach-O, and upx on
+  # android/arm64 can break the loader.
+  - enabled: true
+    compress: best
+    lzma: true
+    goos:
+      - linux
+
+archives:
+  - id: default
+    ids:
+      - stremio-server
+      - stremio-server-android
+    formats: tar.gz
+    format_overrides:
+      - goos: windows
+        formats: zip
+    name_template: >-
+      stremio-server_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+  sort: asc
+  abbrev: -1
+  groups:
+    - { title: "🚀 Features", regexp: '^.*?feat(\([[:word:]/.-]+\))??!?:.+$', order: 0 }
+    - { title: "🐛 Bug Fixes", regexp: '^.*?fix(\([[:word:]/.-]+\))??!?:.+$', order: 1 }
+    - { title: "⚡ Performance", regexp: '^.*?perf(\([[:word:]/.-]+\))??!?:.+$', order: 2 }
+    - { title: "♻️ Refactor", regexp: '^.*?refactor(\([[:word:]/.-]+\))??!?:.+$', order: 3 }
+    - { title: "📘 Documentation", regexp: '^.*?docs(\([[:word:]/.-]+\))??!?:.+$', order: 4 }
+    - { title: "🔧 CI & Build", regexp: '^.*?(ci|build)(\([[:word:]/.-]+\))??!?:.+$', order: 5 }
+    - { title: "🧰 Miscellaneous", order: 999 }
+  filters:
+    exclude:
+      - "^Merge "
+      - "^wip:"
+      - "^style:"
+
+release:
+  draft: false
+  prerelease: auto
