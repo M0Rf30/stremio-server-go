@@ -38,6 +38,12 @@ make build          # -> ./stremio-server
 make build-all      # cross-compile every target into dist/
 ```
 
+### Container / HuggingFace
+
+A multi-stage `Dockerfile` (ffmpeg + yt-dlp bundled, non-root, `/data` volume)
+builds an image runnable under Podman/Docker or as a HuggingFace Space.
+See [docs/CONTAINER.md](docs/CONTAINER.md).
+
 ## Run
 
 ```sh

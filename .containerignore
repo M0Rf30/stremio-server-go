@@ -1,0 +1,28 @@
+# Build-context exclusions — keep context minimal.
+# go.mod, go.sum, cmd/, and internal/ are intentionally NOT excluded.
+
+# Version control
+.git/
+.github/
+
+# Build artefacts and pre-built binaries
+dist/
+/stremio-server
+
+# Container build files (not needed inside the build context)
+Dockerfile
+.containerignore
+
+# Documentation and project meta
+*.md
+docs/
+scripts/
+.golangci.yml
+.goreleaser.yml
+.markdownlint.yml
+
+# Editor and OS cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store
