@@ -18,6 +18,14 @@ type Config struct {
 	ListenPort int    // BitTorrent peer listen port (0 = random)
 	WebUI      string // redirect target for "GET /" (e.g. https://web.stremio.com/)
 	Version    string // value reported as settings.serverVersion
+
+	// Stream proxy configuration.
+	ProxyPassword    string // api_password for stream proxy; "" = no auth
+	ProxySecret      string // hex-encoded 32-byte key for signed-URL tokens
+	ProxyIPACL       string // comma-separated CIDR allowlist for proxy clients
+	ProxyPrebuffer   int    // number of segments to prefetch (0 = off)
+	ProxySegCacheTTL int    // segment cache TTL in seconds (0 = caching off)
+	ProxyPublicURL   string // explicit external base URL for proxy; "" = derive
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.

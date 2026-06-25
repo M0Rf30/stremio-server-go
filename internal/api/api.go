@@ -10,6 +10,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 
+	"github.com/M0Rf30/stremio-server-go/internal/streamproxy"
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
 
@@ -58,11 +60,19 @@ type server struct {
 	prober types.MediaProber
 	cfg    types.Config
 	logReq bool
+	sp     *streamproxy.Handler
 }
 
 // New returns the HTTP handler for the streaming server.
 func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProber, cfg types.Config) http.Handler {
-	return &server{em: em, ss: ss, prober: prober, cfg: cfg, logReq: os.Getenv("STREMIO_HTTP_LOG") != ""}
+	return &server{
+		em:     em,
+		ss:     ss,
+		prober: prober,
+		cfg:    cfg,
+		logReq: os.Getenv("STREMIO_HTTP_LOG") != "",
+		sp:     streamproxy.New(buildStreamProxyConfig(cfg)),
+	}
 }
 
 // ServeHTTP applies CORS, handles preflight, and dispatches to the router.
@@ -151,7 +161,14 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	case "hwaccel-profiler":
 		s.handleHwaccelProfiler(w, r)
 	case "proxy":
+		if s.sp.Route(w, r, seg) {
+			return
+		}
 		s.handleProxy(w, r, seg)
+	case "generate_url":
+		s.sp.HandleGenerateURL(w, r)
+	case "base64":
+		s.sp.HandleBase64(w, r, seg)
 	// /list — active infohash array
 	case "list":
 		s.handleList(w, r)
@@ -1161,6 +1178,43 @@ var proxyClient = &http.Client{
 		ResponseHeaderTimeout: 15 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	},
+}
+
+// buildStreamProxyConfig converts types.Config proxy fields to a streamproxy.Config.
+func buildStreamProxyConfig(cfg types.Config) streamproxy.Config {
+	// Decode ProxySecret: try hex then base64url then base64std.
+	var secret []byte
+	if cfg.ProxySecret != "" {
+		if b, err := hex.DecodeString(cfg.ProxySecret); err == nil {
+			secret = b
+		} else if b, err := base64.RawURLEncoding.DecodeString(cfg.ProxySecret); err == nil {
+			secret = b
+		} else if b, err := base64.StdEncoding.DecodeString(cfg.ProxySecret); err == nil {
+			secret = b
+		}
+	}
+
+	// Parse ProxyIPACL: comma-separated CIDR strings.
+	var ipACL []*net.IPNet
+	for _, cidr := range strings.Split(cfg.ProxyIPACL, ",") {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+			ipACL = append(ipACL, ipNet)
+		}
+	}
+
+	return streamproxy.Config{
+		Password:    cfg.ProxyPassword,
+		Secret:      secret,
+		IPACL:       ipACL,
+		Prebuffer:   cfg.ProxyPrebuffer,
+		SegCacheTTL: time.Duration(cfg.ProxySegCacheTTL) * time.Second,
+		PublicURL:   cfg.ProxyPublicURL,
+		Client:      proxyClient,
+	}
 }
 
 // handleProxy implements /proxy/<opts>/<path> used by stremio-video to fetch an

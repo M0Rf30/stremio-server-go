@@ -1,0 +1,149 @@
+package streamproxy
+
+import (
+	"container/list"
+	"context"
+	"io"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// cacheEntry holds a cached segment with its metadata.
+type cacheEntry struct {
+	key       string
+	val       []byte
+	hdr       http.Header
+	status    int
+	expiresAt time.Time
+}
+
+// segCache is an in-memory LRU segment cache bounded by entry count and TTL.
+type segCache struct {
+	mu         sync.Mutex
+	ttl        time.Duration
+	maxEntries int
+	items      map[string]*list.Element
+	lru        *list.List
+}
+
+// newSegCache creates a segCache with the given TTL and entry cap.
+func newSegCache(ttl time.Duration, maxEntries int) *segCache {
+	return &segCache{
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		items:      make(map[string]*list.Element),
+		lru:        list.New(),
+	}
+}
+
+// putFull stores a full response entry (body + headers + status).
+func (c *segCache) putFull(key string, val []byte, hdr http.Header, status int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.items[key]; ok {
+		c.lru.MoveToFront(el)
+		e := el.Value.(*cacheEntry)
+		e.val = val
+		e.hdr = hdr
+		e.status = status
+		e.expiresAt = time.Now().Add(c.ttl)
+		return
+	}
+	for c.lru.Len() >= c.maxEntries {
+		back := c.lru.Back()
+		if back == nil {
+			break
+		}
+		delete(c.items, back.Value.(*cacheEntry).key)
+		c.lru.Remove(back)
+	}
+	entry := &cacheEntry{
+		key:       key,
+		val:       val,
+		hdr:       hdr,
+		status:    status,
+		expiresAt: time.Now().Add(c.ttl),
+	}
+	c.items[key] = c.lru.PushFront(entry)
+}
+
+// getFull returns the full cache entry, or nil when absent or expired.
+func (c *segCache) getFull(key string) *cacheEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.items[key]
+	if !ok {
+		return nil
+	}
+	entry := el.Value.(*cacheEntry)
+	if time.Now().After(entry.expiresAt) {
+		c.lru.Remove(el)
+		delete(c.items, key)
+		return nil
+	}
+	c.lru.MoveToFront(el)
+	return entry
+}
+
+// cachedFetch fetches rawurl, using the segment cache when configured.
+// Returns body, response headers, HTTP status, and any error.
+func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Header) ([]byte, http.Header, int, error) {
+	if h.cache == nil || h.cfg.SegCacheTTL == 0 {
+		// Caching disabled — fetch directly.
+		resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		return data, resp.Header, resp.StatusCode, err
+	}
+
+	// Cache hit.
+	if entry := h.cache.getFull(rawurl); entry != nil {
+		outHdr := make(http.Header)
+		if entry.hdr != nil {
+			for k, vs := range entry.hdr {
+				outHdr[k] = vs
+			}
+		} else {
+			outHdr.Set("Content-Length", strconv.Itoa(len(entry.val)))
+		}
+		return entry.val, outHdr, entry.status, nil
+	}
+
+	// Cache miss — fetch, store, return.
+	resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, resp.StatusCode, err
+	}
+	if resp.StatusCode == http.StatusOK {
+		h.cache.putFull(rawurl, data, resp.Header.Clone(), resp.StatusCode)
+	}
+	return data, resp.Header, resp.StatusCode, nil
+}
+
+// prefetch asynchronously warms the cache for up to cfg.Prebuffer URLs.
+// Errors are silently ignored. No-op when Prebuffer <= 0 or SegCacheTTL == 0.
+func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header) {
+	if h.cfg.Prebuffer <= 0 || h.cache == nil {
+		return
+	}
+	limit := h.cfg.Prebuffer
+	if limit > len(urls) {
+		limit = len(urls)
+	}
+	for _, u := range urls[:limit] {
+		u := u
+		go func() {
+			h.cachedFetch(ctx, u, hdr) //nolint:errcheck
+		}()
+	}
+}

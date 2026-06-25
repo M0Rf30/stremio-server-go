@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -75,13 +78,19 @@ func main() {
 	}
 
 	cfg := types.Config{
-		HTTPPort:   envInt("HTTP_PORT", 11470),
-		HTTPSPort:  envInt("HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
-		AppPath:    appPath,
-		CacheRoot:  appPath,
-		ListenPort: envInt("BT_LISTEN_PORT", 0),
-		WebUI:      getenv("WEB_UI_LOCATION", "https://web.stremio.com/"),
-		Version:    version,
+		HTTPPort:         envInt("HTTP_PORT", 11470),
+		HTTPSPort:        envInt("HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
+		AppPath:          appPath,
+		CacheRoot:        appPath,
+		ListenPort:       envInt("BT_LISTEN_PORT", 0),
+		WebUI:            getenv("WEB_UI_LOCATION", "https://web.stremio.com/"),
+		Version:          version,
+		ProxyPassword:    getenv("STREMIO_PROXY_PASSWORD", ""),
+		ProxySecret:      proxySecret(appPath),
+		ProxyIPACL:       getenv("STREMIO_PROXY_IP_ACL", ""),
+		ProxyPrebuffer:   envInt("STREMIO_PROXY_PREBUFFER", 3),
+		ProxySegCacheTTL: envInt("STREMIO_PROXY_SEG_CACHE_TTL", 300),
+		ProxyPublicURL:   getenv("STREMIO_PROXY_PUBLIC_URL", ""),
 	}
 
 	ss, err := settings.New(cfg)
@@ -215,4 +224,27 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// proxySecret returns the proxy signing secret.
+// Priority: STREMIO_PROXY_SECRET env var > <appPath>/proxy-secret file > auto-generated.
+// A generated secret is persisted to <appPath>/proxy-secret (mode 0o600).
+func proxySecret(appPath string) string {
+	if s := os.Getenv("STREMIO_PROXY_SECRET"); s != "" {
+		return s
+	}
+	secretFile := filepath.Join(appPath, "proxy-secret")
+	if data, err := os.ReadFile(secretFile); err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		log.Printf("proxy: failed to generate random secret: %v", err)
+		return ""
+	}
+	secret := hex.EncodeToString(buf)
+	if err := os.WriteFile(secretFile, []byte(secret), 0o600); err != nil {
+		log.Printf("proxy: failed to persist secret to %s: %v", secretFile, err)
+	}
+	return secret
 }

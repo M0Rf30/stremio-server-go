@@ -66,6 +66,15 @@ Then point any Stremio client's **streaming server URL** at
 | `LOCAL_FILES_DIR` | _(unset)_ | directory scanned by the local-files addon |
 | `STREMIO_HWACCEL` | _(auto)_ | `0` forces software transcode; or pin `vaapi`/`nvenc`/… |
 | `STREMIO_HTTP_LOG` | _(off)_ | `1` logs each request (path only) |
+| `STREMIO_PROXY_PASSWORD` | _(unset)_ | `api_password` required on `/proxy/*` requests |
+| `STREMIO_PROXY_SECRET` | _(auto)_ | signing key for signed proxy URLs (auto-generated under `APP_PATH`) |
+| `STREMIO_PROXY_IP_ACL` | _(unset)_ | comma-separated CIDR allowlist for proxy clients |
+| `STREMIO_PROXY_PREBUFFER` | `3` | upcoming segments to prefetch (`0` = off) |
+| `STREMIO_PROXY_SEG_CACHE_TTL` | `300` | proxy segment cache TTL, seconds (`0` = off) |
+| `STREMIO_PROXY_PUBLIC_URL` | _(derive)_ | external base URL written into rewritten manifests |
+
+The stream proxy (HLS/DASH manifest rewriting, on-the-fly decryption, signed
+URLs) is documented in [docs/PROXY.md](docs/PROXY.md).
 
 ## Platforms
 
