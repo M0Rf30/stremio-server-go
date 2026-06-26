@@ -11,17 +11,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
-// Curated public trackers from ngosang/trackerslist (best list) plus a couple of
-// WebTorrent (wss) trackers so WebRTC peers can be discovered. The list is
-// refreshed from upstream at startup; this embedded snapshot is the fallback.
-const trackersBestURL = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
-
-// trackersWSURL is ngosang's dedicated WebSocket (WebTorrent/WebRTC) tracker
-// list. It is sparse upstream, so it supplements — never replaces — the curated
-// embedded wss set below.
-const trackersWSURL = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_ws.txt"
+// Curated public trackers from XIU2/TrackersListCollection (best list) plus a
+// few verified WebTorrent (wss) trackers so WebRTC peers can be discovered. The
+// list is refreshed from upstream at startup; this embedded snapshot is the
+// fallback.
+const trackersBestURL = "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt"
 
 // trackerTopN is the maximum number of ranked UDP/HTTP trackers to keep after probing.
 const trackerTopN = 20
@@ -32,6 +30,9 @@ const trackerRefreshIntv = 24 * time.Hour
 // probeHTTPTimeout / probeUDPTimeout mirror the reference tracker_prober.rs constants.
 const probeHTTPTimeout = 2 * time.Second
 const probeUDPTimeout = 1 * time.Second
+
+// probeWSTimeout bounds the WebSocket-tracker reachability handshake.
+const probeWSTimeout = 5 * time.Second
 
 // probeMaxRTT is the sentinel RTT assigned to failed probes so they sort last.
 const probeMaxRTT = time.Hour
@@ -50,9 +51,8 @@ var embeddedTrackers = []string{
 	"udp://explodie.org:6969/announce",
 	// WebTorrent (WebRTC) trackers for browser/webtorrent peers:
 	"wss://tracker.openwebtorrent.com",
-	"wss://tracker.btorrent.xyz:443",
 	"wss://tracker.webtorrent.dev",
-	"wss://tracker.files.fm:7073/announce",
+	"wss://tracker.btorrent.xyz",
 }
 
 var (
@@ -141,13 +141,6 @@ func doRefreshTrackers(cache string) {
 			probeable = append(probeable, u)
 		}
 	}
-	// Supplement with ngosang's WebSocket list so WebRTC peers have several
-	// discovery points (the best list is UDP/HTTP only).
-	for _, u := range fetchTrackerList(trackersWSURL) {
-		if strings.HasPrefix(u, "ws://") || strings.HasPrefix(u, "wss://") {
-			wss = append(wss, u)
-		}
-	}
 
 	// Probe and keep the fastest topN UDP/HTTP trackers.
 	ranked := rankAndKeep(probeable, trackerTopN)
@@ -155,8 +148,16 @@ func doRefreshTrackers(cache string) {
 	// Persist only the ranked UDP/HTTP list; wss are merged at runtime via mergeWS.
 	_ = os.WriteFile(cache, []byte(strings.Join(ranked, "\n")+"\n"), 0o644)
 
-	// Final set: ranked UDP/HTTP + all wss (fetched + embedded), deduped.
-	setTrackers(mergeWS(append(ranked, wss...)))
+	// Probe wss trackers (fetched + embedded) and keep only reachable ones so the
+	// client never wastes announces (or log noise) on dead WebTorrent trackers.
+	embeddedWSS := make([]string, 0, 4)
+	for _, t := range embeddedTrackers {
+		if strings.HasPrefix(t, "wss://") || strings.HasPrefix(t, "ws://") {
+			embeddedWSS = append(embeddedWSS, t)
+		}
+	}
+	liveWSS := rankWSS(append(wss, embeddedWSS...))
+	setTrackers(dedup(append(ranked, liveWSS...)))
 }
 
 // fetchTrackerList GETs a newline-delimited tracker list and returns the parsed
@@ -325,6 +326,65 @@ func mergeWS(t []string) []string {
 		if (strings.HasPrefix(ws, "wss://") || strings.HasPrefix(ws, "ws://")) && !have[ws] {
 			have[ws] = true
 			out = append(out, ws)
+		}
+	}
+	return out
+}
+
+// probeTrackerWS reports whether a WebSocket tracker completes the WS upgrade
+// handshake within probeWSTimeout. Dead or non-WebSocket endpoints are filtered
+// out so the client does not waste announces on them.
+func probeTrackerWS(rawURL string) bool {
+	d := websocket.Dialer{HandshakeTimeout: probeWSTimeout}
+	c, resp, err := d.Dial(rawURL, nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+// rankWSS probes WebSocket trackers in parallel and returns the reachable,
+// deduplicated subset.
+func rankWSS(list []string) []string {
+	seen := make(map[string]bool, len(list))
+	uniq := make([]string, 0, len(list))
+	for _, u := range list {
+		if (strings.HasPrefix(u, "wss://") || strings.HasPrefix(u, "ws://")) && !seen[u] {
+			seen[u] = true
+			uniq = append(uniq, u)
+		}
+	}
+	results := make([]bool, len(uniq))
+	var wg sync.WaitGroup
+	for i, u := range uniq {
+		wg.Add(1)
+		go func(idx int, url string) {
+			defer wg.Done()
+			results[idx] = probeTrackerWS(url)
+		}(i, u)
+	}
+	wg.Wait()
+	live := make([]string, 0, len(uniq))
+	for i, ok := range results {
+		if ok {
+			live = append(live, uniq[i])
+		}
+	}
+	return live
+}
+
+// dedup returns t with duplicate entries removed, preserving order.
+func dedup(t []string) []string {
+	have := make(map[string]bool, len(t))
+	out := make([]string, 0, len(t))
+	for _, x := range t {
+		if !have[x] {
+			have[x] = true
+			out = append(out, x)
 		}
 	}
 	return out

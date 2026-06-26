@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/anacrolix/torrent v1.61.0
+	github.com/gorilla/websocket v1.5.0
 	github.com/huin/goupnp v1.3.0
 	golang.org/x/sync v0.18.0
 	golang.org/x/time v0.14.0
@@ -43,7 +44,6 @@ require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.3 // indirect
 	github.com/mattn/go-isatty v0.0.16 // indirect
