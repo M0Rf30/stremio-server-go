@@ -65,7 +65,7 @@ func makeDefaults(cfg types.Config) map[string]interface{} {
 		"serverVersion":             cfg.Version,
 		"appPath":                   cfg.AppPath,
 		"cacheRoot":                 cfg.CacheRoot,
-		"cacheSize":                 int64(2147483648), // 2 GB
+		"cacheSize":                 int64(10737418240), // 10 GB (video-sized default; 2 GB churned on large torrents)
 		"btMaxConnections":          int(55),
 		"btHandshakeTimeout":        int(20000),
 		"btRequestTimeout":          int(4000),

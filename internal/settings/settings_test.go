@@ -28,7 +28,7 @@ func TestDefaults(t *testing.T) {
 	if vals["serverVersion"] != "4.21.0" {
 		t.Errorf("serverVersion = %v", vals["serverVersion"])
 	}
-	if vals["cacheSize"] != int64(2147483648) {
+	if vals["cacheSize"] != int64(10737418240) {
 		t.Errorf("cacheSize = %v (%T)", vals["cacheSize"], vals["cacheSize"])
 	}
 	if vals["transcodeProfile"] != nil {
