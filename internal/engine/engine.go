@@ -61,6 +61,7 @@ type engine struct {
 	last             speedSample
 	lastDLSpeed      float64          // cached bytes/sec from last Stats(); used for readahead scaling
 	selected         map[int]struct{} // file indices marked for background download
+	primed           map[int]struct{} // file indices whose moov/header pieces are primed (once each)
 	lastAccess       time.Time        // updated on NewReader/Stats; used by the janitor for LRU eviction
 	openReaders      int              // active NewReader handles; >0 pins the torrent against eviction
 	onceMetaPriority sync.Once        // ensures boundary-piece prioritization runs exactly once
@@ -564,6 +565,7 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	}
 	f := files[idx]
 	e.ensureDownloading(idx) // keep fetching the whole file, not just the read window
+	e.primeBoundary(idx)     // prioritize this file's moov so playback can start before full download
 	r := f.NewReader()
 
 	// Compute readahead = clamp(2 s × downloadRate, 16 MiB, 64 MiB).
@@ -879,33 +881,54 @@ func applyBoundaryPriorities(e *engine) {
 		if idx < 0 {
 			return
 		}
-		files := e.t.Files()
-		if idx >= len(files) {
-			return
-		}
-		f := files[idx]
-		begin := f.BeginPieceIndex()
-		end := f.EndPieceIndex() // exclusive
-
-		const boundaryPieces = 8 // ~8 pieces × piece_length ≈ several MiB
-
-		// Raise priority on the first boundary_pieces pieces (moov header).
-		for i := begin; i < begin+boundaryPieces && i < end; i++ {
-			e.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
-		}
-		// Raise priority on the last boundary_pieces pieces (chapter/moov tail).
-		tailStart := end - boundaryPieces
-		if tailStart < begin {
-			tailStart = begin // file has fewer than 2×boundaryPieces pieces
-		}
-		for i := tailStart; i < end; i++ {
-			e.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
-		}
-
-		log.Printf("engine: boundary-prioritized %d+%d pieces for %s (file idx %d, pieces [%d,%d))",
-			min(boundaryPieces, end-begin), min(boundaryPieces, end-tailStart),
-			e.infoHash, idx, begin, end)
+		e.primeBoundary(idx)
 	})
+}
+
+// primeBoundary raises piece priority on the first and last boundaryPieces pieces
+// of file idx — the container header (MP4 moov atom / codec-init box) and trailer
+// — so the player can parse the file and begin playback long before it is fully
+// downloaded. It runs at most once per file (guarded by e.primed) and requires
+// metadata to be available. Unlike the one-shot GuessFileIdx priming, this is also
+// called from NewReader for the file the client actually requested — essential for
+// multi-file torrents/packs where the played file is not the largest one, whose
+// header would otherwise never be prioritized and playback would never start.
+func (e *engine) primeBoundary(idx int) {
+	if idx < 0 || !e.hasInfo() {
+		return
+	}
+	e.mu.Lock()
+	if e.primed == nil {
+		e.primed = map[int]struct{}{}
+	}
+	if _, ok := e.primed[idx]; ok {
+		e.mu.Unlock()
+		return
+	}
+	e.primed[idx] = struct{}{}
+	e.mu.Unlock()
+
+	files := e.t.Files()
+	if idx >= len(files) {
+		return
+	}
+	f := files[idx]
+	begin := f.BeginPieceIndex()
+	end := f.EndPieceIndex() // exclusive
+	const boundaryPieces = 8 // ~8 pieces × piece_length ≈ several MiB
+	for i := begin; i < begin+boundaryPieces && i < end; i++ {
+		e.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
+	}
+	tailStart := end - boundaryPieces
+	if tailStart < begin {
+		tailStart = begin // file has fewer than 2×boundaryPieces pieces
+	}
+	for i := tailStart; i < end; i++ {
+		e.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
+	}
+	log.Printf("engine: boundary-prioritized %d+%d pieces for %s (file idx %d, pieces [%d,%d))",
+		min(boundaryPieces, end-begin), min(boundaryPieces, end-tailStart),
+		e.infoHash, idx, begin, end)
 }
 
 // min/max helpers for int and int64 (pre-Go 1.21 generics workaround; these
