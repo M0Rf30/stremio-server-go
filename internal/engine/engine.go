@@ -64,6 +64,7 @@ type engine struct {
 	primed           map[int]struct{} // file indices whose moov/header pieces are primed (once each)
 	lastAccess       time.Time        // updated on NewReader/Stats; used by the janitor for LRU eviction
 	openReaders      int              // active NewReader handles; >0 pins the torrent against eviction
+	reading          map[int]int      // file idx -> open reader count; a file with readers is never demoted
 	onceMetaPriority sync.Once        // ensures boundary-piece prioritization runs exactly once
 
 	// Announce-URL cache: refreshed at most once per annoTTL to avoid acquiring
@@ -74,25 +75,46 @@ type engine struct {
 	cachedOpts map[string]any // full Opts map; rebuilt when cachedURLs are refreshed
 }
 
-// ensureDownloading marks file idx for full background download (idempotent), so
-// the torrent keeps fetching it even when no reader is actively pulling — this is
-// what makes the download progress/stats climb like the official server.
+// ensureDownloading marks file idx for full background download and demotes any
+// previously-selected file that no longer has an open reader back to
+// PiecePriorityNone. Streaming clients read one file at a time; without this,
+// every file the user has ever clicked keeps downloading forever, so the
+// available bandwidth fragments across all of them and the file actually being
+// played cannot win its leading pieces — playback stalls even while the torrent
+// downloads fast. Files with a live reader are never demoted.
 func (e *engine) ensureDownloading(idx int) {
 	if idx < 0 {
+		return
+	}
+	files := e.t.Files()
+	if idx >= len(files) {
 		return
 	}
 	e.mu.Lock()
 	if e.selected == nil {
 		e.selected = map[int]struct{}{}
 	}
-	if _, ok := e.selected[idx]; ok {
-		e.mu.Unlock()
-		return
+	_, already := e.selected[idx]
+	demote := make([]int, 0, len(e.selected))
+	for i := range e.selected {
+		if i != idx && e.reading[i] == 0 {
+			demote = append(demote, i)
+			delete(e.selected, i)
+			delete(e.primed, i)
+		}
 	}
-	e.selected[idx] = struct{}{}
+	if !already {
+		e.selected[idx] = struct{}{}
+		delete(e.primed, idx) // (re)prime the moov of the file now being played
+	}
 	e.mu.Unlock()
-	files := e.t.Files()
-	if idx < len(files) {
+
+	for _, i := range demote {
+		if i < len(files) {
+			files[i].SetPriority(torrent.PiecePriorityNone)
+		}
+	}
+	if !already {
 		files[idx].Download()
 	}
 }
@@ -564,6 +586,13 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 		return nil, 0, fmt.Errorf("engine: file index %d out of range [0,%d)", idx, len(files))
 	}
 	f := files[idx]
+	e.mu.Lock()
+	e.openReaders++
+	if e.reading == nil {
+		e.reading = map[int]int{}
+	}
+	e.reading[idx]++
+	e.mu.Unlock()
 	e.ensureDownloading(idx) // keep fetching the whole file, not just the read window
 	e.primeBoundary(idx)     // prioritize this file's moov so playback can start before full download
 	r := f.NewReader()
@@ -584,10 +613,7 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 		readahead = scaled
 	}
 	r.SetReadahead(readahead)
-	e.mu.Lock()
-	e.openReaders++
-	e.mu.Unlock()
-	return &pinnedReader{ReadSeekCloser: r, e: e}, f.Length(), nil
+	return &pinnedReader{ReadSeekCloser: r, e: e, idx: idx}, f.Length(), nil
 }
 
 // pinnedReader wraps a torrent file reader so the engine's openReaders count is
@@ -597,6 +623,7 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 type pinnedReader struct {
 	io.ReadSeekCloser
 	e    *engine
+	idx  int
 	once sync.Once
 }
 
@@ -605,6 +632,9 @@ func (p *pinnedReader) Close() error {
 	p.once.Do(func() {
 		p.e.mu.Lock()
 		p.e.openReaders--
+		if p.e.reading[p.idx] > 0 {
+			p.e.reading[p.idx]--
+		}
 		p.e.mu.Unlock()
 	})
 	return err
