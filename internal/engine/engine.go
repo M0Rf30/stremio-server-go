@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	anacrolixlog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
@@ -165,6 +167,11 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	// Disable tracker announces when requested — avoids the upstream anacrolix tracker/udp
 	// data race in tests and suppresses network fetches in private/DHT-only mode.
 	cc.DisableTrackers = cfg.DisableTrackers
+
+	// Silence anacrolix's benign context-canceled reader ERROR spam (player
+	// seeks/disconnects and our background warm/prefetch cancellations) while
+	// preserving genuine errors and the existing log format.
+	cc.Slogger = slog.New(newReadCancelFilter(anacrolixlog.Default.SlogHandler()))
 
 	// Connection budgets tuned for streaming: enough peers for full throughput
 	// without excessive MSE/RC4 handshakes and dial churn, which are the dominant
