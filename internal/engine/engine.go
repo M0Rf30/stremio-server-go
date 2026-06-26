@@ -175,11 +175,12 @@ func New(cfg types.Config) (types.EngineManager, error) {
 
 	// Connection budgets tuned for streaming: enough peers for full throughput
 	// without excessive MSE/RC4 handshakes and dial churn, which are the dominant
-	// engine CPU cost on large, fast swarms (4K). These match anacrolix defaults
-	// (50/25) with a trimmed peer high-water; raise them only if throughput-bound.
-	cc.EstablishedConnsPerTorrent = 50
-	cc.HalfOpenConnsPerTorrent = 25
-	cc.TorrentPeersHighWater = 500
+	// engine CPU cost on large, fast swarms (4K). Scaled by STREMIO_PEERS_PER_TORRENT
+	// (cfg.PeersPerTorrent); default 0 keeps the historical 50/25/500 ratios.
+	est, half, high := peerBudget(cfg.PeersPerTorrent)
+	cc.EstablishedConnsPerTorrent = est
+	cc.HalfOpenConnsPerTorrent = half
+	cc.TorrentPeersHighWater = high
 
 	// Honor the documented contract: 0 = OS-assigned (random) port. anacrolix's
 	// NewDefaultClientConfig hardcodes 42069, so we must set it unconditionally
@@ -1245,4 +1246,14 @@ func max[T int | int64 | float64](a, b T) T {
 		return a
 	}
 	return b
+}
+
+// peerBudget derives the anacrolix per-torrent connection budget from a single
+// knob. n<=0 uses the default 50. half-open = n/2, high-water = n*10 — the same
+// ratios as the historical 50/25/500 defaults (peerBudget(0) == 50,25,500).
+func peerBudget(n int) (established, halfOpen, highWater int) {
+	if n <= 0 {
+		n = 50
+	}
+	return n, n / 2, n * 10
 }

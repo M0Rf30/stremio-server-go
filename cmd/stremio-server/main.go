@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -116,7 +117,24 @@ func main() {
 		TorznabAPIKey:     getenv("STREMIO_TORZNAB_APIKEY", ""),
 		DisableTrackers:   os.Getenv("STREMIO_DISABLE_TRACKERS") != "",   // disable all tracker announces (DHT/PEX/webseeds still used)
 		DisableWebtorrent: os.Getenv("STREMIO_DISABLE_WEBTORRENT") != "", // disable WebRTC/WebTorrent (pion) peers; cuts ~60% of goroutines & RAM
+		PeersPerTorrent:   envInt("STREMIO_PEERS_PER_TORRENT", 0),        // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
 	}
+
+	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also
+	// honors the native GOMEMLIMIT env). 0 = unset.
+	if lim := envInt64("STREMIO_MEM_LIMIT", 0); lim > 0 {
+		debug.SetMemoryLimit(lim)
+		log.Printf("runtime: soft memory limit %d bytes", lim)
+	}
+	// Return idle RSS high-water (freed goroutine stacks + scavenged heap from
+	// connection churn) to the OS periodically; cheap on a long-running server.
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			debug.FreeOSMemory()
+		}
+	}()
 
 	ss, err := settings.New(cfg)
 	if err != nil {

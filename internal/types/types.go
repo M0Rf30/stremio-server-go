@@ -24,6 +24,8 @@ type Config struct {
 	DisableTrackers bool
 	// disable WebTorrent/WebRTC peers (pion); cuts ~60% of goroutines + RAM, useful on RAM-constrained hosts; STREMIO_DISABLE_WEBTORRENT; default false
 	DisableWebtorrent bool
+	// established peer connections per torrent (scales half-open=n/2, high-water=n*10); STREMIO_PEERS_PER_TORRENT; 0 = default 50
+	PeersPerTorrent int
 
 	// Stream proxy configuration.
 	ProxyPassword    string // api_password for stream proxy; "" = no auth
