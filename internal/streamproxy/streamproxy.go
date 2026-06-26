@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,23 +18,36 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // Config holds the runtime configuration for the proxy handler.
 type Config struct {
-	Password    string        // api_password; "" disables password auth
-	Secret      []byte        // 32-byte key for signed-URL tokens (AES-GCM)
-	IPACL       []*net.IPNet  // client-IP allowlist; empty = allow all
-	Prebuffer   int           // upcoming segments to prefetch (0 = off)
-	SegCacheTTL time.Duration // segment cache TTL (0 = caching off)
-	PublicURL   string        // explicit external base; "" = derive from request
-	Client      *http.Client  // shared streaming HTTP client
+	Password      string        // api_password; "" disables password auth
+	Secret        []byte        // 32-byte key for signed-URL tokens (AES-GCM)
+	IPACL         []*net.IPNet  // client-IP allowlist; empty = allow all
+	Prebuffer     int           // upcoming segments to prefetch (0 = off)
+	SegCacheTTL   time.Duration // segment cache TTL (0 = caching off)
+	PublicURL     string        // explicit external base; "" = derive from request
+	Client        *http.Client  // shared streaming HTTP client
+	UpstreamProxy string        // global outbound proxy URL; "" = direct (socks5/http/https)
+}
+
+// ipCacheEntry holds a resolved public egress IP with an expiry timestamp.
+type ipCacheEntry struct {
+	ip        string
+	expiresAt time.Time
 }
 
 // Handler is the stream proxy request handler.
 type Handler struct {
-	cfg   Config
-	cache *segCache
+	cfg          Config
+	cache        *segCache
+	proxyMu      sync.Mutex
+	proxyClients map[string]*http.Client
+	ipMu         sync.Mutex
+	ipCache      map[string]ipCacheEntry
 }
 
 // New creates a Handler. A nil Client is replaced with http.DefaultClient.
@@ -45,7 +59,12 @@ func New(cfg Config) *Handler {
 	if cfg.SegCacheTTL > 0 {
 		c = newSegCache(cfg.SegCacheTTL, 256)
 	}
-	return &Handler{cfg: cfg, cache: c}
+	return &Handler{
+		cfg:          cfg,
+		cache:        c,
+		proxyClients: make(map[string]*http.Client),
+		ipCache:      make(map[string]ipCacheEntry),
+	}
 }
 
 // Options carries decoded proxy request parameters.
@@ -54,6 +73,7 @@ type Options struct {
 	ReqHeaders  http.Header
 	RespHeaders http.Header
 	APIPassword string
+	Proxy       string // per-request upstream proxy override (socks5/http/https)
 }
 
 // DecryptParams carries segment decryption parameters.
@@ -91,6 +111,9 @@ func (h *Handler) Route(w http.ResponseWriter, r *http.Request, seg []string) bo
 		} else {
 			http.Error(w, "MPD proxy not implemented", http.StatusNotImplemented)
 		}
+		return true
+	case "ip":
+		h.serveIP(w, r)
 		return true
 	default:
 		return false
@@ -180,11 +203,23 @@ func (h *Handler) parseOptions(r *http.Request) (*Options, error) {
 		}
 	}
 
+	// Validate proxy param: accept only socks5/socks5h/http/https schemes.
+	var proxyParam string
+	if raw := q.Get("proxy"); raw != "" {
+		if u, err := url.Parse(raw); err == nil {
+			switch u.Scheme {
+			case "socks5", "socks5h", "http", "https":
+				proxyParam = raw
+			}
+		}
+	}
+
 	opts := &Options{
 		Dest:        dest,
 		ReqHeaders:  make(http.Header),
 		RespHeaders: make(http.Header),
 		APIPassword: q.Get("api_password"),
+		Proxy:       proxyParam,
 	}
 	for k, vs := range q {
 		if after, ok := strings.CutPrefix(k, "h_"); ok {
@@ -229,8 +264,9 @@ func decodeKeyParam(s string) []byte {
 	return nil
 }
 
-// fetch performs an HTTP request using the configured client. Caller closes Body.
-func (h *Handler) fetch(ctx context.Context, method, rawurl string, hdr http.Header, body io.Reader) (*http.Response, error) {
+// fetch performs an HTTP request via the given upstream proxy (or the default
+// client when proxyURL is ""). Caller is responsible for closing the response Body.
+func (h *Handler) fetch(ctx context.Context, method, rawurl string, hdr http.Header, body io.Reader, proxyURL string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, rawurl, body)
 	if err != nil {
 		return nil, err
@@ -240,7 +276,7 @@ func (h *Handler) fetch(ctx context.Context, method, rawurl string, hdr http.Hea
 			req.Header.Add(k, v)
 		}
 	}
-	return h.cfg.Client.Do(req)
+	return h.clientFor(proxyURL).Do(req)
 }
 
 // externalBase returns the external base URL (no trailing slash).
@@ -278,6 +314,9 @@ func (h *Handler) buildProxyURL(extBase, endpoint, dest string, opts *Options) s
 		}
 		if opts.APIPassword != "" {
 			u += "&api_password=" + url.QueryEscape(opts.APIPassword)
+		}
+		if opts.Proxy != "" {
+			u += "&proxy=" + url.QueryEscape(opts.Proxy)
 		}
 	}
 	return u
@@ -408,11 +447,17 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Effective upstream proxy: per-request override takes priority over global config.
+	effProxy := opts.Proxy
+	if effProxy == "" {
+		effProxy = h.cfg.UpstreamProxy
+	}
+
 	// Decrypt path: fetch the full segment without a Range header, decrypt in
 	// memory, and respond 200 with the complete plaintext body.
 	if params.Method != "" && len(params.Key) > 0 {
 		if segmentDecryptor != nil {
-			resp, fetchErr := h.fetch(ctx, http.MethodGet, opts.Dest, upHdr, nil)
+			resp, fetchErr := h.fetch(ctx, http.MethodGet, opts.Dest, upHdr, nil, effProxy)
 			if fetchErr != nil {
 				http.Error(w, "upstream error", http.StatusBadGateway)
 				return
@@ -449,7 +494,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 
 	// Non-Range GET: use the segment cache when TTL is configured.
 	if r.Method == http.MethodGet && r.Header.Get("Range") == "" && h.cfg.SegCacheTTL > 0 {
-		data, respHdr, status, cErr := h.cachedFetch(ctx, opts.Dest, upHdr)
+		data, respHdr, status, cErr := h.cachedFetch(ctx, opts.Dest, upHdr, effProxy)
 		if cErr != nil {
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
@@ -464,7 +509,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Direct streaming path (Range requests, HEAD, or caching off).
-	resp, fetchErr := h.fetch(ctx, r.Method, opts.Dest, upHdr, nil)
+	resp, fetchErr := h.fetch(ctx, r.Method, opts.Dest, upHdr, nil, effProxy)
 	if fetchErr != nil {
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
@@ -584,4 +629,164 @@ func (h *Handler) ValidateDest(rawurl string) error {
 // Returns the same sentinel errors as authorize (errUnauthorized, errForbidden).
 func (h *Handler) Authorize(r *http.Request) error {
 	return h.authorize(r)
+}
+
+// ---------------------------------------------------------------------------
+// Upstream proxy client management
+// ---------------------------------------------------------------------------
+
+// clientFor returns an *http.Client whose transport routes outbound connections
+// through proxyURL. When proxyURL is "" the configured base client is returned
+// directly. Built clients are cached in h.proxyClients; on build error the base
+// client is returned and the error is logged once.
+func (h *Handler) clientFor(proxyURL string) *http.Client {
+	base := h.cfg.Client
+	if base == nil {
+		base = http.DefaultClient
+	}
+	if proxyURL == "" {
+		return base
+	}
+	h.proxyMu.Lock()
+	defer h.proxyMu.Unlock()
+	if c, ok := h.proxyClients[proxyURL]; ok {
+		return c
+	}
+	c, err := buildProxyClient(proxyURL)
+	if err != nil {
+		log.Printf("streamproxy: cannot build client for %q: %v; using default", proxyURL, err)
+		return base
+	}
+	h.proxyClients[proxyURL] = c
+	return c
+}
+
+// buildProxyClient constructs an *http.Client whose transport routes through
+// the given proxy URL (socks5/socks5h/http/https).
+func buildProxyClient(proxyURL string) (*http.Client, error) {
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse proxy URL: %w", err)
+	}
+	tr := &http.Transport{
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	switch u.Scheme {
+	case "socks5", "socks5h":
+		var auth *proxy.Auth
+		if u.User != nil {
+			pw, _ := u.User.Password()
+			auth = &proxy.Auth{User: u.User.Username(), Password: pw}
+		}
+		dialer, err := proxy.SOCKS5("tcp", u.Host, auth, proxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("SOCKS5 dialer: %w", err)
+		}
+		cd, ok := dialer.(proxy.ContextDialer)
+		if !ok {
+			return nil, fmt.Errorf("SOCKS5 dialer does not implement ContextDialer")
+		}
+		tr.DialContext = cd.DialContext
+	case "http", "https":
+		tr.Proxy = http.ProxyURL(u)
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme %q", u.Scheme)
+	}
+	return &http.Client{Transport: tr}, nil
+}
+
+// ---------------------------------------------------------------------------
+// /proxy/ip — egress IP discovery
+// ---------------------------------------------------------------------------
+
+// ipCacheTTL is how long a resolved egress IP is cached per effective proxy.
+const ipCacheTTL = 5 * time.Minute
+
+// ipServices is an ordered list of plain-text / JSON IP-echo endpoints.
+var ipServices = []string{
+	"https://api.ipify.org",
+	"https://checkip.amazonaws.com",
+}
+
+// serveIP handles GET /proxy/ip — returns the public egress IP as JSON.
+// The effective proxy (opts.Proxy or cfg.UpstreamProxy) is used to fetch.
+func (h *Handler) serveIP(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorize(r); err != nil {
+		writeAuthError(w, err)
+		return
+	}
+
+	// Determine effective proxy from the request query (same validation as parseOptions).
+	effProxy := ""
+	if raw := r.URL.Query().Get("proxy"); raw != "" {
+		if u, err := url.Parse(raw); err == nil {
+			switch u.Scheme {
+			case "socks5", "socks5h", "http", "https":
+				effProxy = raw
+			}
+		}
+	}
+	if effProxy == "" {
+		effProxy = h.cfg.UpstreamProxy
+	}
+
+	// Serve from cache when still fresh.
+	h.ipMu.Lock()
+	if e, ok := h.ipCache[effProxy]; ok && time.Now().Before(e.expiresAt) {
+		h.ipMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"ip": e.ip})
+		return
+	}
+	h.ipMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+
+	client := h.clientFor(effProxy)
+
+	var ipStr string
+	for _, svcURL := range ipServices {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, svcURL, nil)
+		if reqErr != nil {
+			continue
+		}
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64))
+		resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		candidate := strings.TrimSpace(string(body))
+		// Try JSON {"ip":"..."} before treating the body as plain text.
+		var j struct {
+			IP string `json:"ip"`
+		}
+		if json.Unmarshal(body, &j) == nil && j.IP != "" {
+			candidate = j.IP
+		}
+		if ip := net.ParseIP(candidate); ip != nil {
+			ipStr = ip.String()
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if ipStr == "" {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "could not determine egress IP"})
+		return
+	}
+
+	// Refresh the cache.
+	h.ipMu.Lock()
+	h.ipCache[effProxy] = ipCacheEntry{ip: ipStr, expiresAt: time.Now().Add(ipCacheTTL)}
+	h.ipMu.Unlock()
+
+	_ = json.NewEncoder(w).Encode(map[string]string{"ip": ipStr})
 }

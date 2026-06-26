@@ -1220,13 +1220,14 @@ func buildStreamProxyConfig(cfg types.Config) streamproxy.Config {
 	}
 
 	return streamproxy.Config{
-		Password:    cfg.ProxyPassword,
-		Secret:      secret,
-		IPACL:       ipACL,
-		Prebuffer:   cfg.ProxyPrebuffer,
-		SegCacheTTL: time.Duration(cfg.ProxySegCacheTTL) * time.Second,
-		PublicURL:   cfg.ProxyPublicURL,
-		Client:      proxyClient,
+		Password:      cfg.ProxyPassword,
+		Secret:        secret,
+		IPACL:         ipACL,
+		Prebuffer:     cfg.ProxyPrebuffer,
+		SegCacheTTL:   time.Duration(cfg.ProxySegCacheTTL) * time.Second,
+		PublicURL:     cfg.ProxyPublicURL,
+		Client:        proxyClient,
+		UpstreamProxy: cfg.ProxyUpstream,
 	}
 }
 

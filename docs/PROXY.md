@@ -26,6 +26,7 @@ proxied streams play in browser clients without extra configuration.
 | `GET` | `/proxy/stream` | Generic stream proxy with `Range`/seeking; decrypts when key params are present. The segment workhorse. |
 | `GET` | `/proxy/hls/manifest.m3u8` | Fetch + rewrite an HLS playlist. |
 | `GET` | `/proxy/mpd/manifest.m3u8` | Fetch + rewrite a DASH MPD. |
+| `GET` | `/proxy/ip` | Return the proxy's public egress IP as `{"ip":"<addr>"}`. Reflects any configured upstream proxy. Requires auth (same as other `/proxy/*` endpoints). Cached 5 minutes per proxy. |
 | `POST` | `/generate_url` | Mint a signed, expiring proxy URL. |
 | `GET` | `/base64/encode` / `/base64/check` | Encode/inspect a destination URL. |
 | `GET` | `/proxy/<opts>/<path>` | Legacy stremio-web forwarder (unchanged). |
@@ -38,12 +39,12 @@ proxied streams play in browser clients without extra configuration.
 | `h_<Name>` | Header sent to the upstream (e.g. `h_User-Agent=VLC`, `h_Referer=...`). |
 | `r_<Name>` | Header forced on the response (`Access-Control-*` is ignored). |
 | `api_password` | Required only when `STREMIO_PROXY_PASSWORD` is set. |
-| `token` | A signed token from `/generate_url` (alternative to `api_password`). |
 | `method`, `key`, `key_id`, `iv` | Decryption parameters (hex or base64). `method` is `AES-128`, `SAMPLE-AES`, `cenc`, or `cbcs`. |
+| `proxy` | Outbound upstream proxy for this request. Accepted schemes: `socks5`, `socks5h`, `http`, `https`. Example: `proxy=socks5://127.0.0.1:1080`. Ignored when the scheme is not one of the four above. |
 
-Manifest endpoints propagate `d`/`h_`/`r_`/`api_password` onto every rewritten
-child URL, so nested playlists, segments, and keys stay authorized and
-header-injected automatically.
+Manifest endpoints propagate `d`/`h_`/`r_`/`api_password`/`proxy` onto every rewritten
+child URL, so nested playlists, segments, and keys stay authorized, header-injected,
+and routed through the same upstream proxy automatically.
 
 ## Decryption
 
@@ -85,6 +86,7 @@ localhost-trust model).
 | `STREMIO_PROXY_PREBUFFER` | `3` | Number of upcoming segments to prefetch. `0` disables. |
 | `STREMIO_PROXY_SEG_CACHE_TTL` | `300` | Segment cache TTL in seconds. `0` disables caching. |
 | `STREMIO_PROXY_PUBLIC_URL` | _(derive)_ | External base URL written into rewritten manifests. Unset = derived from the request (`X-Forwarded-Proto`/`Host`). |
+| `STREMIO_PROXY_UPSTREAM` | _(unset)_ | Global outbound upstream proxy for all stream-proxy fetches. Overridden per-request by the `proxy` query param. Supported schemes: `socks5`, `socks5h`, `http`, `https`. Example: `socks5://user:pass@proxy.example:1080`. |
 
 `STREMIO_PROXY_PUBLIC_URL` matters behind a reverse proxy or on a hosted
 platform (e.g. a HuggingFace Space): set it to the externally reachable origin

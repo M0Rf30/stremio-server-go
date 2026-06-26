@@ -108,10 +108,10 @@ func (c *segCache) getFull(key string) *cacheEntry {
 
 // cachedFetch fetches rawurl, using the segment cache when configured.
 // Returns body, response headers, HTTP status, and any error.
-func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Header) ([]byte, http.Header, int, error) {
+func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Header, proxyURL string) ([]byte, http.Header, int, error) {
 	if h.cache == nil || h.cfg.SegCacheTTL == 0 {
 		// Caching disabled — fetch directly.
-		resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil)
+		resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil, proxyURL)
 		if err != nil {
 			return nil, nil, 0, err
 		}
@@ -134,7 +134,7 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 	}
 
 	// Cache miss — fetch, store, return.
-	resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil)
+	resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil, proxyURL)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -151,7 +151,7 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 
 // prefetch asynchronously warms the cache for up to cfg.Prebuffer URLs.
 // Errors are silently ignored. No-op when Prebuffer <= 0 or SegCacheTTL == 0.
-func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header) {
+func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header, proxyURL string) {
 	if h.cfg.Prebuffer <= 0 || h.cache == nil {
 		return
 	}
@@ -162,7 +162,7 @@ func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header) 
 	for _, u := range urls[:limit] {
 		u := u
 		go func() {
-			h.cachedFetch(ctx, u, hdr) //nolint:errcheck
+			h.cachedFetch(ctx, u, hdr, proxyURL) //nolint:errcheck
 		}()
 	}
 }

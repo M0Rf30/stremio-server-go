@@ -99,6 +99,7 @@ func main() {
 		ProxyPrebuffer:   envInt("STREMIO_PROXY_PREBUFFER", 3),
 		ProxySegCacheTTL: envInt("STREMIO_PROXY_SEG_CACHE_TTL", 300),
 		ProxyPublicURL:   getenv("STREMIO_PROXY_PUBLIC_URL", ""),
+		ProxyUpstream:    getenv("STREMIO_PROXY_UPSTREAM", ""),
 	}
 
 	ss, err := settings.New(cfg)

@@ -33,7 +33,11 @@ func dashServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden destination", http.StatusForbidden)
 		return
 	}
-	resp, err := h.fetch(r.Context(), http.MethodGet, opts.Dest, opts.ReqHeaders, nil)
+	effProxy := opts.Proxy
+	if effProxy == "" {
+		effProxy = h.cfg.UpstreamProxy
+	}
+	resp, err := h.fetch(r.Context(), http.MethodGet, opts.Dest, opts.ReqHeaders, nil, effProxy)
 	if err != nil {
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
 		return
@@ -82,6 +86,9 @@ func dashBuildTemplateURL(h *Handler, ext, abs string, opts *Options) string {
 		}
 		if opts.APIPassword != "" {
 			u += "&api_password=" + url.QueryEscape(opts.APIPassword)
+		}
+		if opts.Proxy != "" {
+			u += "&proxy=" + url.QueryEscape(opts.Proxy)
 		}
 	}
 	return u

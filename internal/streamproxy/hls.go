@@ -30,7 +30,11 @@ func hlsServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden destination", http.StatusForbidden)
 		return
 	}
-	resp, err := h.fetch(r.Context(), "GET", opts.Dest, opts.ReqHeaders, nil)
+	effProxy := opts.Proxy
+	if effProxy == "" {
+		effProxy = h.cfg.UpstreamProxy
+	}
+	resp, err := h.fetch(r.Context(), "GET", opts.Dest, opts.ReqHeaders, nil, effProxy)
 	if err != nil {
 		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
 		return
@@ -42,7 +46,7 @@ func hlsServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.cfg.Prebuffer > 0 {
-		h.prefetch(context.WithoutCancel(r.Context()), hlsSegmentURLs(opts.Dest, string(body), h.cfg.Prebuffer), opts.ReqHeaders)
+		h.prefetch(context.WithoutCancel(r.Context()), hlsSegmentURLs(opts.Dest, string(body), h.cfg.Prebuffer), opts.ReqHeaders, effProxy)
 	}
 	rewritten := hlsRewrite(h, r, opts, string(body))
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")

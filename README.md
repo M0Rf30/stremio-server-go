@@ -72,6 +72,7 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_PROXY_PREBUFFER` | `3` | upcoming segments to prefetch (`0` = off) |
 | `STREMIO_PROXY_SEG_CACHE_TTL` | `300` | proxy segment cache TTL, seconds (`0` = off) |
 | `STREMIO_PROXY_PUBLIC_URL` | _(derive)_ | external base URL written into rewritten manifests |
+| `STREMIO_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for stream proxy (socks5/http/https); overridden per-request by `&proxy=` |
 
 The stream proxy (HLS/DASH manifest rewriting, on-the-fly decryption, signed
 URLs) is documented in [docs/PROXY.md](docs/PROXY.md).

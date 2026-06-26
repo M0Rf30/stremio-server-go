@@ -6,6 +6,7 @@ require (
 	github.com/anacrolix/torrent v1.61.0
 	github.com/gorilla/websocket v1.5.0
 	github.com/huin/goupnp v1.3.0
+	golang.org/x/net v0.47.0
 	golang.org/x/sync v0.18.0
 	golang.org/x/time v0.14.0
 )
@@ -82,7 +83,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
 	golang.org/x/crypto v0.44.0 // indirect
 	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6 // indirect
-	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
