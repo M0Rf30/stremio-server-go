@@ -98,6 +98,41 @@ func parseTrackers(s string) []string {
 	return out
 }
 
+// announceableTrackers keeps only tracker URLs the anacrolix regular announce
+// dispatcher can build a client for. tracker.NewClient supports http(s) and
+// udp(4/6) only; ws:// and wss:// are served by the WebTorrent websocket
+// announcer, which exists only when WebTorrent is enabled. With WebTorrent
+// disabled a ws/wss URL falls through to tracker.NewClient → ErrBadScheme →
+// panicif.Err panic, so they (and any other unknown scheme) must be dropped
+// before being added to a torrent. Pass allowWS=true only when WebTorrent is on.
+func announceableTrackers(urls []string, allowWS bool) []string {
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
+		s := strings.ToLower(strings.TrimSpace(u))
+		switch {
+		case strings.HasPrefix(s, "http://"), strings.HasPrefix(s, "https://"),
+			strings.HasPrefix(s, "udp://"), strings.HasPrefix(s, "udp4://"),
+			strings.HasPrefix(s, "udp6://"):
+			out = append(out, u)
+		case allowWS && (strings.HasPrefix(s, "ws://") || strings.HasPrefix(s, "wss://")):
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// announceableTiers applies announceableTrackers to each announce-list tier,
+// dropping any tier left empty.
+func announceableTiers(tiers [][]string, allowWS bool) [][]string {
+	out := make([][]string, 0, len(tiers))
+	for _, tier := range tiers {
+		if f := announceableTrackers(tier, allowWS); len(f) > 0 {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // initTrackers loads a cached list immediately (if present) and launches a
 // background goroutine that fetches, probes, ranks, and re-persists the list.
 // The goroutine repeats every 24 h and stops when done is closed.

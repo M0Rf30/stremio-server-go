@@ -253,7 +253,7 @@ func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.En
 	m.mu.RLock()
 	if e, ok := m.engines[ih]; ok {
 		m.mu.RUnlock()
-		mergeTrackers(e.t, opts)
+		mergeTrackers(e.t, opts, !m.cfg.DisableWebtorrent)
 		return e, nil
 	}
 	m.mu.RUnlock()
@@ -263,7 +263,7 @@ func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.En
 	defer m.mu.Unlock()
 
 	if e, ok := m.engines[ih]; ok {
-		mergeTrackers(e.t, opts)
+		mergeTrackers(e.t, opts, !m.cfg.DisableWebtorrent)
 		return e, nil
 	}
 
@@ -278,6 +278,11 @@ func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.En
 		if miErr != nil {
 			return nil, fmt.Errorf("engine: parse metainfo for %s: %w", ih, miErr)
 		}
+		// Drop ws/wss (and any non-http(s)/udp) announces when WebTorrent is
+		// disabled; otherwise anacrolix's regular dispatcher panics on them.
+		allowWS := !m.cfg.DisableWebtorrent
+		mi.Announce = strings.Join(announceableTrackers([]string{mi.Announce}, allowWS), "")
+		mi.AnnounceList = announceableTiers(mi.AnnounceList, allowWS)
 		t, err = m.client.AddTorrent(mi)
 	} else {
 		// Only the info-hash is known; start with a plain magnet URI.
@@ -288,10 +293,10 @@ func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.En
 		return nil, fmt.Errorf("engine: add torrent %s: %w", ih, err)
 	}
 
-	mergeTrackers(t, opts)
+	mergeTrackers(t, opts, !m.cfg.DisableWebtorrent)
 	// Inject a baseline public-tracker list (like the official server) so bare /
 	// trackerless magnets still find peers instead of relying on DHT alone.
-	t.AddTrackers([][]string{getTrackers()})
+	t.AddTrackers([][]string{announceableTrackers(getTrackers(), !m.cfg.DisableWebtorrent)})
 
 	e := &engine{t: t, infoHash: ih, path: filepath.Join(m.cfg.CacheRoot, ih), lastAccess: time.Now()}
 	m.engines[ih] = e
@@ -1104,7 +1109,7 @@ func (e *engine) Stats(idx int) *types.Stats {
 
 // mergeTrackers adds tracker URLs from opts into t. It strips the "tracker:"
 // prefix from Sources entries and ignores "dht:" entries.
-func mergeTrackers(t *torrent.Torrent, opts types.AddOptions) {
+func mergeTrackers(t *torrent.Torrent, opts types.AddOptions, allowWS bool) {
 	var urls []string
 	for _, tr := range opts.Trackers {
 		tr = strings.TrimSpace(tr)
@@ -1127,6 +1132,9 @@ func mergeTrackers(t *torrent.Torrent, opts types.AddOptions) {
 	// {infoHash, announce, announce-list, files...}).
 	urls = append(urls, trackersFromTorrentJSON(opts.Torrent)...)
 
+	// Drop unannounceable schemes (ws/wss when WebTorrent is off) before adding;
+	// anacrolix synchronously builds a tracker client and panics on bad schemes.
+	urls = announceableTrackers(urls, allowWS)
 	if len(urls) > 0 {
 		// Each call to AddTrackers appends; duplicates are handled by anacrolix.
 		t.AddTrackers([][]string{urls})
