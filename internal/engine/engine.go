@@ -162,6 +162,9 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	cc.Seed = true               // keep uploading while/after streaming (swarm health; uses IPv6 inbound)
 	cc.AcceptPeerConnections = true
 	cc.DisableAcceptRateLimiting = false // rate-limit inbound accepts to bound connection-handling CPU
+	// Disable tracker announces when requested — avoids the upstream anacrolix tracker/udp
+	// data race in tests and suppresses network fetches in private/DHT-only mode.
+	cc.DisableTrackers = cfg.DisableTrackers
 
 	// Connection budgets tuned for streaming: enough peers for full throughput
 	// without excessive MSE/RC4 handshakes and dial churn, which are the dominant
@@ -213,7 +216,10 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	done := make(chan struct{})
 
 	// Load curated trackers (cached) and refresh + rank from upstream in the background.
-	initTrackers(cfg.CacheRoot, cfg.TrackersMax, done)
+	// Skip tracker list fetch when announces are disabled (tests / private mode).
+	if !cfg.DisableTrackers {
+		initTrackers(cfg.CacheRoot, cfg.TrackersMax, done)
+	}
 
 	return &manager{
 		client:      client,

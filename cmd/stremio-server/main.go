@@ -114,6 +114,7 @@ func main() {
 		BitmagnetURL:     getenv("STREMIO_BITMAGNET_URL", ""),
 		TorznabURL:       getenv("STREMIO_TORZNAB_URL", ""),
 		TorznabAPIKey:    getenv("STREMIO_TORZNAB_APIKEY", ""),
+		DisableTrackers:  os.Getenv("STREMIO_DISABLE_TRACKERS") != "", // disable all tracker announces (DHT/PEX/webseeds still used)
 	}
 
 	ss, err := settings.New(cfg)

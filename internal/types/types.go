@@ -20,6 +20,8 @@ type Config struct {
 	WebUI           string // redirect target for "GET /" (e.g. https://web.stremio.com/)
 	Version         string // value reported as settings.serverVersion
 	TrackersMax     int    // max ranked UDP/HTTP trackers per torrent (STREMIO_TRACKERS_MAX; 0 = default)
+	// disable ALL BitTorrent tracker announces (DHT/PEX/webseeds still used); STREMIO_DISABLE_TRACKERS; default false
+	DisableTrackers bool
 
 	// Stream proxy configuration.
 	ProxyPassword    string // api_password for stream proxy; "" = no auth
