@@ -21,8 +21,12 @@ import (
 // fallback.
 const trackersBestURL = "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt"
 
-// trackerTopN is the maximum number of ranked UDP/HTTP trackers to keep after probing.
-const trackerTopN = 20
+// trackerTopN is the maximum number of ranked UDP/HTTP trackers attached per
+// torrent. Kept small: anacrolix's announce dispatcher does work proportional to
+// (torrents x trackers) and recomputes bytesLeft over every piece per announce,
+// so a large list dominates CPU on big 4K torrents. DHT + PEX + webseeds cover
+// peer discovery; a handful of fast trackers is plenty for streaming.
+const trackerTopN = 8
 
 // trackerRefreshIntv is how often the tracker list is re-fetched and re-ranked.
 const trackerRefreshIntv = 24 * time.Hour
