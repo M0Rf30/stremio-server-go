@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -254,9 +255,15 @@ func newHLS() *hlsManager {
 	if n < 1 {
 		n = 1
 	}
+	enc := selectEncoder()
+	if enc.isHW {
+		log.Printf("media: HLS transcode using hardware encoder %q (device %q)", enc.codec, enc.driDevice)
+	} else {
+		log.Printf("media: HLS transcode using SOFTWARE encoder %q — no hardware acceleration active; expect high CPU. Set STREMIO_HWACCEL=vaapi (Intel/AMD on Linux) and ensure /dev/dri access, or pass --device /dev/dri in a container.", enc.codec)
+	}
 	m := &hlsManager{
 		base:         base,
-		enc:          selectEncoder(),
+		enc:          enc,
 		sessions:     map[string]*hlsSession{},
 		probeCache:   map[string]probeCacheEntry{},
 		transcodeSem: make(chan struct{}, n),
