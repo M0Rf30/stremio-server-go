@@ -75,6 +75,7 @@ Then point any Stremio client's **streaming server URL** at
 | `HTTPS_PORT` | `12470` | self-signed / provisioned HTTPS port (`0` disables) |
 | `BT_LISTEN_PORT` | `0` | BitTorrent peer port (`0` = OS-assigned) |
 | `APP_PATH` | `~/.stremio-server` | data/cache root |
+| `STREMIO_MEMORY_CACHE_SIZE` | `0` | in-RAM piece-cache budget in bytes; `0` writes pieces to disk (default). When `>0`, stream through a bounded RAM cache and never write piece data to disk (mobile / low-disk / HuggingFace). |
 | `WEB_UI_LOCATION` | `https://web.stremio.com/` | redirect target for `GET /` |
 | `LOCAL_FILES_DIR` | _(unset)_ | directory scanned by the local-files addon |
 | `STREMIO_HWACCEL` | _(auto)_ | `0` forces software transcode; or pin `vaapi`/`nvenc`/… |

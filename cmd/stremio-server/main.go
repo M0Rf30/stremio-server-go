@@ -52,6 +52,16 @@ func envInt(key string, def int) int {
 	return def
 }
 
+func envInt64(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+		log.Printf("env %s: invalid integer %q, using default %d", key, v, def)
+	}
+	return def
+}
+
 // @title        stremio-server-go enginefs API
 // @version      4.21.0
 // @description  HTTP API served by stremio-server-go, a pure-Go drop-in for Stremio's streaming server (server.js). serverVersion is reported as 4.21.0 for client feature-gating; it is independent of the binary build version.
@@ -89,6 +99,7 @@ func main() {
 		HTTPSPort:        envInt("HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
 		AppPath:          appPath,
 		CacheRoot:        appPath,
+		MemoryCacheSize:  envInt64("STREMIO_MEMORY_CACHE_SIZE", 0), // bytes; 0 = disabled (write pieces to disk)
 		ListenPort:       envInt("BT_LISTEN_PORT", 0),
 		WebUI:            getenv("WEB_UI_LOCATION", "https://web.stremio.com/"),
 		Version:          version,

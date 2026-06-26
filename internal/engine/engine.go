@@ -128,6 +128,11 @@ type manager struct {
 	downLimiter *rate.Limiter // shared pointer in cc.DownloadRateLimiter; updated by SetLimitFn
 	upLimiter   *rate.Limiter // shared pointer in cc.UploadRateLimiter; updated by SetLimitFn
 
+	// memStorage is non-nil only when the opt-in in-RAM piece cache is active
+	// (Config.MemoryCacheSize > 0). anacrolix does not Close a user-provided
+	// DefaultStorage, so the manager owns closing it (see Close).
+	memStorage io.Closer
+
 	mu        sync.RWMutex
 	engines   map[string]*engine // keyed by lower-cased infoHash
 	done      chan struct{}      // closed by Close() to stop background goroutines
@@ -171,8 +176,22 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	// or two instances (and the test suite) collide on that port.
 	cc.ListenPort = cfg.ListenPort
 
-	// File storage partitioned by info-hash so torrents don't collide.
-	cc.DefaultStorage = storage.NewFileByInfoHash(cfg.CacheRoot)
+	// Storage backend. Default (MemoryCacheSize == 0): file storage partitioned
+	// by info-hash so torrents don't collide on disk. Opt-in: a bounded in-RAM
+	// backend that never writes piece data to disk (mobile/Termux/low-disk/
+	// HuggingFace). The mem backend is a ClientImplCloser; anacrolix only closes
+	// the default storage it creates itself, never a provided one, so the manager
+	// closes it (see Close).
+	var memStorageCloser io.Closer
+	if cfg.MemoryCacheSize > 0 {
+		ms := newMemStorage(cfg.MemoryCacheSize)
+		cc.DefaultStorage = ms
+		memStorageCloser = ms
+		log.Printf("engine: in-RAM piece cache enabled (%d bytes); piece data is NOT written to disk", cfg.MemoryCacheSize)
+	} else {
+		cc.DefaultStorage = storage.NewFileByInfoHash(cfg.CacheRoot)
+		log.Printf("engine: disk piece cache at %s", cfg.CacheRoot)
+	}
 
 	// Bandwidth rate limiters — start unlimited; SetLimitFn() adjusts them live.
 	// We keep the *rate.Limiter pointers so we can call SetLimit/SetBurst without
@@ -203,6 +222,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		upLimiter:   upLimiter,
 		engines:     make(map[string]*engine),
 		done:        done,
+		memStorage:  memStorageCloser,
 	}, nil
 }
 
@@ -344,6 +364,11 @@ func (m *manager) AllStats() map[string]*types.Stats {
 func (m *manager) Close() error {
 	m.closeOnce.Do(func() { close(m.done) })
 	m.client.Close()
+	if m.memStorage != nil {
+		if err := m.memStorage.Close(); err != nil {
+			log.Printf("engine: closing in-RAM piece cache: %v", err)
+		}
+	}
 	return nil
 }
 
