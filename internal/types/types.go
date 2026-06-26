@@ -28,6 +28,9 @@ type Config struct {
 	ProxySegCacheTTL int    // segment cache TTL in seconds (0 = caching off)
 	ProxyPublicURL   string // explicit external base URL for proxy; "" = derive
 	ProxyUpstream    string // global upstream proxy for stream-proxy fetches; "" = direct (STREMIO_PROXY_UPSTREAM; socks5/http)
+
+	// Bitmagnet integration (self-hosted DHT index).
+	BitmagnetURL string // GraphQL endpoint, e.g. http://localhost:3333/graphql; "" disables stream queries
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.

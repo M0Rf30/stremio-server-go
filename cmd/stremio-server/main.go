@@ -100,6 +100,7 @@ func main() {
 		ProxySegCacheTTL: envInt("STREMIO_PROXY_SEG_CACHE_TTL", 300),
 		ProxyPublicURL:   getenv("STREMIO_PROXY_PUBLIC_URL", ""),
 		ProxyUpstream:    getenv("STREMIO_PROXY_UPSTREAM", ""),
+		BitmagnetURL:     getenv("STREMIO_BITMAGNET_URL", ""),
 	}
 
 	ss, err := settings.New(cfg)

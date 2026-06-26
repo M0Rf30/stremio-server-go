@@ -191,6 +191,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleYT(w, r, seg[1])
 	case "local-addon":
 		s.handleLocalAddon(w, r, seg)
+	case "bitmagnet":
+		s.handleBitmagnet(w, r, seg)
 	case "thumb.jpg":
 		http.NotFound(w, r) // no thumbnail service; cosmetic 404
 	case "metrics":
