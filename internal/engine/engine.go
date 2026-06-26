@@ -65,6 +65,7 @@ type engine struct {
 	lastAccess       time.Time        // updated on NewReader/Stats; used by the janitor for LRU eviction
 	openReaders      int              // active NewReader handles; >0 pins the torrent against eviction
 	reading          map[int]int      // file idx -> open reader count; a file with readers is never demoted
+	tailWarmed       map[int]struct{} // file idx -> tail (moov) actively pre-read once, to beat front starvation
 	onceMetaPriority sync.Once        // ensures boundary-piece prioritization runs exactly once
 
 	// Announce-URL cache: refreshed at most once per annoTTL to avoid acquiring
@@ -595,6 +596,7 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	e.mu.Unlock()
 	e.ensureDownloading(idx) // keep fetching the whole file, not just the read window
 	e.primeBoundary(idx)     // prioritize this file's moov so playback can start before full download
+	e.warmMoov(idx)          // pre-read the tail so the moov (end of non-faststart MP4) downloads in parallel
 	r := f.NewReader()
 
 	// Compute readahead = clamp(2 s × downloadRate, 16 MiB, 64 MiB).
@@ -614,6 +616,58 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	}
 	r.SetReadahead(readahead)
 	return &pinnedReader{ReadSeekCloser: r, e: e, idx: idx}, f.Length(), nil
+}
+
+// warmMoov forces a file's trailing bytes to download by opening a dedicated
+// reader on the last few MiB and draining it, in parallel with the main stream.
+// Non-faststart MP4s (e.g. most RARBG encodes) keep the moov atom — the index a
+// player must read before it can start — at the END of the file. primeBoundary
+// marks those pieces top-priority, but within equal priority the actively-read
+// front wins, so the moov trickles in last and playback stalls for a long time
+// even while the torrent downloads fast. An active tail read gives the moov real
+// demand so it arrives alongside the header. Runs once per file. This is the
+// anacrolix equivalent of qBittorrent's "download first and last piece first"
+// and Elementum's start/end buffering.
+func (e *engine) warmMoov(idx int) {
+	if idx < 0 || !e.hasInfo() {
+		return
+	}
+	e.mu.Lock()
+	if e.tailWarmed == nil {
+		e.tailWarmed = map[int]struct{}{}
+	}
+	if _, ok := e.tailWarmed[idx]; ok {
+		e.mu.Unlock()
+		return
+	}
+	e.tailWarmed[idx] = struct{}{}
+	e.mu.Unlock()
+
+	files := e.t.Files()
+	if idx >= len(files) {
+		return
+	}
+	f := files[idx]
+	const tailWindow int64 = 8 << 20 // 8 MiB — covers the moov atom of typical videos
+	off := f.Length() - tailWindow
+	if off < 0 {
+		off = 0
+	}
+	go func() {
+		r := f.NewReader()
+		defer func() { _ = r.Close() }()
+		r.SetReadahead(tailWindow)
+		if _, err := r.Seek(off, io.SeekStart); err != nil {
+			return
+		}
+		buf := make([]byte, 64<<10)
+		for {
+			n, err := r.Read(buf) // blocks until pieces arrive; errors when the torrent is dropped
+			if n == 0 || err != nil {
+				return
+			}
+		}
+	}()
 }
 
 // pinnedReader wraps a torrent file reader so the engine's openReaders count is
