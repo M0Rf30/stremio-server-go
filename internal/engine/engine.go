@@ -62,6 +62,7 @@ type engine struct {
 	lastDLSpeed      float64          // cached bytes/sec from last Stats(); used for readahead scaling
 	selected         map[int]struct{} // file indices marked for background download
 	lastAccess       time.Time        // updated on NewReader/Stats; used by the janitor for LRU eviction
+	openReaders      int              // active NewReader handles; >0 pins the torrent against eviction
 	onceMetaPriority sync.Once        // ensures boundary-piece prioritization runs exactly once
 
 	// Announce-URL cache: refreshed at most once per annoTTL to avoid acquiring
@@ -410,9 +411,10 @@ func (m *manager) evict(budget int64) {
 	// subdirectories. This replaces N separate WalkDir calls (one per engine)
 	// with one pass, reducing inode pressure on every janitor tick.
 	type entry struct {
-		e          *engine
-		size       int64
-		lastAccess time.Time
+		e           *engine
+		size        int64
+		lastAccess  time.Time
+		openReaders int
 	}
 	dirSizes := make(map[string]int64, len(snap))
 	_ = filepath.WalkDir(m.cfg.CacheRoot, func(path string, d fs.DirEntry, err error) error {
@@ -439,9 +441,10 @@ func (m *manager) evict(budget int64) {
 	for _, e := range snap {
 		e.mu.Lock()
 		la := e.lastAccess
+		or := e.openReaders
 		e.mu.Unlock()
 		sz := dirSizes[e.infoHash]
-		entries = append(entries, entry{e: e, size: sz, lastAccess: la})
+		entries = append(entries, entry{e: e, size: sz, lastAccess: la, openReaders: or})
 		total += sz
 	}
 
@@ -458,7 +461,7 @@ func (m *manager) evict(budget int64) {
 	now := time.Now()
 	for i := 0; i < len(entries)-1 && total > budget; i++ {
 		ent := entries[i]
-		if now.Sub(ent.lastAccess) < graceWindow {
+		if ent.openReaders > 0 || now.Sub(ent.lastAccess) < graceWindow {
 			// Actively streaming or recently accessed — never evict.
 			continue
 		}
@@ -471,6 +474,16 @@ func (m *manager) evict(budget int64) {
 		if m.engines[ih] != ent.e {
 			m.mu.Unlock()
 			continue // already removed or replaced by a concurrent caller
+		}
+		// Re-check under the write lock: a reader may have opened since the
+		// snapshot. Closes the snapshot->Drop race so a live stream is never
+		// closed out from under its HTTP reader. Lock order m.mu -> e.mu.
+		ent.e.mu.Lock()
+		pinned := ent.e.openReaders > 0
+		ent.e.mu.Unlock()
+		if pinned {
+			m.mu.Unlock()
+			continue
 		}
 		ent.e.t.Drop()
 		delete(m.engines, ih)
@@ -569,7 +582,30 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 		readahead = scaled
 	}
 	r.SetReadahead(readahead)
-	return r, f.Length(), nil
+	e.mu.Lock()
+	e.openReaders++
+	e.mu.Unlock()
+	return &pinnedReader{ReadSeekCloser: r, e: e}, f.Length(), nil
+}
+
+// pinnedReader wraps a torrent file reader so the engine's openReaders count is
+// decremented exactly once on Close. While openReaders > 0 the janitor will not
+// evict the torrent, so an open stream is never dropped mid-read even when it is
+// paused or idle past the graceWindow.
+type pinnedReader struct {
+	io.ReadSeekCloser
+	e    *engine
+	once sync.Once
+}
+
+func (p *pinnedReader) Close() error {
+	err := p.ReadSeekCloser.Close()
+	p.once.Do(func() {
+		p.e.mu.Lock()
+		p.e.openReaders--
+		p.e.mu.Unlock()
+	})
+	return err
 }
 
 // GuessFileIdx returns the index of the largest video file, falling back to the
