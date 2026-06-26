@@ -19,12 +19,13 @@ const knownHash = "08ada5a7a6183aae1e09d831df6748d566095a10"
 func newTestCfg(t *testing.T) types.Config {
 	t.Helper()
 	return types.Config{
-		HTTPPort:        0,
-		ListenPort:      0, // OS-assigned
-		AppPath:         t.TempDir(),
-		CacheRoot:       t.TempDir(),
-		Version:         "4.21.0",
-		DisableTrackers: true, // avoid upstream anacrolix tracker/udp -race flake in tests
+		HTTPPort:          0,
+		ListenPort:        0, // OS-assigned
+		AppPath:           t.TempDir(),
+		CacheRoot:         t.TempDir(),
+		Version:           "4.21.0",
+		DisableTrackers:   true, // avoid upstream anacrolix tracker/udp -race flake in tests
+		DisableWebtorrent: true, // avoid spawning pion goroutines in unit tests
 	}
 }
 

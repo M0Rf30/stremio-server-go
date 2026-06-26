@@ -95,26 +95,27 @@ func main() {
 	}
 
 	cfg := types.Config{
-		HTTPPort:         envInt("HTTP_PORT", 11470),
-		HTTPSPort:        envInt("HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
-		AppPath:          appPath,
-		CacheRoot:        appPath,
-		MemoryCacheSize:  envInt64("STREMIO_MEMORY_CACHE_SIZE", 0), // bytes; 0 = disabled (write pieces to disk)
-		ListenPort:       envInt("BT_LISTEN_PORT", 0),
-		WebUI:            getenv("WEB_UI_LOCATION", "https://web.stremio.com/"),
-		Version:          version,
-		TrackersMax:      envInt("STREMIO_TRACKERS_MAX", 5),
-		ProxyPassword:    getenv("STREMIO_PROXY_PASSWORD", ""),
-		ProxySecret:      proxySecret(appPath),
-		ProxyIPACL:       getenv("STREMIO_PROXY_IP_ACL", ""),
-		ProxyPrebuffer:   envInt("STREMIO_PROXY_PREBUFFER", 3),
-		ProxySegCacheTTL: envInt("STREMIO_PROXY_SEG_CACHE_TTL", 300),
-		ProxyPublicURL:   getenv("STREMIO_PROXY_PUBLIC_URL", ""),
-		ProxyUpstream:    getenv("STREMIO_PROXY_UPSTREAM", ""),
-		BitmagnetURL:     getenv("STREMIO_BITMAGNET_URL", ""),
-		TorznabURL:       getenv("STREMIO_TORZNAB_URL", ""),
-		TorznabAPIKey:    getenv("STREMIO_TORZNAB_APIKEY", ""),
-		DisableTrackers:  os.Getenv("STREMIO_DISABLE_TRACKERS") != "", // disable all tracker announces (DHT/PEX/webseeds still used)
+		HTTPPort:          envInt("HTTP_PORT", 11470),
+		HTTPSPort:         envInt("HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
+		AppPath:           appPath,
+		CacheRoot:         appPath,
+		MemoryCacheSize:   envInt64("STREMIO_MEMORY_CACHE_SIZE", 0), // bytes; 0 = disabled (write pieces to disk)
+		ListenPort:        envInt("BT_LISTEN_PORT", 0),
+		WebUI:             getenv("WEB_UI_LOCATION", "https://web.stremio.com/"),
+		Version:           version,
+		TrackersMax:       envInt("STREMIO_TRACKERS_MAX", 5),
+		ProxyPassword:     getenv("STREMIO_PROXY_PASSWORD", ""),
+		ProxySecret:       proxySecret(appPath),
+		ProxyIPACL:        getenv("STREMIO_PROXY_IP_ACL", ""),
+		ProxyPrebuffer:    envInt("STREMIO_PROXY_PREBUFFER", 3),
+		ProxySegCacheTTL:  envInt("STREMIO_PROXY_SEG_CACHE_TTL", 300),
+		ProxyPublicURL:    getenv("STREMIO_PROXY_PUBLIC_URL", ""),
+		ProxyUpstream:     getenv("STREMIO_PROXY_UPSTREAM", ""),
+		BitmagnetURL:      getenv("STREMIO_BITMAGNET_URL", ""),
+		TorznabURL:        getenv("STREMIO_TORZNAB_URL", ""),
+		TorznabAPIKey:     getenv("STREMIO_TORZNAB_APIKEY", ""),
+		DisableTrackers:   os.Getenv("STREMIO_DISABLE_TRACKERS") != "",   // disable all tracker announces (DHT/PEX/webseeds still used)
+		DisableWebtorrent: os.Getenv("STREMIO_DISABLE_WEBTORRENT") != "", // disable WebRTC/WebTorrent (pion) peers; cuts ~60% of goroutines & RAM
 	}
 
 	ss, err := settings.New(cfg)

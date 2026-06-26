@@ -16,11 +16,12 @@ import (
 // out from under its HTTP reader.
 func TestEvictSkipsOpenReaders(t *testing.T) {
 	cfg := types.Config{
-		AppPath:         t.TempDir(),
-		CacheRoot:       t.TempDir(),
-		ListenPort:      0, // OS-assigned
-		Version:         "test",
-		DisableTrackers: true, // avoid upstream anacrolix tracker/udp -race flake in tests
+		AppPath:           t.TempDir(),
+		CacheRoot:         t.TempDir(),
+		ListenPort:        0, // OS-assigned
+		Version:           "test",
+		DisableTrackers:   true, // avoid upstream anacrolix tracker/udp -race flake in tests
+		DisableWebtorrent: true, // avoid spawning pion goroutines in unit tests
 	}
 	em, err := New(cfg)
 	if err != nil {

@@ -158,10 +158,10 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	cc.DisableTCP = false
 
 	// Maximize peer sourcing + feature set.
-	cc.DisablePEX = false        // BEP11 peer exchange
-	cc.DisableWebtorrent = false // WebRTC/WebTorrent peers (needs wss trackers)
-	cc.DisableWebseeds = false   // BEP19 HTTP webseeds
-	cc.Seed = true               // keep uploading while/after streaming (swarm health; uses IPv6 inbound)
+	cc.DisablePEX = false                        // BEP11 peer exchange
+	cc.DisableWebtorrent = cfg.DisableWebtorrent // WebRTC/WebTorrent peers (pion); gated by STREMIO_DISABLE_WEBTORRENT
+	cc.DisableWebseeds = false                   // BEP19 HTTP webseeds
+	cc.Seed = true                               // keep uploading while/after streaming (swarm health; uses IPv6 inbound)
 	cc.AcceptPeerConnections = true
 	cc.DisableAcceptRateLimiting = false // rate-limit inbound accepts to bound connection-handling CPU
 	// Disable tracker announces when requested — avoids the upstream anacrolix tracker/udp

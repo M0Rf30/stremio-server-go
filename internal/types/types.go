@@ -22,6 +22,8 @@ type Config struct {
 	TrackersMax     int    // max ranked UDP/HTTP trackers per torrent (STREMIO_TRACKERS_MAX; 0 = default)
 	// disable ALL BitTorrent tracker announces (DHT/PEX/webseeds still used); STREMIO_DISABLE_TRACKERS; default false
 	DisableTrackers bool
+	// disable WebTorrent/WebRTC peers (pion); cuts ~60% of goroutines + RAM, useful on RAM-constrained hosts; STREMIO_DISABLE_WEBTORRENT; default false
+	DisableWebtorrent bool
 
 	// Stream proxy configuration.
 	ProxyPassword    string // api_password for stream proxy; "" = no auth
