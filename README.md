@@ -23,6 +23,7 @@ Not affiliated with or endorsed by Stremio.
   **YouTube** (`/yt`, via `yt-dlp`), and **`/get-https`** (Stremio cert provisioning).
 - **Disk-bounded cache** - LRU eviction honouring the `cacheSize` setting.
 - Self-signed HTTPS on `:12470` for HTTPS web UIs (e.g. WebKitGTK shells).
+- **Metrics** - `GET /metrics` exposes Prometheus-format gauges (goroutines, heap, active torrents, HLS sessions, proxy cache).
 
 ## Install
 

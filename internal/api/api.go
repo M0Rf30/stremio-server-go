@@ -193,6 +193,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleLocalAddon(w, r, seg)
 	case "thumb.jpg":
 		http.NotFound(w, r) // no thumbnail service; cosmetic 404
+	case "metrics":
+		s.handleMetrics(w, r)
 	default:
 		if strings.HasPrefix(seg[0], "subtitles.") {
 			s.handleSubtitles(w, r, strings.TrimPrefix(seg[0], "subtitles."))
@@ -243,6 +245,67 @@ func (s *server) handleDeviceInfo(w http.ResponseWriter, _ *http.Request) {
 // @Router      /heartbeat [get]
 func (s *server) handleHeartbeat(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// handleMetrics serves GET /metrics in Prometheus text exposition format (v0.0.4).
+// No authentication and no CORS headers: the endpoint is intended for
+// localhost-trust scraping (e.g. a Prometheus instance on the same host).
+//
+// @Summary  Prometheus-format runtime and app gauges
+// @Tags     System
+// @Produce  text/plain
+// @Success  200  {string}  string  "Prometheus text exposition"
+// @Router   /metrics [get]
+func (s *server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+
+	var b strings.Builder
+
+	writeGauge := func(name, help string, value float64) {
+		fmt.Fprintf(&b, "# HELP %s %s\n", name, help)
+		fmt.Fprintf(&b, "# TYPE %s gauge\n", name)
+		fmt.Fprintf(&b, "%s %g\n", name, value)
+	}
+
+	// Runtime gauges
+	writeGauge("stremio_goroutines",
+		"Current number of goroutines.",
+		float64(runtime.NumGoroutine()))
+	writeGauge("stremio_memstats_alloc_bytes",
+		"Bytes of allocated heap objects (runtime.MemStats.Alloc).",
+		float64(ms.Alloc))
+	writeGauge("stremio_memstats_sys_bytes",
+		"Total bytes of memory obtained from the OS (runtime.MemStats.Sys).",
+		float64(ms.Sys))
+
+	// App gauges — structural assertions keep the api package interface-clean.
+	torrents := 0
+	if v, ok := s.em.(interface{ NumTorrents() int }); ok {
+		torrents = v.NumTorrents()
+	}
+	writeGauge("stremio_torrents_active",
+		"Number of active torrent engines.",
+		float64(torrents))
+
+	hlsSessions := 0
+	if v, ok := s.prober.(interface{ HLSSessions() int }); ok {
+		hlsSessions = v.HLSSessions()
+	}
+	writeGauge("stremio_hls_sessions",
+		"Number of active HLS transcode sessions.",
+		float64(hlsSessions))
+
+	cacheEntries, cacheBytes := s.sp.CacheStats()
+	writeGauge("stremio_proxy_cache_entries",
+		"Number of entries in the stream-proxy segment cache.",
+		float64(cacheEntries))
+	writeGauge("stremio_proxy_cache_bytes",
+		"Total bytes used by the stream-proxy segment cache.",
+		float64(cacheBytes))
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = io.WriteString(w, b.String())
 }
 
 // @Summary     List available hardware acceleration profiles

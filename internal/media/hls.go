@@ -1129,3 +1129,15 @@ func (p *prober) HLSFile(ctx context.Context, id, name string) (string, string, 
 // CloseHLS stops the background session reaper and removes all HLS working
 // directories.  Not part of types.MediaProber; call directly on shutdown.
 func (p *prober) CloseHLS() { p.hls.CloseHLS() }
+
+// Sessions returns the number of currently active HLS transcode sessions.
+func (m *hlsManager) Sessions() int {
+	m.mu.Lock()
+	n := len(m.sessions)
+	m.mu.Unlock()
+	return n
+}
+
+// HLSSessions returns the number of active HLS transcode sessions.
+// Satisfies the interface checked by handleMetrics via structural assertion.
+func (p *prober) HLSSessions() int { return p.hls.Sessions() }

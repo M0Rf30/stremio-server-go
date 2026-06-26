@@ -166,3 +166,14 @@ func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header, 
 		}()
 	}
 }
+
+// CacheStats returns the number of entries and total bytes held by the segment
+// cache.  Returns (0, 0) when the cache is not configured.
+func (h *Handler) CacheStats() (entries int, bytes int64) {
+	if h.cache == nil {
+		return 0, 0
+	}
+	h.cache.mu.Lock()
+	defer h.cache.mu.Unlock()
+	return len(h.cache.items), h.cache.totalBytes
+}

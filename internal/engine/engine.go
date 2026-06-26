@@ -290,6 +290,13 @@ func (m *manager) ListEngines() []string {
 	return out
 }
 
+// NumTorrents returns the number of currently active torrent engines.
+func (m *manager) NumTorrents() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.engines)
+}
+
 // AllStats returns torrent-level stats (idx=-1) keyed by lower-cased infoHash.
 func (m *manager) AllStats() map[string]*types.Stats {
 	m.mu.RLock()
