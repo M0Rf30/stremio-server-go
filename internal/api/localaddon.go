@@ -169,6 +169,33 @@ var (
 	ttToPath = map[string]string{} // ttID → abs path (for stream/meta lookup by tt id)
 )
 
+// imdbSem caps the number of concurrent IMDB-resolution goroutines so a large
+// first scan does not open thousands of outbound HTTP connections at once.
+var imdbSem = make(chan struct{}, 20)
+
+// — Scan cache —
+
+const scanCacheTTL = 30 * time.Second
+
+var (
+	scanCacheMu sync.Mutex
+	scanCache   []localMeta
+	scanCacheAt time.Time
+)
+
+// scanLocalFilesCached returns scanLocalFiles results, re-scanning only when
+// the cached result is absent or older than scanCacheTTL.
+func scanLocalFilesCached() []localMeta {
+	scanCacheMu.Lock()
+	defer scanCacheMu.Unlock()
+	if scanCache != nil && time.Since(scanCacheAt) < scanCacheTTL {
+		return scanCache
+	}
+	scanCache = scanLocalFiles()
+	scanCacheAt = time.Now()
+	return scanCache
+}
+
 // imdbSuggestionResp is the JSON shape returned by:
 //
 //	https://v3.sg.media-imdb.com/suggestion/x/<query>.json
@@ -301,7 +328,9 @@ func ensureIMDBResolved(localHex, title string, year int, ctype, absPath string)
 	imdbPendMu.Unlock()
 
 	go func() {
+		imdbSem <- struct{}{} // acquire semaphore slot before any network I/O
 		defer func() {
+			<-imdbSem // release slot
 			imdbPendMu.Lock()
 			delete(imdbPending, localHex)
 			imdbPendMu.Unlock()
@@ -331,6 +360,11 @@ func ensureIMDBResolved(localHex, title string, year int, ctype, absPath string)
 // @Success  200  {object}  map[string]interface{}
 // @Router   /local-addon/manifest.json [get]
 func (s *server) handleLocalAddon(w http.ResponseWriter, r *http.Request, seg []string) {
+	// Honour the localAddonEnabled toggle; when off, every route returns 404.
+	if enabled, _ := s.ss.Get("localAddonEnabled").(bool); !enabled {
+		http.NotFound(w, r)
+		return
+	}
 	if len(seg) < 2 {
 		http.NotFound(w, r)
 		return
@@ -400,7 +434,7 @@ func (s *server) localAddonManifest(w http.ResponseWriter, r *http.Request) {
 // localAddonCatalog returns {metas:[{id,type,name,poster?}]} for catType.
 // Entries use tt ids when IMDB-resolved (with poster), else local: ids.
 func (s *server) localAddonCatalog(w http.ResponseWriter, r *http.Request, catType, _ string) {
-	items := scanLocalFiles()
+	items := scanLocalFilesCached()
 	metas := make([]map[string]any, 0, len(items))
 	for _, m := range items {
 		if m.Type != catType {
@@ -423,7 +457,7 @@ func (s *server) localAddonCatalog(w http.ResponseWriter, r *http.Request, catTy
 // Handles local: ids, tt ids (via scan + tt→path reverse map), and
 // the local:hex form even when the catalog currently presents a tt id.
 func (s *server) localAddonMeta(w http.ResponseWriter, r *http.Request, _, id string) {
-	items := scanLocalFiles()
+	items := scanLocalFilesCached()
 
 	emit := func(m localMeta, resolvedID string) {
 		entry := map[string]any{
@@ -466,7 +500,7 @@ func (s *server) localAddonMeta(w http.ResponseWriter, r *http.Request, _, id st
 // localAddonStream returns {streams:[{url:"file://..."}]} for id.
 // Handles local: and tt ids; maps tt id back to the local file path.
 func (s *server) localAddonStream(w http.ResponseWriter, r *http.Request, _, id string) {
-	items := scanLocalFiles()
+	items := scanLocalFilesCached()
 
 	makeStream := func(m localMeta) {
 		writeJSON(w, http.StatusOK, map[string]any{

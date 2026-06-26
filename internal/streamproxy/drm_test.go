@@ -276,3 +276,108 @@ func drmAssertBoxType(t *testing.T, boxes []drmBox, typ string) {
 	}
 	t.Errorf("box type %q not found in parsed boxes", typ)
 }
+
+// ---------------------------------------------------------------------------
+// CENC fMP4 integration test
+// ---------------------------------------------------------------------------
+
+// TestDrmDecryptCENC_fMP4Integration hand-builds a minimal
+// moof(traf{tfhd,trun,senc})+mdat segment, AES-CTR-encrypts the sample bytes,
+// calls drmDecrypt with method="CENC", and verifies that the full box walk
+// (offset math, senc parsing, CTR decryption) recovers the plaintext.
+func TestDrmDecryptCENC_fMP4Integration(t *testing.T) {
+	key := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	iv8 := []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22}
+
+	plaintext := []byte("hello fMP4 CENC!hello fMP4 CENC!") // 32 bytes
+
+	// Build the 16-byte counter block used by CENC for an 8-byte IV:
+	// IV occupies the high 8 bytes; the low 8 bytes (block counter) start at 0.
+	ctr16 := make([]byte, 16)
+	copy(ctr16[:8], iv8)
+	ciphertext := drmAESCTRXOR(key, ctr16, plaintext)
+
+	// --- build tfhd ---
+	// version(1) + flags(3)=0x020000 (default-base-is-moof) + track_ID(4)=1
+	tfhdPayload := make([]byte, 8)
+	tfhdPayload[1] = 0x02 // flags high byte: default-base-is-moof
+	binary.BigEndian.PutUint32(tfhdPayload[4:], 1)
+	tfhdBox := drmBuildBox("tfhd", tfhdPayload)
+
+	// --- build senc ---
+	// version(1) + flags(3)=0 + sample_count(4)=1 + IV(8)
+	sencPayload := make([]byte, 4+4+8)
+	binary.BigEndian.PutUint32(sencPayload[4:], 1) // sample_count = 1
+	copy(sencPayload[8:], iv8)
+	sencBox := drmBuildBox("senc", sencPayload)
+
+	// --- build trun (placeholder data_offset; filled after moof size is known) ---
+	// version(1) + flags(3)=0x000201 (data-offset-present|sample-size-present)
+	// + sample_count(4) + data_offset(4) + sample[0].size(4)
+	trunFlags := uint32(0x000201)
+	trunPayload := make([]byte, 4+4+4+4) // version+flags + count + data_offset + size
+	trunPayload[1] = byte(trunFlags >> 16)
+	trunPayload[2] = byte(trunFlags >> 8)
+	trunPayload[3] = byte(trunFlags)
+	binary.BigEndian.PutUint32(trunPayload[4:], 1) // sample_count
+	// data_offset filled below
+	binary.BigEndian.PutUint32(trunPayload[12:], uint32(len(ciphertext))) // sample size
+	trunBox := drmBuildBox("trun", trunPayload)
+
+	// --- assemble traf and moof to compute sizes ---
+	trafPayload := append(append(append([]byte(nil), tfhdBox...), trunBox...), sencBox...)
+	trafBox := drmBuildBox("traf", trafPayload)
+	moofBox := drmBuildBox("moof", trafBox)
+
+	// data_offset = sizeof(moof) + 8 (mdat box header)
+	// This is a signed int32 stored at trunPayload[8:12].
+	moofSize := len(moofBox)
+	dataOffset := moofSize + 8
+	binary.BigEndian.PutUint32(trunPayload[8:], uint32(dataOffset))
+
+	// Rebuild with the correct data_offset.
+	trunBox = drmBuildBox("trun", trunPayload)
+	trafPayload = append(append(append([]byte(nil), tfhdBox...), trunBox...), sencBox...)
+	trafBox = drmBuildBox("traf", trafPayload)
+	moofBox = drmBuildBox("moof", trafBox)
+
+	// Verify size is stable (no drift after rebuild).
+	if len(moofBox) != moofSize {
+		t.Fatalf("moof size changed after rebuild: %d → %d", moofSize, len(moofBox))
+	}
+
+	// --- build mdat ---
+	mdatBox := drmBuildBox("mdat", ciphertext)
+
+	// --- full segment ---
+	segment := append(append([]byte(nil), moofBox...), mdatBox...)
+
+	// Sanity: mdat body should start exactly at dataOffset from the segment start.
+	mdatBodyOffset := moofSize + 8
+	if mdatBodyOffset != dataOffset {
+		t.Fatalf("mdatBodyOffset=%d != dataOffset=%d", mdatBodyOffset, dataOffset)
+	}
+
+	// --- decrypt via the full drmDecrypt dispatch path ---
+	params := DecryptParams{
+		Method: "CENC",
+		Key:    key,
+		IV:     iv8,
+	}
+	result, err := drmDecrypt(nil, params, segment)
+	if err != nil {
+		t.Fatalf("drmDecrypt error: %v", err)
+	}
+
+	// The mdat body in the result should be the original plaintext.
+	mdatBodyStart := moofSize + 8
+	mdatBodyEnd := mdatBodyStart + len(plaintext)
+	if mdatBodyEnd > len(result) {
+		t.Fatalf("result too short: need %d bytes, got %d", mdatBodyEnd, len(result))
+	}
+	got := result[mdatBodyStart:mdatBodyEnd]
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("decrypted mdat body mismatch:\n  got  %x\n  want %x", got, plaintext)
+	}
+}

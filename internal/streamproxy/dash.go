@@ -29,6 +29,10 @@ func dashServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing destination", http.StatusBadRequest)
 		return
 	}
+	if err := h.ValidateDest(opts.Dest); err != nil {
+		http.Error(w, "forbidden destination", http.StatusForbidden)
+		return
+	}
 	resp, err := h.fetch(r.Context(), http.MethodGet, opts.Dest, opts.ReqHeaders, nil)
 	if err != nil {
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)

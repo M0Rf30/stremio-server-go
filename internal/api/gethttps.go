@@ -128,15 +128,34 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write cert files under AppPath (0600 — private key material).
-	certPath := filepath.Join(s.cfg.AppPath, "https-cert.pem")
-	keyPath := filepath.Join(s.cfg.AppPath, "https-key.pem")
-	if err := os.WriteFile(certPath, []byte(certData.Certificate), 0o600); err != nil {
+	// Write cert and key atomically: write each to a temp file in the same
+	// directory, then rename both. A failure at any step leaves the existing
+	// files untouched — a key-write failure can never strand a mismatched cert.
+	appPath := s.cfg.AppPath
+	certPath := filepath.Join(appPath, "https-cert.pem")
+	keyPath := filepath.Join(appPath, "https-key.pem")
+
+	certTmp, err := writeTempPEM(appPath, "https-cert-*.pem", certData.Certificate)
+	if err != nil {
 		http.Error(w, "write https-cert.pem: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := os.WriteFile(keyPath, []byte(certData.PrivateKey), 0o600); err != nil {
+	keyTmp, err := writeTempPEM(appPath, "https-key-*.pem", certData.PrivateKey)
+	if err != nil {
+		_ = os.Remove(certTmp)
 		http.Error(w, "write https-key.pem: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(certTmp, certPath); err != nil {
+		_ = os.Remove(certTmp)
+		_ = os.Remove(keyTmp)
+		http.Error(w, "install https-cert.pem: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(keyTmp, keyPath); err != nil {
+		_ = os.Remove(certPath) // undo the cert rename
+		_ = os.Remove(keyTmp)
+		http.Error(w, "install https-key.pem: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -150,4 +169,25 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 		"domain":    domain,
 		"port":      s.cfg.HTTPSPort,
 	})
+}
+
+// writeTempPEM writes content to a new temp file (mode 0600) inside dir and
+// returns the temp file's path. The caller must rename or remove the file.
+// os.CreateTemp already creates files with mode 0600 on Unix.
+func writeTempPEM(dir, pattern, content string) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	_, writeErr := f.WriteString(content)
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(name)
+		if writeErr != nil {
+			return "", writeErr
+		}
+		return "", closeErr
+	}
+	return name, nil
 }

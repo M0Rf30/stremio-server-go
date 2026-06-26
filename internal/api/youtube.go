@@ -84,7 +84,7 @@ func (s *server) handleYT(w http.ResponseWriter, r *http.Request, seg1 string) {
 	}
 
 	// -j: dump JSON info without downloading; --no-warnings: quieter stderr.
-	cmd := exec.Command(ytPath, "-j", "--no-warnings", videoURL)
+	cmd := exec.CommandContext(r.Context(), ytPath, "-j", "--no-warnings", videoURL)
 	out, err := cmd.Output()
 	if err != nil {
 		// Exit code + stderr from yt-dlp

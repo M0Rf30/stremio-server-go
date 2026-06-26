@@ -133,9 +133,10 @@ func drmDecryptCENC(method string, key, iv []byte, segment []byte) ([]byte, erro
 			return nil, errors.New("CENC: moof without following mdat")
 		}
 		mdat := boxes[mdatIdx]
-		mdatData := out[mdat.Start+mdat.HdrSize : mdat.Start+mdat.Size]
+		mdatBodyStart := mdat.Start + mdat.HdrSize
+		mdatData := out[mdatBodyStart : mdat.Start+mdat.Size]
 
-		if err := drmDecryptMoof(method, key, iv, box, mdatData); err != nil {
+		if err := drmDecryptMoof(method, key, iv, box, mdatData, mdatBodyStart); err != nil {
 			return nil, err
 		}
 	}
@@ -143,7 +144,8 @@ func drmDecryptCENC(method string, key, iv []byte, segment []byte) ([]byte, erro
 }
 
 // drmDecryptMoof decrypts all samples in one moof box's traf children.
-func drmDecryptMoof(method string, key, iv []byte, moof drmBox, mdatData []byte) error {
+// mdatBodyStart is the absolute byte offset of the first mdat data byte in the segment.
+func drmDecryptMoof(method string, key, iv []byte, moof drmBox, mdatData []byte, mdatBodyStart int) error {
 	children, err := drmParseBoxes(moof.Payload)
 	if err != nil {
 		return fmt.Errorf("CENC: moof children: %w", err)
@@ -159,7 +161,7 @@ func drmDecryptMoof(method string, key, iv []byte, moof drmBox, mdatData []byte)
 		if err != nil {
 			return fmt.Errorf("CENC: traf children: %w", err)
 		}
-		if err := drmDecryptTraf(method, key, iv, trafBoxes, moofBase, mdatData); err != nil {
+		if err := drmDecryptTraf(method, key, iv, trafBoxes, moofBase, mdatData, mdatBodyStart); err != nil {
 			return err
 		}
 	}
@@ -192,14 +194,14 @@ type drmSencEntry struct {
 	Subsamples []drmSubsample
 }
 
-func drmDecryptTraf(method string, key, iv []byte, trafBoxes []drmBox, moofStart int, mdatData []byte) error {
+func drmDecryptTraf(method string, key, iv []byte, trafBoxes []drmBox, moofStart int, mdatData []byte, mdatBodyStart int) error {
 	var tfhd drmTfhd
 	var samples []drmTrunSample
 	var sencEntries []drmSencEntry
 	hasTfhd := false
 	hasTrun := false
 	hasSenc := false
-	dataOffset := int64(0) // offset of first sample into mdat
+	dataOffset := int64(0) // trun data-offset; 0 when flag absent
 
 	for _, b := range trafBoxes {
 		switch b.Type {
@@ -230,58 +232,35 @@ func drmDecryptTraf(method string, key, iv []byte, trafBoxes []drmBox, moofStart
 			hasSenc = true
 
 		case "saiz", "saio":
-			// If senc is present we prefer it; if not, we can't proceed.
-			// We handle the absence of senc below.
+			// senc is preferred; if absent, we cannot proceed (handled below).
 		}
 	}
 
 	if !hasTfhd || !hasTrun {
-		// No track fragment data to process.
 		return nil
 	}
 	if !hasSenc {
-		// We rely on senc for per-sample IVs. saiz/saio layout is not supported.
 		return errors.New("unsupported CENC layout: senc box absent, saiz/saio not supported")
 	}
 
-	// Resolve base data offset for the mdat.
-	// base-data-offset-present: explicit offset from the beginning of the file.
-	// default-base-is-moof: offset from the start of moof.
-	// Otherwise: offset from the start of mdat data (i.e. 0).
-	var baseOffset int64
+	// Resolve the absolute base for sample data per ISO 14496-12 §8.8.8:
+	//   base-data-offset-present → explicit absolute file offset.
+	//   default-base-is-moof (or implicit for first traf) → start of enclosing moof.
+	// trun.data_offset is a signed offset relative to that base.
+	// mdatBodyStart is the absolute position of mdatData[0] in the segment buffer.
+	var base int64
 	if tfhd.baseDataOffsetPresent {
-		// base-data-offset is absolute file offset; mdatData starts at some absolute position.
-		// We don't have the file offset of mdatData, so we use relative addressing:
-		// treat base-data-offset as the absolute offset of the moof start within the segment,
-		// which is moofStart. The mdat data begins at an offset relative to the start of mdat box.
-		// Since we're working within the segment buffer, we map:
-		// sample_offset_in_mdat = baseDataOffset - (absolute mdat body start)
-		// We approximate: base-data-offset is the absolute offset in the segment file.
-		// mdat body starts at moofStart + moof.Size (roughly), but we already sliced it.
-		// Use base-data-offset relative to moofStart.
-		baseOffset = int64(tfhd.baseDataOffset) - int64(moofStart)
-		// Negative base offset means offset was before moof — use 0.
-		if baseOffset < 0 {
-			baseOffset = 0
-		}
-	} else if tfhd.defaultBaseIsMoof {
-		// trun data_offset is relative to the moof start, but mdatData is already
-		// the mdat body slice; the caller does not pass mdatAbsStart, so we treat
-		// data_offset as relative to mdat body start (trun data_offset in typical
-		// fragmented MP4 equals moofSize+mdatHdrSize, both of which are already
-		// consumed by the caller's slice — effective offset into mdatData is 0 + dataOffset
-		// minus the header gap; without mdatAbsStart we cannot compute the exact value).
-		// We set baseOffset=0 and rely on the bounds check to reject malformed offsets.
-		baseOffset = 0
+		base = int64(tfhd.baseDataOffset)
 	} else {
-		baseOffset = 0
+		// Both default-base-is-moof and the implicit-first-traf rule set the base
+		// to the start of the enclosing moof box.
+		base = int64(moofStart)
 	}
 
-	// dataOffset is the trun data offset (signed, relative to base data offset).
-	// In practice for simple fMP4, it's an offset into mdat body.
-	sampleStart := baseOffset + dataOffset
+	sampleStart := base + dataOffset - int64(mdatBodyStart)
 	if sampleStart < 0 {
-		sampleStart = 0
+		return fmt.Errorf("CENC: computed sample start %d is before mdat body (base=%d, dataOffset=%d, mdatBodyStart=%d)",
+			sampleStart, base, dataOffset, mdatBodyStart)
 	}
 
 	if len(sencEntries) != len(samples) {
@@ -295,30 +274,22 @@ func drmDecryptTraf(method string, key, iv []byte, trafBoxes []drmBox, moofStart
 			size = int64(tfhd.defaultSampleSize)
 		}
 		if size == 0 {
-			// Skip samples with unknown size.
 			continue
 		}
-		if pos < 0 || pos+size > int64(len(mdatData)) {
+		if pos+size > int64(len(mdatData)) {
 			return fmt.Errorf("CENC: sample %d at offset %d size %d exceeds mdat length %d",
 				i, pos, size, len(mdatData))
 		}
 
 		entry := sencEntries[i]
-		sampIV := entry.IV
 		sampData := mdatData[pos : pos+size]
 
 		var decErr error
 		if method == "CBCS" {
-			// AES-CBC subsample mode: each subsample pattern block decrypted independently.
-			// For simplicity, treat the encrypted spans with CBC using sample IV.
-			decErr = drmDecryptCBCSubsamples(key, sampIV, sampData, entry.Subsamples)
+			decErr = drmDecryptCBCSubsamples(key, entry.IV, sampData, entry.Subsamples)
 		} else {
-			// AES-CTR (CENC default / SAMPLE-AES).
-			var decrypted []byte
-			decrypted, decErr = drmDecryptCTRSubsamples(key, sampIV, sampData, entry.Subsamples)
-			if decErr == nil {
-				copy(sampData, decrypted)
-			}
+			// AES-CTR: decrypt in place; drmDecryptCTRSubsamples XORs sampData directly.
+			_, decErr = drmDecryptCTRSubsamples(key, entry.IV, sampData, entry.Subsamples)
 		}
 		if decErr != nil {
 			return fmt.Errorf("CENC: sample %d decrypt: %w", i, decErr)
@@ -435,6 +406,31 @@ func drmParseTrun(p []byte) ([]drmTrunSample, int32, error) {
 		off += 4
 	}
 
+	// Bound sample_count against remaining box bytes to prevent hostile allocations.
+	// Compute the minimum bytes consumed per sample for the active flags.
+	perSampleBytes := 0
+	if flags&trunSampleDurationPresent != 0 {
+		perSampleBytes += 4
+	}
+	if flags&trunSampleSizePresent != 0 {
+		perSampleBytes += 4
+	}
+	if flags&trunSampleFlagsPresent != 0 {
+		perSampleBytes += 4
+	}
+	if flags&trunSampleCTSOffsetPresent != 0 {
+		perSampleBytes += 4
+	}
+	if perSampleBytes > 0 {
+		maxCount := uint32((len(p) - off) / perSampleBytes)
+		if sampleCount > maxCount {
+			return nil, 0, fmt.Errorf("trun: sample_count %d exceeds box bounds (%d bytes remaining, %d bytes/sample)",
+				sampleCount, len(p)-off, perSampleBytes)
+		}
+	} else if sampleCount > uint32(len(p)) {
+		return nil, 0, fmt.Errorf("trun: sample_count %d exceeds box size %d", sampleCount, len(p))
+	}
+
 	samples := make([]drmTrunSample, sampleCount)
 	for i := uint32(0); i < sampleCount; i++ {
 		var s drmTrunSample
@@ -489,12 +485,17 @@ func drmParseSenc(p []byte, fallbackIV []byte) ([]drmSencEntry, error) {
 	off := 8
 
 	const useSubsampleEncryption = 0x000002
+	hasSubs := flags&useSubsampleEncryption != 0
+
+	// Sanity-bound sampleCount before probing: minimum 8 bytes per sample (shortest IV).
+	if sampleCount > uint32(len(p)-off) {
+		return nil, fmt.Errorf("senc: sample_count %d exceeds remaining box bytes %d", sampleCount, len(p)-off)
+	}
 
 	// Determine IV size by probing: try 8 first, if alignment fails try 16.
-	// We pick whichever parses cleanly.
-	entries, err := drmParseSencWithIVSize(p[off:], int(sampleCount), 8, flags&useSubsampleEncryption != 0)
+	entries, err := drmParseSencWithIVSize(p[off:], int(sampleCount), 8, hasSubs)
 	if err != nil {
-		entries, err = drmParseSencWithIVSize(p[off:], int(sampleCount), 16, flags&useSubsampleEncryption != 0)
+		entries, err = drmParseSencWithIVSize(p[off:], int(sampleCount), 16, hasSubs)
 		if err != nil {
 			return nil, fmt.Errorf("senc: cannot parse with IV size 8 or 16: %w", err)
 		}
@@ -515,6 +516,16 @@ func drmParseSenc(p []byte, fallbackIV []byte) ([]drmSencEntry, error) {
 }
 
 func drmParseSencWithIVSize(p []byte, count, ivSize int, hasSubs bool) ([]drmSencEntry, error) {
+	// Bound count against box size before allocating: each sample needs at least ivSize bytes.
+	minPerSample := ivSize
+	if hasSubs {
+		minPerSample += 2 // subsample_count field
+	}
+	if minPerSample > 0 && count > len(p)/minPerSample {
+		return nil, fmt.Errorf("senc: sample_count %d exceeds box bounds (%d bytes, min %d bytes/sample)",
+			count, len(p), minPerSample)
+	}
+
 	entries := make([]drmSencEntry, count)
 	off := 0
 	for i := 0; i < count; i++ {
@@ -532,6 +543,11 @@ func drmParseSencWithIVSize(p []byte, count, ivSize int, hasSubs bool) ([]drmSen
 			}
 			subCount := int(binary.BigEndian.Uint16(p[off:]))
 			off += 2
+			// Bound subCount: each subsample is 6 bytes (2 clear + 4 encrypted).
+			if subCount > (len(p)-off)/6 {
+				return nil, fmt.Errorf("senc: sample %d: subsample_count %d exceeds remaining box bytes %d",
+					i, subCount, len(p)-off)
+			}
 			subs = make([]drmSubsample, subCount)
 			for j := 0; j < subCount; j++ {
 				if len(p) < off+6 {
@@ -656,11 +672,12 @@ func drmParseBoxesAt(b []byte, startOffset, limit int) ([]drmBox, error) {
 	return boxes, nil
 }
 
-// drmDecryptCTRSubsamples decrypts the encrypted spans of data using AES-CTR.
-// CENC: IV is the 8-byte (or 16-byte) initialization vector. For 8-byte IVs, the
+// drmDecryptCTRSubsamples decrypts the encrypted spans of data using AES-CTR, in place.
+// CENC: IV is the 8-byte (or 16-byte) initialization vector. For 8-byte IVs the
 // high 64 bits of the 128-bit counter are set from IV; the low 64 bits start at 0.
-// When subs is nil, the entire data buffer is treated as encrypted.
-// Clear bytes are passed through unchanged and do NOT advance the CTR keystream.
+// When subs is nil the entire buffer is treated as encrypted.
+// Clear bytes are NOT advanced through the CTR keystream.
+// Returns data (same slice) on success so callers can chain; the argument is modified.
 func drmDecryptCTRSubsamples(key, iv []byte, data []byte, subs []drmSubsample) ([]byte, error) {
 	if len(key) != 16 {
 		return nil, fmt.Errorf("CTR: key must be 16 bytes, got %d", len(key))
@@ -682,34 +699,25 @@ func drmDecryptCTRSubsamples(key, iv []byte, data []byte, subs []drmSubsample) (
 		return nil, fmt.Errorf("CTR: %w", err)
 	}
 
-	out := make([]byte, len(data))
-	copy(out, data)
-
 	if len(subs) == 0 {
-		// Whole buffer encrypted.
-		stream := cipher.NewCTR(block, ctr)
-		stream.XORKeyStream(out, data)
-		return out, nil
+		// Whole buffer encrypted: XOR in place (cipher.Stream allows src==dst).
+		cipher.NewCTR(block, ctr).XORKeyStream(data, data)
+		return data, nil
 	}
 
-	// Subsample mode: for each subsample, copy clear bytes, then XOR encrypted bytes.
-	// The CTR keystream advances only over encrypted bytes.
-	// We do this by maintaining our own keystream block position.
-	// cipher.NewCTR doesn't expose position, so we generate keystream manually:
-	// for each encrypted span we feed it through a fresh CTR seeded at the right block.
-
-	// We implement a manual CTR to support skipping clear bytes.
+	// Subsample mode: XOR only the encrypted spans in place; skip clear bytes.
+	// The CTR keystream advances solely over encrypted bytes (clear bytes do not
+	// consume keystream), so we maintain our own per-block position manually.
 	ctrBlock := [16]byte{}
 	copy(ctrBlock[:], ctr)
 
-	// Generate one AES-CTR keystream block from the given counter block.
 	genKeyBlock := func(cb [16]byte) [16]byte {
-		var out [16]byte
-		block.Encrypt(out[:], cb[:])
-		return out
+		var kb [16]byte
+		block.Encrypt(kb[:], cb[:])
+		return kb
 	}
 
-	// Increment the counter (big-endian on the low 8 bytes per CENC spec).
+	// Increment the counter on the low 8 bytes (big-endian) per CENC spec.
 	incCounter := func(cb *[16]byte) {
 		for i := 15; i >= 8; i-- {
 			cb[i]++
@@ -719,29 +727,26 @@ func drmDecryptCTRSubsamples(key, iv []byte, data []byte, subs []drmSubsample) (
 		}
 	}
 
-	ksPos := 0 // byte offset into current keystream block
-	var ksBlock [16]byte
-	ksBlock = genKeyBlock(ctrBlock)
+	ksPos := 0 // byte position within the current keystream block
+	ksBlock := genKeyBlock(ctrBlock)
 
 	dataOff := 0
 	for _, sub := range subs {
-		// Copy clear bytes verbatim.
+		// Advance past clear bytes without consuming keystream.
 		if sub.Clear > 0 {
 			end := dataOff + sub.Clear
 			if end > len(data) {
 				end = len(data)
 			}
-			copy(out[dataOff:end], data[dataOff:end])
 			dataOff = end
 		}
 
-		// Decrypt encrypted bytes, advancing keystream.
+		// XOR encrypted bytes in place, advancing the keystream.
 		enc := sub.Encrypted
 		for enc > 0 {
 			if dataOff >= len(data) {
 				break
 			}
-			// How many bytes left in current keystream block?
 			avail := 16 - ksPos
 			take := enc
 			if take > avail {
@@ -751,7 +756,7 @@ func drmDecryptCTRSubsamples(key, iv []byte, data []byte, subs []drmSubsample) (
 				take = len(data) - dataOff
 			}
 			for i := 0; i < take; i++ {
-				out[dataOff+i] = data[dataOff+i] ^ ksBlock[ksPos+i]
+				data[dataOff+i] ^= ksBlock[ksPos+i]
 			}
 			dataOff += take
 			ksPos += take
@@ -763,7 +768,7 @@ func drmDecryptCTRSubsamples(key, iv []byte, data []byte, subs []drmSubsample) (
 			}
 		}
 	}
-	return out, nil
+	return data, nil
 }
 
 // drmDecryptCBCSubsamples decrypts only the encrypted subsample spans with AES-CBC.
@@ -799,6 +804,9 @@ func drmDecryptCBCSubsamples(key, iv []byte, data []byte, subs []drmSubsample) e
 	off := 0
 	for _, sub := range subs {
 		off += sub.Clear
+		if off > len(data) {
+			return fmt.Errorf("CBC subsample: clear span exceeds data len %d", len(data))
+		}
 		if sub.Encrypted == 0 {
 			continue
 		}
@@ -808,7 +816,7 @@ func drmDecryptCBCSubsamples(key, iv []byte, data []byte, subs []drmSubsample) e
 		}
 		span := data[off:end]
 		if len(span)%aes.BlockSize != 0 {
-			// Truncate to block boundary (partial last block is left in clear per spec).
+			// Truncate to block boundary (partial last block left in clear per spec).
 			aligned := len(span) &^ (aes.BlockSize - 1)
 			span = span[:aligned]
 		}

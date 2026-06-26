@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +38,18 @@ const (
 	segMuxed     segKind = iota // video + first-audio, muxed (single-audio session)
 	segVideoOnly                // video only, no audio (multi-audio session)
 	segAudioOnly                // audio only for one track (multi-audio session)
+)
+
+// Lifecycle tuning constants.
+const (
+	// sessionTTL is the idle-eviction window: sessions not accessed within
+	// this duration are removed by the background reaper.
+	sessionTTL = 60 * time.Second
+	// reaperInterval is how frequently the reaper scans for idle sessions.
+	reaperInterval = 30 * time.Second
+	// negProbeTTL is how long a failed or zero-duration ffprobe result is
+	// cached to prevent hammering a broken URL with repeated 30-second probes.
+	negProbeTTL = 5 * time.Minute
 )
 
 // audioStream describes one audio track discovered by ffprobe.
@@ -74,6 +88,7 @@ type hlsSession struct {
 	multiAudio      bool                   // true when len(audioStreams) >= 2
 	highBitDepth    bool                   // true if any video stream is 10/12-bit
 	segLocks        map[string]*sync.Mutex // keyed by segment filename
+	lastAccess      atomic.Int64           // unix nanoseconds; updated on each StartHLS/HLSFile call
 }
 
 // hwEncoder holds the selected H.264 encoder identity plus any device path
@@ -84,14 +99,24 @@ type hwEncoder struct {
 	driDevice string // VAAPI renderD* path; empty for all non-VAAPI codecs
 }
 
+// probeCacheEntry records a cached ffprobe result for negative caching.
+// Used to short-circuit repeated 30-second probes of broken or unreachable URLs.
+type probeCacheEntry struct {
+	result    probeMediaResult
+	expiresAt time.Time
+}
+
 // hlsManager owns per-id sessions and the hardware-accel decision.
 // enc is set once in newHLS() and is read-only thereafter.
 type hlsManager struct {
 	base string
 	enc  hwEncoder
 
-	mu       sync.Mutex
-	sessions map[string]*hlsSession
+	mu           sync.Mutex
+	sessions     map[string]*hlsSession
+	probeCache   map[string]probeCacheEntry // negative-probe cache; keyed by mediaURL
+	transcodeSem chan struct{}              // bounds concurrent ffmpeg transcode spawns
+	stopCh       chan struct{}              // closed by CloseHLS to stop the reaper
 }
 
 // ── encoder detection ─────────────────────────────────────────────────────────
@@ -225,11 +250,20 @@ func selectEncoder() hwEncoder {
 func newHLS() *hlsManager {
 	base := filepath.Join(os.TempDir(), "stremio-hls")
 	_ = os.MkdirAll(base, 0o755)
-	return &hlsManager{
-		base:     base,
-		enc:      selectEncoder(),
-		sessions: map[string]*hlsSession{},
+	n := runtime.NumCPU()
+	if n < 1 {
+		n = 1
 	}
+	m := &hlsManager{
+		base:         base,
+		enc:          selectEncoder(),
+		sessions:     map[string]*hlsSession{},
+		probeCache:   map[string]probeCacheEntry{},
+		transcodeSem: make(chan struct{}, n),
+		stopCh:       make(chan struct{}),
+	}
+	go m.reaper()
+	return m
 }
 
 // localize rewrites the self-signed https loopback URL to plain http so ffmpeg
@@ -250,9 +284,10 @@ type probeMediaResult struct {
 
 // probeMedia runs a single ffprobe with -show_format -show_streams and returns
 // the media duration, every audio stream, and whether the video is high-bit-depth.
-// A 30-second context timeout is applied.  Called once per session in StartHLS.
-func probeMedia(mediaURL string) probeMediaResult {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// A 30-second timeout is applied over the provided ctx.
+// The caller must NOT hold any session lock when calling this function.
+func probeMedia(ctx context.Context, mediaURL string) probeMediaResult {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ffprobe",
 		"-v", "quiet", "-print_format", "json",
@@ -361,24 +396,64 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 			dir:      filepath.Join(m.base, id),
 			segLocks: map[string]*sync.Mutex{},
 		}
+		s.lastAccess.Store(time.Now().UnixNano())
 		_ = os.MkdirAll(s.dir, 0o755)
 		m.sessions[id] = s
 	}
 	m.mu.Unlock()
 
-	s.mu.Lock()
-	if s.duration == 0 {
-		res := probeMedia(mediaURL)
-		s.duration = res.duration
-		s.audioStreams = res.audioStreams
-		s.subtitleStreams = res.subtitleStreams
-		s.multiAudio = len(s.audioStreams) >= 2
-		s.highBitDepth = res.highBitDepth
+	// Refresh lastAccess for both new and reused sessions.
+	s.lastAccess.Store(time.Now().UnixNano())
+
+	// Probe outside the session write lock so a 30-second ffprobe does not stall
+	// concurrent HLSFile calls on the same session.
+	s.mu.RLock()
+	needProbe := s.duration == 0
+	s.mu.RUnlock()
+
+	if needProbe {
+		// Negative-probe cache: avoid hammering a broken URL with repeated 30s probes.
+		m.mu.Lock()
+		cached, hasCached := m.probeCache[mediaURL]
+		m.mu.Unlock()
+
+		var res probeMediaResult
+		if hasCached && time.Now().Before(cached.expiresAt) {
+			res = cached.result
+		} else {
+			res = probeMedia(context.Background(), mediaURL)
+			m.mu.Lock()
+			if res.duration == 0 {
+				// Cache the negative result to short-circuit future probes.
+				m.probeCache[mediaURL] = probeCacheEntry{
+					result:    res,
+					expiresAt: time.Now().Add(negProbeTTL),
+				}
+			} else {
+				// Positive result — clear any stale negative entry for this URL.
+				delete(m.probeCache, mediaURL)
+			}
+			m.mu.Unlock()
+		}
+
+		// Store result under the session write lock; another goroutine racing
+		// through StartHLS for the same id may have already stored a valid probe.
+		s.mu.Lock()
+		if s.duration == 0 {
+			s.duration = res.duration
+			s.audioStreams = res.audioStreams
+			s.subtitleStreams = res.subtitleStreams
+			s.multiAudio = len(s.audioStreams) >= 2
+			s.highBitDepth = res.highBitDepth
+		}
+		s.mu.Unlock()
 	}
+
+	s.mu.RLock()
 	multiAudio := s.multiAudio
 	audioStreams := s.audioStreams
 	subtitleStreams := s.subtitleStreams
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	hasSubs := len(subtitleStreams) > 0
 
@@ -494,6 +569,9 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 	if !ok {
 		return "", "", fmt.Errorf("hls: unknown session %s", id)
 	}
+	// Touch lastAccess before any work so the reaper knows this session is active.
+	s.lastAccess.Store(time.Now().UnixNano())
+
 	name = filepath.Base(name)
 	// Belt-and-suspenders: ensure the joined path stays inside the session directory.
 	// filepath.Base already strips separators; this also catches name=="..".
@@ -773,6 +851,16 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 		return segFile, nil // already transcoded; serve from cache
 	}
 
+	// Bound concurrent ffmpeg spawns: a client prefetch burst must not fork
+	// unbounded processes.  Respect the caller context so a disconnected client
+	// releases the slot rather than blocking indefinitely.
+	select {
+	case m.transcodeSem <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() { <-m.transcodeSem }()
+
 	start := float64(n) * segDur
 	dur := segDur
 	if sessionDur > 0 {
@@ -940,12 +1028,18 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	}
 
 	// Attempt hardware encode; fall back to libx264 on any error.
+	// If the caller's context is already done when the HW attempt fails,
+	// propagate the cancellation directly — do not start a software re-encode
+	// for a segment that is no longer needed.
 	sw := hwEncoder{codec: "libx264"}
 	var err error
 	if m.enc.isHW && kind != segAudioOnly {
 		// VAAPI/NVENC/etc. accelerates h264 video encoding only; audio is always SW.
 		if err = run(m.enc); err != nil {
 			_ = os.Remove(tmp)
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
 			err = run(sw) // transparent software fallback
 		}
 	} else {
@@ -963,13 +1057,57 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 
 // ── CloseHLS ──────────────────────────────────────────────────────────────────
 
-// CloseHLS removes all session working directories.
+// CloseHLS stops the background reaper and removes all session working directories.
+// Safe to call multiple times.
 func (m *hlsManager) CloseHLS() {
+	// Signal the reaper to stop; guard against double-close with a non-blocking
+	// drain: if stopCh is already closed the receive arm fires immediately.
+	select {
+	case <-m.stopCh:
+	default:
+		close(m.stopCh)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.sessions {
 		_ = os.RemoveAll(s.dir)
 	}
+	m.sessions = map[string]*hlsSession{}
+}
+
+// reaper is the single background goroutine that evicts idle HLS sessions.
+// It runs until CloseHLS closes stopCh, so it never leaks.
+func (m *hlsManager) reaper() {
+	ticker := time.NewTicker(reaperInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.evictIdle()
+		case <-m.stopCh:
+			return
+		}
+	}
+}
+
+// evictIdle removes sessions whose lastAccess timestamp is older than sessionTTL.
+// Deleting from a map during range is safe and defined in Go.
+func (m *hlsManager) evictIdle() {
+	cutoff := time.Now().Add(-sessionTTL)
+	m.mu.Lock()
+	for id, s := range m.sessions {
+		ts := s.lastAccess.Load()
+		if ts == 0 {
+			// Session created but not yet accessed (e.g. in the window between
+			// map insertion and the first lastAccess.Store); skip to be safe.
+			continue
+		}
+		if time.Unix(0, ts).Before(cutoff) {
+			delete(m.sessions, id)
+			_ = os.RemoveAll(s.dir)
+		}
+	}
+	m.mu.Unlock()
 }
 
 func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', 3, 64) }
@@ -980,3 +1118,7 @@ func (p *prober) StartHLS(id, mediaURL string) (string, error) { return p.hls.St
 func (p *prober) HLSFile(ctx context.Context, id, name string) (string, string, error) {
 	return p.hls.HLSFile(ctx, id, name)
 }
+
+// CloseHLS stops the background session reaper and removes all HLS working
+// directories.  Not part of types.MediaProber; call directly on shutdown.
+func (p *prober) CloseHLS() { p.hls.CloseHLS() }

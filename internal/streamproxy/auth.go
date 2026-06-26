@@ -45,7 +45,13 @@ func (h *Handler) authorize(r *http.Request) error {
 
 	// Signed token: if present and Secret is configured, verify and short-circuit password.
 	if tok := r.URL.Query().Get("token"); tok != "" && len(h.cfg.Secret) > 0 {
-		if _, err := h.verifyToken(tok, clientIP(r)); err != nil {
+		t, err := h.verifyToken(tok, clientIP(r))
+		if err != nil {
+			return errUnauthorized
+		}
+		// Bind token to its intended endpoint: reject if the token was issued for a
+		// different path. An empty Endpoint field skips the check (legacy tokens).
+		if t.Endpoint != "" && t.Endpoint != r.URL.Path {
 			return errUnauthorized
 		}
 		return nil

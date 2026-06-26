@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// defaultCacheMaxBytes is the default total-byte cap for the segment cache (~256 MB).
+const defaultCacheMaxBytes = 256 * 1024 * 1024
+
 // cacheEntry holds a cached segment with its metadata.
 type cacheEntry struct {
 	key       string
@@ -17,46 +20,59 @@ type cacheEntry struct {
 	hdr       http.Header
 	status    int
 	expiresAt time.Time
+	size      int64 // len(val), tracked for byte-budget eviction
 }
 
-// segCache is an in-memory LRU segment cache bounded by entry count and TTL.
+// segCache is an in-memory LRU segment cache bounded by entry count, total bytes, and TTL.
 type segCache struct {
 	mu         sync.Mutex
 	ttl        time.Duration
 	maxEntries int
+	maxBytes   int64
+	totalBytes int64
 	items      map[string]*list.Element
 	lru        *list.List
 }
 
 // newSegCache creates a segCache with the given TTL and entry cap.
+// The total-byte budget defaults to defaultCacheMaxBytes.
 func newSegCache(ttl time.Duration, maxEntries int) *segCache {
 	return &segCache{
 		ttl:        ttl,
 		maxEntries: maxEntries,
+		maxBytes:   defaultCacheMaxBytes,
 		items:      make(map[string]*list.Element),
 		lru:        list.New(),
 	}
 }
 
 // putFull stores a full response entry (body + headers + status).
+// It evicts least-recently-used entries to satisfy both the entry cap and the byte budget.
 func (c *segCache) putFull(key string, val []byte, hdr http.Header, status int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	newSize := int64(len(val))
 	if el, ok := c.items[key]; ok {
 		c.lru.MoveToFront(el)
 		e := el.Value.(*cacheEntry)
+		c.totalBytes -= e.size
+		c.totalBytes += newSize
 		e.val = val
 		e.hdr = hdr
 		e.status = status
+		e.size = newSize
 		e.expiresAt = time.Now().Add(c.ttl)
 		return
 	}
-	for c.lru.Len() >= c.maxEntries {
+	// Evict until both constraints are satisfied.
+	for c.lru.Len() >= c.maxEntries || c.totalBytes+newSize > c.maxBytes {
 		back := c.lru.Back()
 		if back == nil {
 			break
 		}
-		delete(c.items, back.Value.(*cacheEntry).key)
+		evicted := back.Value.(*cacheEntry)
+		c.totalBytes -= evicted.size
+		delete(c.items, evicted.key)
 		c.lru.Remove(back)
 	}
 	entry := &cacheEntry{
@@ -65,7 +81,9 @@ func (c *segCache) putFull(key string, val []byte, hdr http.Header, status int) 
 		hdr:       hdr,
 		status:    status,
 		expiresAt: time.Now().Add(c.ttl),
+		size:      newSize,
 	}
+	c.totalBytes += newSize
 	c.items[key] = c.lru.PushFront(entry)
 }
 
@@ -79,6 +97,7 @@ func (c *segCache) getFull(key string) *cacheEntry {
 	}
 	entry := el.Value.(*cacheEntry)
 	if time.Now().After(entry.expiresAt) {
+		c.totalBytes -= entry.size
 		c.lru.Remove(el)
 		delete(c.items, key)
 		return nil

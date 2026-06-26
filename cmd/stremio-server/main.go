@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,6 +46,7 @@ func envInt(key string, def int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+		log.Printf("env %s: invalid integer %q, using default %d", key, v, def)
 	}
 	return def
 }
@@ -68,7 +70,11 @@ func main() {
 			return
 		}
 	}
-	home, _ := os.UserHomeDir()
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		log.Printf("cannot determine home directory: %v; defaulting to /tmp", homeErr)
+		home = "/tmp"
+	}
 	appPath := os.Getenv("APP_PATH")
 	if appPath == "" {
 		appPath = filepath.Join(home, ".stremio-server")
@@ -211,12 +217,22 @@ func main() {
 	<-stop
 	log.Println("shutting down...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
-	if tlsSrv != nil {
-		_ = tlsSrv.Shutdown(ctx)
+	var shutWg sync.WaitGroup
+	shutOne := func(s *http.Server, name string) {
+		defer shutWg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.Shutdown(ctx); err != nil {
+			log.Printf("%s shutdown: %v", name, err)
+		}
 	}
+	shutWg.Add(1)
+	go shutOne(srv, "http")
+	if tlsSrv != nil {
+		shutWg.Add(1)
+		go shutOne(tlsSrv, "https")
+	}
+	shutWg.Wait()
 }
 
 func getenv(key, def string) string {
@@ -239,8 +255,7 @@ func proxySecret(appPath string) string {
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		log.Printf("proxy: failed to generate random secret: %v", err)
-		return ""
+		log.Fatalf("proxy: failed to generate random secret: %v", err)
 	}
 	secret := hex.EncodeToString(buf)
 	if err := os.WriteFile(secretFile, []byte(secret), 0o600); err != nil {

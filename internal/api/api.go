@@ -340,6 +340,9 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 		w.Header().Set("CaptionInfo.sec", subs)
 	}
 
+	bufp := streamBufPool.Get().(*[]byte)
+	defer streamBufPool.Put(bufp)
+
 	start, end, isRange, unsat := parseRange(r.Header.Get("Range"), length)
 	if unsat {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", length))
@@ -359,7 +362,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 		if r.Method == http.MethodHead {
 			return
 		}
-		_, _ = io.CopyN(w, rc, end-start+1)
+		_, _ = io.CopyBuffer(w, io.LimitReader(rc, end-start+1), *bufp)
 		return
 	}
 
@@ -368,7 +371,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 	if r.Method == http.MethodHead {
 		return
 	}
-	_, _ = io.Copy(w, rc)
+	_, _ = io.CopyBuffer(w, rc, *bufp)
 }
 
 // resolveIndex picks the file index from the URL segment, a fileMustInclude
@@ -1007,8 +1010,7 @@ func hexDecode(s string) ([]byte, error) {
 }
 
 func httpGet(u string) ([]byte, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(u)
+	resp, err := getClient.Get(u)
 	if err != nil {
 		return nil, err
 	}
@@ -1180,6 +1182,17 @@ var proxyClient = &http.Client{
 	},
 }
 
+// streamBufPool holds reusable 256 KB buffers for streaming copies.
+var streamBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 256<<10)
+		return &buf
+	},
+}
+
+// getClient is shared across all httpGet calls so TCP connections are reused.
+var getClient = &http.Client{Timeout: 30 * time.Second}
+
 // buildStreamProxyConfig converts types.Config proxy fields to a streamproxy.Config.
 func buildStreamProxyConfig(cfg types.Config) streamproxy.Config {
 	// Decode ProxySecret: try hex then base64url then base64std.
@@ -1232,6 +1245,10 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 		http.NotFound(w, r)
 		return
 	}
+	if err := s.sp.Authorize(r); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	opts, err := url.ParseQuery(seg[1])
 	if err != nil {
 		http.Error(w, "bad proxy options", http.StatusBadRequest)
@@ -1245,6 +1262,10 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 	target := strings.TrimRight(origin, "/") + "/" + strings.Join(seg[2:], "/")
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
+	}
+	if err := s.sp.ValidateDest(target); err != nil {
+		http.Error(w, "forbidden target", http.StatusForbidden)
+		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, nil)
 	if err != nil {
@@ -1281,7 +1302,9 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 	}
 	w.WriteHeader(resp.StatusCode)
 	if r.Method != http.MethodHead {
-		_, _ = io.Copy(w, resp.Body)
+		bufp := streamBufPool.Get().(*[]byte)
+		_, _ = io.CopyBuffer(w, resp.Body, *bufp)
+		streamBufPool.Put(bufp)
 	}
 }
 

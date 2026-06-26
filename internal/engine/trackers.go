@@ -239,6 +239,7 @@ func probeTrackerHTTP(rawURL string) time.Duration {
 	start := time.Now()
 	resp, err := hc.Head(rawURL)
 	if err == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		return time.Since(start)
 	}
@@ -247,6 +248,7 @@ func probeTrackerHTTP(rawURL string) time.Duration {
 	if err2 != nil {
 		return probeMaxRTT
 	}
+	_, _ = io.Copy(io.Discard, resp2.Body)
 	_ = resp2.Body.Close()
 	return time.Since(start)
 }

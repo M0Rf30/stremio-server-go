@@ -8,12 +8,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -281,19 +283,27 @@ func (h *Handler) buildProxyURL(extBase, endpoint, dest string, opts *Options) s
 	return u
 }
 
-// clientIP returns the effective client IP: first X-Forwarded-For hop or RemoteAddr host.
+// clientIP returns the effective client IP.
+// X-Forwarded-For is honoured only when the immediate peer (RemoteAddr) is a
+// loopback or private address — i.e., the request is arriving through a local
+// reverse proxy. Public clients cannot spoof XFF to bypass IP-ACL checks.
 func clientIP(r *http.Request) net.IP {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first := strings.SplitN(xff, ",", 2)[0]
-		if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
-			return ip
-		}
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	return net.ParseIP(host)
+	peer := net.ParseIP(host)
+
+	// Trust XFF only from a local reverse proxy.
+	if peer != nil && isPrivate(peer) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			first := strings.SplitN(xff, ",", 2)[0]
+			if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
+				return ip
+			}
+		}
+	}
+	return peer
 }
 
 // resolveURL resolves ref against base via net/url.ResolveReference.
@@ -361,6 +371,14 @@ func applyRespHeaders(w http.ResponseWriter, rh http.Header) {
 	}
 }
 
+// copyBufPool holds pooled 256 KB buffers for the passthrough streaming copy.
+var copyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 256*1024)
+		return &b
+	},
+}
+
 // serveStream handles GET /proxy/stream — generic stream proxy with optional decryption.
 func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorize(r); err != nil {
@@ -374,20 +392,24 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.ValidateDest(opts.Dest); err != nil {
+		http.Error(w, "forbidden destination", http.StatusForbidden)
+		return
+	}
+
 	params, _ := h.parseDecryptParams(r)
 
-	// Build upstream request headers from opts plus the incoming Range header.
+	// Build upstream request headers from opts. Range is forwarded only on the
+	// passthrough path; the decrypt path always issues a full GET without Range.
 	upHdr := make(http.Header)
 	for k, vs := range opts.ReqHeaders {
 		upHdr[k] = append([]string(nil), vs...)
 	}
-	if rng := r.Header.Get("Range"); rng != "" {
-		upHdr.Set("Range", rng)
-	}
 
 	ctx := r.Context()
 
-	// Decrypt path: fetch the full segment, decrypt, serve as 200 (no Range/206).
+	// Decrypt path: fetch the full segment without a Range header, decrypt in
+	// memory, and respond 200 with the complete plaintext body.
 	if params.Method != "" && len(params.Key) > 0 {
 		if segmentDecryptor != nil {
 			resp, fetchErr := h.fetch(ctx, http.MethodGet, opts.Dest, upHdr, nil)
@@ -420,6 +442,11 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 		// segmentDecryptor nil — fall through to passthrough.
 	}
 
+	// Passthrough path: forward the client Range header upstream.
+	if rng := r.Header.Get("Range"); rng != "" {
+		upHdr.Set("Range", rng)
+	}
+
 	// Non-Range GET: use the segment cache when TTL is configured.
 	if r.Method == http.MethodGet && r.Header.Get("Range") == "" && h.cfg.SegCacheTTL > 0 {
 		data, respHdr, status, cErr := h.cachedFetch(ctx, opts.Dest, upHdr)
@@ -448,6 +475,113 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	applyRespHeaders(w, opts.RespHeaders)
 	w.WriteHeader(resp.StatusCode)
 	if r.Method != http.MethodHead {
-		_, _ = io.Copy(w, resp.Body)
+		bufp := copyBufPool.Get().(*[]byte)
+		_, _ = io.CopyBuffer(w, resp.Body, *bufp)
+		copyBufPool.Put(bufp)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// SSRF guard helpers
+// ---------------------------------------------------------------------------
+
+// privateRanges lists IP ranges that are considered private/non-routable.
+var privateRanges []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
+		"127.0.0.0/8",    // IPv4 loopback
+		"10.0.0.0/8",     // RFC 1918
+		"172.16.0.0/12",  // RFC 1918
+		"192.168.0.0/16", // RFC 1918
+		"169.254.0.0/16", // IPv4 link-local
+		"::1/128",        // IPv6 loopback
+		"fc00::/7",       // IPv6 ULA
+		"fe80::/10",      // IPv6 link-local
+	} {
+		_, network, _ := net.ParseCIDR(cidr)
+		if network != nil {
+			privateRanges = append(privateRanges, network)
+		}
+	}
+}
+
+// isPrivate reports whether ip is a loopback, RFC 1918, link-local, or ULA address.
+// IPv4-mapped IPv6 addresses are normalised to IPv4 before matching.
+func isPrivate(ip net.IP) bool {
+	// Normalise so IPv4-mapped IPv6 (::ffff:x.x.x.x) matches v4 ranges.
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	}
+	for _, r := range privateRanges {
+		if r.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCloudMetadata reports whether ip is the well-known cloud metadata address
+// 169.254.169.254 (or its IPv4-mapped IPv6 form ::ffff:169.254.169.254).
+func isCloudMetadata(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[0] == 169 && ip4[1] == 254 && ip4[2] == 169 && ip4[3] == 254
+}
+
+// ValidateDest is an SSRF guard for proxy destination URLs.
+// It rejects non-http(s) schemes, resolves the hostname, and blocks:
+//   - 169.254.169.254 (cloud-metadata endpoint) — always.
+//   - Loopback, RFC 1918, link-local, and ULA addresses — only when the proxy
+//     has a password or IP-ACL configured (i.e., it is exposed to untrusted clients).
+//
+// Returns nil when the destination is permitted.
+func (h *Handler) ValidateDest(rawurl string) error {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("disallowed scheme %q: only http and https are permitted", u.Scheme)
+	}
+
+	host := u.Hostname()
+
+	// Collect IPs to check: direct parse for numeric hosts, DNS lookup otherwise.
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		addrs, lookupErr := net.LookupHost(host)
+		if lookupErr != nil {
+			return fmt.Errorf("cannot resolve %q: %w", host, lookupErr)
+		}
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil {
+				ips = append(ips, ip)
+			}
+		}
+	}
+
+	// The proxy is "protected" when any auth mechanism is active.
+	protected := h.cfg.Password != "" || len(h.cfg.IPACL) > 0
+
+	for _, ip := range ips {
+		if isCloudMetadata(ip) {
+			return fmt.Errorf("destination resolves to disallowed cloud-metadata address %s", ip)
+		}
+		if protected && isPrivate(ip) {
+			return fmt.Errorf("destination resolves to private address %s (proxy is protected)", ip)
+		}
+	}
+	return nil
+}
+
+// Authorize is the exported wrapper over the internal authorize method.
+// It is consumed by the api package to gate requests before routing.
+// Returns the same sentinel errors as authorize (errUnauthorized, errForbidden).
+func (h *Handler) Authorize(r *http.Request) error {
+	return h.authorize(r)
 }

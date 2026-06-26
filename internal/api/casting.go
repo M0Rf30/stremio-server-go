@@ -40,6 +40,7 @@ import (
 
 	"github.com/huin/goupnp"
 	"github.com/huin/goupnp/dcps/av1"
+	"golang.org/x/sync/singleflight"
 )
 
 // CastingDevice is one UPnP MediaRenderer discovered on the LAN.
@@ -57,6 +58,10 @@ var (
 	deviceCache   []CastingDevice
 	deviceCachAt  time.Time
 	deviceClients map[string]*av1.AVTransport1 // device id → AVTransport client
+
+	// discoverGroup dedupes concurrent cache-miss discoveries: only one SSDP
+	// search runs at a time; all concurrent callers share its result.
+	discoverGroup singleflight.Group
 )
 
 const (
@@ -220,6 +225,11 @@ func (s *server) castingLoad(w http.ResponseWriter, client *av1.AVTransport1, de
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing source param"})
 		return
 	}
+	// Reject non-http(s) schemes before passing the URI to the device.
+	if u, err := url.Parse(mediaURI); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "source must be an http or https URL"})
+		return
+	}
 
 	// Build DIDL-Lite metadata. The URI inside <res> is XML-escaped because it
 	// is embedded in manually-constructed XML. The full DIDL string is passed
@@ -364,15 +374,22 @@ func refreshDevices() []CastingDevice {
 	}
 	devicesMu.RUnlock()
 
-	devs, clients := discoverDevices()
-
-	devicesMu.Lock()
-	deviceCache = devs
-	deviceClients = clients
-	deviceCachAt = time.Now()
-	devicesMu.Unlock()
-
-	return devs
+	// On a cache miss, use singleflight so that only one SSDP discovery runs
+	// at a time. Concurrent callers block here and receive the same result.
+	type discoverResult struct {
+		devs    []CastingDevice
+		clients map[string]*av1.AVTransport1
+	}
+	v, _, _ := discoverGroup.Do("discover", func() (interface{}, error) {
+		devs, clients := discoverDevices()
+		devicesMu.Lock()
+		deviceCache = devs
+		deviceClients = clients
+		deviceCachAt = time.Now()
+		devicesMu.Unlock()
+		return discoverResult{devs: devs, clients: clients}, nil
+	})
+	return v.(discoverResult).devs
 }
 
 // discoverDevices runs goupnp UPnP discovery for MediaRenderer:1 devices,

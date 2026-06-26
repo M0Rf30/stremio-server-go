@@ -63,6 +63,13 @@ type engine struct {
 	selected         map[int]struct{} // file indices marked for background download
 	lastAccess       time.Time        // updated on NewReader/Stats; used by the janitor for LRU eviction
 	onceMetaPriority sync.Once        // ensures boundary-piece prioritization runs exactly once
+
+	// Announce-URL cache: refreshed at most once per annoTTL to avoid acquiring
+	// the anacrolix Metainfo()/DistinctValues() locks on every Stats() call.
+	annoMu     sync.Mutex
+	annoExpiry time.Time
+	cachedURLs []string
+	cachedOpts map[string]any // full Opts map; rebuilt when cachedURLs are refreshed
 }
 
 // ensureDownloading marks file idx for full background download (idempotent), so
@@ -99,6 +106,7 @@ type manager struct {
 	engines   map[string]*engine // keyed by lower-cased infoHash
 	done      chan struct{}      // closed by Close() to stop background goroutines
 	closeOnce sync.Once          // ensures done is closed exactly once (idempotent Close)
+	limitOnce sync.Once          // ensures SetLimitFn goroutine is started at most once
 }
 
 // Compile-time interface satisfaction checks.
@@ -345,20 +353,22 @@ func (m *manager) SetLimitFn(fn func() (downBytesPerSec, upBytesPerSec int64)) {
 			limiter.SetBurst(burst)
 		}
 	}
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				down, up := fn()
-				applyLimit(m.downLimiter, down, false)
-				applyLimit(m.upLimiter, up, true)
-			case <-m.done:
-				return
+	m.limitOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					down, up := fn()
+					applyLimit(m.downLimiter, down, false)
+					applyLimit(m.upLimiter, up, true)
+				case <-m.done:
+					return
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // evict removes the least-recently-used engines until total on-disk cache usage
@@ -386,29 +396,41 @@ func (m *manager) evict(budget int64) {
 		return
 	}
 
-	// Measure each engine's on-disk footprint and capture lastAccess —
-	// both done outside the write lock.
+	// Single filesystem walk of the cache root — attribute sizes to engine
+	// subdirectories. This replaces N separate WalkDir calls (one per engine)
+	// with one pass, reducing inode pressure on every janitor tick.
 	type entry struct {
 		e          *engine
 		size       int64
 		lastAccess time.Time
 	}
+	dirSizes := make(map[string]int64, len(snap))
+	_ = filepath.WalkDir(m.cfg.CacheRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(m.cfg.CacheRoot, path)
+		if rerr != nil {
+			return nil
+		}
+		// First path component is the info-hash subdirectory.
+		ih := rel
+		if i := strings.IndexByte(rel, byte(filepath.Separator)); i >= 0 {
+			ih = rel[:i]
+		}
+		if info, err2 := d.Info(); err2 == nil {
+			dirSizes[ih] += info.Size()
+		}
+		return nil
+	})
+
 	entries := make([]entry, 0, len(snap))
 	var total int64
 	for _, e := range snap {
-		var sz int64
-		_ = filepath.WalkDir(e.path, func(_ string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil
-			}
-			if info, err2 := d.Info(); err2 == nil {
-				sz += info.Size()
-			}
-			return nil
-		})
 		e.mu.Lock()
 		la := e.lastAccess
 		e.mu.Unlock()
+		sz := dirSizes[e.infoHash]
 		entries = append(entries, entry{e: e, size: sz, lastAccess: la})
 		total += sz
 	}
@@ -431,11 +453,14 @@ func (m *manager) evict(budget int64) {
 			continue
 		}
 		ih := ent.e.infoHash
-		// Re-check existence under write lock before mutating.
+		// Re-check under write lock: compare pointer identity, not just key
+		// existence. A concurrent Remove+EnsureEngine may have replaced the
+		// engine instance; evicting its snapshot would delete a live engine's
+		// map entry and on-disk cache.
 		m.mu.Lock()
-		if _, ok := m.engines[ih]; !ok {
+		if m.engines[ih] != ent.e {
 			m.mu.Unlock()
-			continue // already removed by concurrent caller
+			continue // already removed or replaced by a concurrent caller
 		}
 		ent.e.t.Drop()
 		delete(m.engines, ih)
@@ -613,16 +638,48 @@ func (e *engine) Stats(idx int) *types.Stats {
 	totalPeers := ts.TotalPeers
 
 	files := e.Files()
+	// Refresh the announce-URL / Opts cache when the TTL has elapsed.
+	// Metainfo() and DistinctValues() each acquire anacrolix internal locks; at
+	// ~1 Hz polling from stremio-web those contend heavily. We memoize the
+	// announce list and the full Opts map (which is otherwise allocated fresh
+	// on every call) and refresh at most once every 30 s.
+	const annoTTL = 30 * time.Second
+	e.annoMu.Lock()
+	if now.After(e.annoExpiry) {
+		mi := e.t.Metainfo()
+		urls := mi.UpvertedAnnounceList().DistinctValues()
+		peerSrcs := make([]string, 0, 1+len(urls))
+		peerSrcs = append(peerSrcs, "dht:"+e.infoHash)
+		peerSrcs = append(peerSrcs, urls...)
+		e.cachedURLs = urls
+		e.cachedOpts = map[string]any{
+			"connections":      nil,
+			"dht":              true,
+			"growler":          map[string]any{"flood": 0, "pulse": nil},
+			"handshakeTimeout": nil,
+			"path":             e.path,
+			"peerSearch": map[string]any{
+				"min":     40,
+				"max":     200,
+				"sources": peerSrcs,
+			},
+			"swarmCap": map[string]any{"maxSpeed": nil, "minPeers": nil},
+			"timeout":  nil,
+			"tracker":  true,
+			"virtual":  false,
+		}
+		e.annoExpiry = now.Add(annoTTL)
+	}
+	announceURLs := e.cachedURLs
+	opts := e.cachedOpts
+	e.annoMu.Unlock()
 
-	// Build Sources from the torrent's announce list.
-	// Metainfo() acquires its own read lock internally; safe to call without e.mu.
+	// Build Sources from cached announce URLs and fresh peer counts.
 	// Only valid-URL schemes (udp://, http://, https://) are emitted — stremio-core
 	// passes the url field through url::Url::parse, so "dht:" pseudo-URIs must not
 	// appear here. Best-effort counts use totalPeers since anacrolix does not expose
 	// per-tracker peer counts.
-	mi := e.t.Metainfo()
-	announceURLs := mi.UpvertedAnnounceList().DistinctValues()
-	started := time.Now().UTC().Format(time.RFC3339)
+	started := now.UTC().Format(time.RFC3339)
 	sources := make([]types.Source, 0, len(announceURLs))
 	for _, u := range announceURLs {
 		if !strings.HasPrefix(u, "udp://") && !strings.HasPrefix(u, "http://") &&
@@ -642,47 +699,26 @@ func (e *engine) Stats(idx int) *types.Stats {
 		})
 	}
 
-	// Build peerSearch.sources: dht:<infohash> + all announce URLs (including wss
-	// which are valid for WebRTC peer discovery, just not emitted in Sources above).
-	peerSources := make([]string, 0, 1+len(announceURLs))
-	peerSources = append(peerSources, "dht:"+e.infoHash)
-	peerSources = append(peerSources, announceURLs...)
-
 	s := &types.Stats{
-		InfoHash:         e.infoHash,
-		Name:             e.t.Name(),
-		Peers:            activePeers,
-		Unchoked:         activePeers,
-		Queued:           ts.HalfOpenPeers,
-		Unique:           totalPeers,
-		ConnectionTries:  0,
-		SwarmPaused:      false,
-		SwarmConnections: activePeers,
-		SwarmSize:        totalPeers,
-		Selections:       nil,
-		Wires:            []types.Wire{},
-		Files:            files,
-		Downloaded:       dl,
-		Uploaded:         ul,
-		DownloadSpeed:    dlSpeed,
-		UploadSpeed:      ulSpeed,
-		Sources:          sources,
-		Opts: map[string]any{
-			"connections":      nil,
-			"dht":              true,
-			"growler":          map[string]any{"flood": 0, "pulse": nil},
-			"handshakeTimeout": nil,
-			"path":             e.path,
-			"peerSearch": map[string]any{
-				"min":     40,
-				"max":     200,
-				"sources": peerSources,
-			},
-			"swarmCap": map[string]any{"maxSpeed": nil, "minPeers": nil},
-			"timeout":  nil,
-			"tracker":  true,
-			"virtual":  false,
-		},
+		InfoHash:          e.infoHash,
+		Name:              e.t.Name(),
+		Peers:             activePeers,
+		Unchoked:          activePeers,
+		Queued:            ts.HalfOpenPeers,
+		Unique:            totalPeers,
+		ConnectionTries:   0,
+		SwarmPaused:       false,
+		SwarmConnections:  activePeers,
+		SwarmSize:         totalPeers,
+		Selections:        nil,
+		Wires:             []types.Wire{},
+		Files:             files,
+		Downloaded:        dl,
+		Uploaded:          ul,
+		DownloadSpeed:     dlSpeed,
+		UploadSpeed:       ulSpeed,
+		Sources:           sources,
+		Opts:              opts,
 		PeerSearchRunning: true,
 	}
 
