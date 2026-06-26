@@ -45,6 +45,12 @@ A multi-stage `Dockerfile` (ffmpeg + yt-dlp bundled, non-root, `/data` volume)
 builds an image runnable under Podman/Docker or as a HuggingFace Space.
 See [docs/CONTAINER.md](docs/CONTAINER.md).
 
+### Decentralized torrents (Bitmagnet)
+
+The `/bitmagnet` add-on streams from a self-hosted
+[Bitmagnet](https://bitmagnet.io) DHT index. A compose file and full setup
+guide are in [docs/BITMAGNET.md](docs/BITMAGNET.md).
+
 ## Run
 
 ```sh
@@ -74,6 +80,7 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_PROXY_SEG_CACHE_TTL` | `300` | proxy segment cache TTL, seconds (`0` = off) |
 | `STREMIO_PROXY_PUBLIC_URL` | _(derive)_ | external base URL written into rewritten manifests |
 | `STREMIO_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for stream proxy (socks5/http/https); overridden per-request by `&proxy=` |
+| `STREMIO_BITMAGNET_URL` | _(unset)_ | GraphQL endpoint of a self-hosted Bitmagnet instance; enables the `/bitmagnet` add-on. Unset = add-on serves the manifest but returns no streams. |
 
 The stream proxy (HLS/DASH manifest rewriting, on-the-fly decryption, signed
 URLs) is documented in [docs/PROXY.md](docs/PROXY.md).
