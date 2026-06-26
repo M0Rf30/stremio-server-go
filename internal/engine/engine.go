@@ -599,9 +599,10 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	e.warmMoov(idx)          // pre-read the tail so the moov (end of non-faststart MP4) downloads in parallel
 	r := f.NewReader()
 
-	// Compute readahead = clamp(2 s × downloadRate, 16 MiB, 64 MiB).
-	// When cachedSpeed is 0 (no measurement yet) we use the 16 MiB floor.
-	const minReadahead int64 = 16 << 20 // 16 MiB
+	// Compute readahead = clamp(2 s × downloadRate, 8 MiB, 64 MiB). A small floor
+	// lets playback start sooner; the window still scales up with throughput so
+	// fast swarms keep a deep buffer.
+	const minReadahead int64 = 8 << 20  // 8 MiB
 	const maxReadahead int64 = 64 << 20 // 64 MiB
 	readahead := minReadahead
 	if cachedSpeed > 0 {
