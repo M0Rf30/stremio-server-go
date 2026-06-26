@@ -23,7 +23,7 @@ services:
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PASSWORD=postgres
-      # - TMDB_API_KEY=your_api_key   # optional but needed for tt/IMDB matching
+      - TMDB_API_KEY=${TMDB_API_KEY:-}   # set in deploy/bitmagnet/.env (git-ignored) or export it
     volumes:
       - bitmagnet-config:/root/.config/bitmagnet
     command: ["worker", "run", "--all"]
