@@ -92,6 +92,7 @@ func main() {
 		ListenPort:       envInt("BT_LISTEN_PORT", 0),
 		WebUI:            getenv("WEB_UI_LOCATION", "https://web.stremio.com/"),
 		Version:          version,
+		TrackersMax:      envInt("STREMIO_TRACKERS_MAX", 5),
 		ProxyPassword:    getenv("STREMIO_PROXY_PASSWORD", ""),
 		ProxySecret:      proxySecret(appPath),
 		ProxyIPACL:       getenv("STREMIO_PROXY_IP_ACL", ""),

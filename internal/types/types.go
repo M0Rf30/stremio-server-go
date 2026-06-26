@@ -11,13 +11,14 @@ import (
 
 // Config is the runtime configuration shared by all subsystems.
 type Config struct {
-	HTTPPort   int    // enginefs HTTP API port (default 11470)
-	HTTPSPort  int    // optional HTTPS port (default 12470, 0 = disabled)
-	AppPath    string // application/cache root, e.g. ~/.stremio-server
-	CacheRoot  string // torrent piece cache root (defaults to AppPath)
-	ListenPort int    // BitTorrent peer listen port (0 = random)
-	WebUI      string // redirect target for "GET /" (e.g. https://web.stremio.com/)
-	Version    string // value reported as settings.serverVersion
+	HTTPPort    int    // enginefs HTTP API port (default 11470)
+	HTTPSPort   int    // optional HTTPS port (default 12470, 0 = disabled)
+	AppPath     string // application/cache root, e.g. ~/.stremio-server
+	CacheRoot   string // torrent piece cache root (defaults to AppPath)
+	ListenPort  int    // BitTorrent peer listen port (0 = random)
+	WebUI       string // redirect target for "GET /" (e.g. https://web.stremio.com/)
+	Version     string // value reported as settings.serverVersion
+	TrackersMax int    // max ranked UDP/HTTP trackers per torrent (STREMIO_TRACKERS_MAX; 0 = default)
 
 	// Stream proxy configuration.
 	ProxyPassword    string // api_password for stream proxy; "" = no auth

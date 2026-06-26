@@ -21,12 +21,13 @@ import (
 // fallback.
 const trackersBestURL = "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt"
 
-// trackerTopN is the maximum number of ranked UDP/HTTP trackers attached per
-// torrent. Kept small: anacrolix's announce dispatcher does work proportional to
-// (torrents x trackers) and recomputes bytesLeft over every piece per announce,
-// so a large list dominates CPU on big 4K torrents. DHT + PEX + webseeds cover
-// peer discovery; a handful of fast trackers is plenty for streaming.
-const trackerTopN = 8
+// defaultTrackerTopN is the fallback number of ranked UDP/HTTP trackers attached
+// per torrent when STREMIO_TRACKERS_MAX is unset or invalid. Kept small:
+// anacrolix's announce dispatcher does work proportional to (torrents x trackers)
+// and recomputes bytesLeft over every piece per announce, so a large list
+// dominates CPU on big 4K torrents. DHT + PEX + webseeds cover peer discovery;
+// a handful of fast trackers is plenty for streaming.
+const defaultTrackerTopN = 5
 
 // trackerRefreshIntv is how often the tracker list is re-fetched and re-ranked.
 const trackerRefreshIntv = 24 * time.Hour
@@ -101,7 +102,7 @@ func parseTrackers(s string) []string {
 // background goroutine that fetches, probes, ranks, and re-persists the list.
 // The goroutine repeats every 24 h and stops when done is closed.
 // The embedded snapshot always serves as the fallback so startup is never blocked.
-func initTrackers(cacheDir string, done <-chan struct{}) {
+func initTrackers(cacheDir string, maxTrackers int, done <-chan struct{}) {
 	cache := filepath.Join(cacheDir, "trackers_best.txt")
 	// Synchronous fast-path: serve the last ranked list immediately if cached.
 	if b, err := os.ReadFile(cache); err == nil {
@@ -111,7 +112,7 @@ func initTrackers(cacheDir string, done <-chan struct{}) {
 	}
 	// Background: fetch → probe → rank → persist, then repeat every 24 h.
 	go func() {
-		doRefreshTrackers(cache)
+		doRefreshTrackers(cache, maxTrackers)
 		ticker := time.NewTicker(trackerRefreshIntv)
 		defer ticker.Stop()
 		for {
@@ -119,7 +120,7 @@ func initTrackers(cacheDir string, done <-chan struct{}) {
 			case <-done:
 				return
 			case <-ticker.C:
-				doRefreshTrackers(cache)
+				doRefreshTrackers(cache, maxTrackers)
 			}
 		}
 	}()
@@ -127,10 +128,13 @@ func initTrackers(cacheDir string, done <-chan struct{}) {
 
 // doRefreshTrackers fetches the upstream curated UDP/HTTP list plus ngosang's
 // WebSocket list, probes the UDP/HTTP trackers in parallel to measure RTT, keeps
-// the fastest trackerTopN, merges all wss trackers (fetched + embedded) back in,
+// the fastest maxTrackers, merges all wss trackers (fetched + embedded) back in,
 // updates the in-memory list, and persists the ranked UDP/HTTP list for a fast
 // next startup.
-func doRefreshTrackers(cache string) {
+func doRefreshTrackers(cache string, maxTrackers int) {
+	if maxTrackers <= 0 {
+		maxTrackers = defaultTrackerTopN
+	}
 	candidates := fetchTrackerList(trackersBestURL)
 	if len(candidates) == 0 {
 		return // upstream unreachable — keep the current/embedded list
@@ -147,7 +151,7 @@ func doRefreshTrackers(cache string) {
 	}
 
 	// Probe and keep the fastest topN UDP/HTTP trackers.
-	ranked := rankAndKeep(probeable, trackerTopN)
+	ranked := rankAndKeep(probeable, maxTrackers)
 
 	// Persist only the ranked UDP/HTTP list; wss are merged at runtime via mergeWS.
 	_ = os.WriteFile(cache, []byte(strings.Join(ranked, "\n")+"\n"), 0o644)

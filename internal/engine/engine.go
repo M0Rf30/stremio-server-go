@@ -168,7 +168,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	done := make(chan struct{})
 
 	// Load curated trackers (cached) and refresh + rank from upstream in the background.
-	initTrackers(cfg.CacheRoot, done)
+	initTrackers(cfg.CacheRoot, cfg.TrackersMax, done)
 
 	return &manager{
 		client:      client,
