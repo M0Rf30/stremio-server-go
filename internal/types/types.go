@@ -31,6 +31,10 @@ type Config struct {
 
 	// Bitmagnet integration (self-hosted DHT index).
 	BitmagnetURL string // GraphQL endpoint, e.g. http://localhost:3333/graphql; "" disables stream queries
+
+	// Torznab integration (Prowlarr/Jackett/NZBHydra/Bitmagnet /torznab).
+	TorznabURL    string // Torznab endpoint base URL; "" disables stream queries
+	TorznabAPIKey string // Optional API key appended as &apikey=; "" = no auth
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.

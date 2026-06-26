@@ -101,6 +101,8 @@ func main() {
 		ProxyPublicURL:   getenv("STREMIO_PROXY_PUBLIC_URL", ""),
 		ProxyUpstream:    getenv("STREMIO_PROXY_UPSTREAM", ""),
 		BitmagnetURL:     getenv("STREMIO_BITMAGNET_URL", ""),
+		TorznabURL:       getenv("STREMIO_TORZNAB_URL", ""),
+		TorznabAPIKey:    getenv("STREMIO_TORZNAB_APIKEY", ""),
 	}
 
 	ss, err := settings.New(cfg)

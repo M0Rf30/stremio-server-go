@@ -51,6 +51,12 @@ The `/bitmagnet` add-on streams from a self-hosted
 [Bitmagnet](https://bitmagnet.io) DHT index. A compose file and full setup
 guide are in [docs/BITMAGNET.md](docs/BITMAGNET.md).
 
+### Universal indexers (Torznab)
+
+The `/torznab` add-on queries any Torznab-compatible indexer (Prowlarr, Jackett,
+NZBHydra2, or Bitmagnet's built-in `/torznab` endpoint). Setup guide:
+[docs/TORZNAB.md](docs/TORZNAB.md).
+
 ## Run
 
 ```sh
@@ -81,6 +87,8 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_PROXY_PUBLIC_URL` | _(derive)_ | external base URL written into rewritten manifests |
 | `STREMIO_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for stream proxy (socks5/http/https); overridden per-request by `&proxy=` |
 | `STREMIO_BITMAGNET_URL` | _(unset)_ | GraphQL endpoint of a self-hosted Bitmagnet instance; enables the `/bitmagnet` add-on. Unset = add-on serves the manifest but returns no streams. |
+| `STREMIO_TORZNAB_URL` | _(unset)_ | Torznab indexer API base URL; enables the `/torznab` add-on. Unset = add-on serves the manifest but returns no streams. |
+| `STREMIO_TORZNAB_APIKEY` | _(unset)_ | API key for the Torznab indexer. Required by Prowlarr and Jackett; not needed for Bitmagnet. |
 
 The stream proxy (HLS/DASH manifest rewriting, on-the-fly decryption, signed
 URLs) is documented in [docs/PROXY.md](docs/PROXY.md).
