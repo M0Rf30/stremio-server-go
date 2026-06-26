@@ -618,16 +618,20 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	return &pinnedReader{ReadSeekCloser: r, e: e, idx: idx}, f.Length(), nil
 }
 
-// warmMoov forces a file's trailing bytes to download by opening a dedicated
-// reader on the last few MiB and draining it, in parallel with the main stream.
-// Non-faststart MP4s (e.g. most RARBG encodes) keep the moov atom — the index a
-// player must read before it can start — at the END of the file. primeBoundary
+// warmMoov pre-fetches the bytes a player needs to start before they would
+// arrive on their own. Non-faststart MP4s (e.g. most RARBG encodes) and MKVs
+// keep their index (moov atom / Cues) at the END of the file; primeBoundary
 // marks those pieces top-priority, but within equal priority the actively-read
-// front wins, so the moov trickles in last and playback stalls for a long time
-// even while the torrent downloads fast. An active tail read gives the moov real
-// demand so it arrives alongside the header. Runs once per file. This is the
-// anacrolix equivalent of qBittorrent's "download first and last piece first"
-// and Elementum's start/end buffering.
+// front wins, so the index trickles in last and playback stalls for a long time
+// even while the torrent downloads fast. warmMoov opens a dedicated reader on
+// the last few MiB and drains it so the index gets real demand and arrives
+// alongside the header. This is the anacrolix equivalent of qBittorrent's
+// "download first and last piece first" / Elementum's start-end buffering.
+//
+// Faststart MP4s already carry the moov at the front, so the main stream read
+// covers it — warming the tail would only steal bandwidth and delay start, so
+// it is skipped. Runs once per file; bounded by a timeout so a tail that never
+// arrives (dead swarm) cannot leak the goroutine; tiny files are ignored.
 func (e *engine) warmMoov(idx int) {
 	if idx < 0 || !e.hasInfo() {
 		return
@@ -648,26 +652,84 @@ func (e *engine) warmMoov(idx int) {
 		return
 	}
 	f := files[idx]
-	const tailWindow int64 = 8 << 20 // 8 MiB — covers the moov atom of typical videos
-	off := f.Length() - tailWindow
-	if off < 0 {
-		off = 0
+	const minWarmSize int64 = 16 << 20 // ignore subtitles/samples/tiny files
+	const tailWindow int64 = 8 << 20   // covers the moov atom of typical videos
+	if f.Length() < minWarmSize {
+		return
 	}
 	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if !needsTailWarm(ctx, f) {
+			return // faststart MP4: index already at the front
+		}
 		r := f.NewReader()
 		defer func() { _ = r.Close() }()
 		r.SetReadahead(tailWindow)
+		off := f.Length() - tailWindow
+		if off < 0 {
+			off = 0
+		}
 		if _, err := r.Seek(off, io.SeekStart); err != nil {
 			return
 		}
 		buf := make([]byte, 64<<10)
 		for {
-			n, err := r.Read(buf) // blocks until pieces arrive; errors when the torrent is dropped
+			n, err := r.ReadContext(ctx, buf) // bounded; errors on timeout or torrent drop
 			if n == 0 || err != nil {
 				return
 			}
 		}
 	}()
+}
+
+// needsTailWarm walks the leading MP4 box headers and reports false only when it
+// confirms a faststart layout (a moov box appears before any mdat). For mdat
+// first (moov at the end), non-MP4 containers (e.g. MKV, whose Cues live at the
+// end), or anything it cannot parse, it returns true so the tail is warmed — the
+// safe default. Reads are bounded by ctx.
+func needsTailWarm(ctx context.Context, f *torrent.File) bool {
+	r := f.NewReader()
+	defer func() { _ = r.Close() }()
+	r.SetReadahead(256 << 10)
+	hdr := make([]byte, 8)
+	var pos int64
+	for i := 0; i < 6; i++ {
+		if _, err := r.Seek(pos, io.SeekStart); err != nil {
+			return true
+		}
+		if err := readFullCtx(ctx, r, hdr); err != nil {
+			return true
+		}
+		size := int64(hdr[0])<<24 | int64(hdr[1])<<16 | int64(hdr[2])<<8 | int64(hdr[3])
+		switch string(hdr[4:8]) {
+		case "moov":
+			return false // faststart: index before media data
+		case "mdat":
+			return true // media first: moov is at the end
+		case "ftyp", "free", "skip", "wide", "pdin":
+			// header/filler box; advance to the next one
+		default:
+			return true // not a recognizable faststart MP4 (e.g. MKV)
+		}
+		if size < 8 {
+			return true // 64-bit/edge size: bail to the safe default
+		}
+		pos += size
+	}
+	return true
+}
+
+// readFullCtx fills b from r, honouring ctx for cancellation/timeout.
+func readFullCtx(ctx context.Context, r torrent.Reader, b []byte) error {
+	for got := 0; got < len(b); {
+		n, err := r.ReadContext(ctx, b[got:])
+		got += n
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pinnedReader wraps a torrent file reader so the engine's openReaders count is
