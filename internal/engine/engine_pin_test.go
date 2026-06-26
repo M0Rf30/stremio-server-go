@@ -80,3 +80,25 @@ func TestEvictSkipsOpenReaders(t *testing.T) {
 		t.Fatal("MRU engine should be preserved")
 	}
 }
+
+// TestReadaheadFor verifies the adaptive readahead window: ~2 s of throughput,
+// clamped to the [8 MiB, 64 MiB] floor/ceiling.
+func TestReadaheadFor(t *testing.T) {
+	const mib = 1 << 20
+	cases := []struct {
+		speed float64
+		want  int64
+	}{
+		{0, 8 * mib},          // no measurement -> floor
+		{1 * mib, 8 * mib},    // 2 MiB scaled < floor
+		{3 * mib, 8 * mib},    // 6 MiB scaled < floor
+		{10 * mib, 20 * mib},  // within range
+		{32 * mib, 64 * mib},  // 64 MiB scaled == ceiling
+		{100 * mib, 64 * mib}, // 200 MiB scaled -> ceiling
+	}
+	for _, c := range cases {
+		if got := readaheadFor(c.speed); got != c.want {
+			t.Errorf("readaheadFor(%.0f) = %d, want %d", c.speed, got, c.want)
+		}
+	}
+}

@@ -66,6 +66,7 @@ type engine struct {
 	openReaders      int              // active NewReader handles; >0 pins the torrent against eviction
 	reading          map[int]int      // file idx -> open reader count; a file with readers is never demoted
 	tailWarmed       map[int]struct{} // file idx -> tail (moov) actively pre-read once, to beat front starvation
+	prefetched       map[int]struct{} // source file idx -> next-file boundary already prefetched (once each)
 	onceMetaPriority sync.Once        // ensures boundary-piece prioritization runs exactly once
 
 	// Announce-URL cache: refreshed at most once per annoTTL to avoid acquiring
@@ -569,10 +570,9 @@ func (e *engine) Files() []types.FileInfo {
 	return out
 }
 
-// NewReader returns a streaming, seek-capable reader for the file at idx.
-// Readahead is scaled to ~2 s of recent download throughput, clamped to
-// [16 MiB, 64 MiB], so slow connections stay at the 16 MiB floor while fast
-// ones (≥32 MB/s) reach the 64 MiB ceiling for smoother high-bitrate streams.
+// NewReader returns a streaming, seek-capable reader for the file at idx. The
+// readahead window starts small (8 MiB) so playback begins quickly, then grows
+// with measured throughput up to 64 MiB for a deep buffer (see pinnedReader).
 func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	// Mark this engine as recently active before any blocking work.
 	e.mu.Lock()
@@ -594,29 +594,20 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	}
 	e.reading[idx]++
 	e.mu.Unlock()
-	e.ensureDownloading(idx) // keep fetching the whole file, not just the read window
-	e.primeBoundary(idx)     // prioritize this file's moov so playback can start before full download
-	e.warmMoov(idx)          // pre-read the tail so the moov (end of non-faststart MP4) downloads in parallel
+	e.ensureDownloading(idx) // fetch the file being played; demote abandoned ones
+	e.primeBoundary(idx)     // top-priority the header/moov so playback starts fast
+	e.warmMoov(idx)          // pre-read the tail so the moov downloads with the front
+	e.prefetchNext(idx)      // opportunistically warm the next episode's header (binge UX)
 	r := f.NewReader()
-
-	// Compute readahead = clamp(2 s × downloadRate, 8 MiB, 64 MiB). A small floor
-	// lets playback start sooner; the window still scales up with throughput so
-	// fast swarms keep a deep buffer.
-	const minReadahead int64 = 8 << 20  // 8 MiB
-	const maxReadahead int64 = 64 << 20 // 64 MiB
-	readahead := minReadahead
-	if cachedSpeed > 0 {
-		scaled := int64(2 * cachedSpeed)
-		if scaled < minReadahead {
-			scaled = minReadahead
-		}
-		if scaled > maxReadahead {
-			scaled = maxReadahead
-		}
-		readahead = scaled
-	}
-	r.SetReadahead(readahead)
-	return &pinnedReader{ReadSeekCloser: r, e: e, idx: idx}, f.Length(), nil
+	r.SetReadahead(readaheadFor(cachedSpeed))
+	now := time.Now()
+	return &pinnedReader{
+		tr:        r,
+		e:         e,
+		idx:       idx,
+		deadline:  now.Add(startupReadTimeout),
+		nextRAAdj: now.Add(readaheadAdjustInterval),
+	}, f.Length(), nil
 }
 
 // warmMoov pre-fetches the bytes a player needs to start before they would
@@ -733,19 +724,72 @@ func readFullCtx(ctx context.Context, r torrent.Reader, b []byte) error {
 	return nil
 }
 
-// pinnedReader wraps a torrent file reader so the engine's openReaders count is
-// decremented exactly once on Close. While openReaders > 0 the janitor will not
-// evict the torrent, so an open stream is never dropped mid-read even when it is
-// paused or idle past the graceWindow.
+// Streaming readahead bounds + timing.
+const (
+	minReadahead            int64         = 8 << 20          // 8 MiB floor — fast start
+	maxReadahead            int64         = 64 << 20         // 64 MiB ceiling — deep buffer on fast swarms
+	readaheadAdjustInterval time.Duration = 3 * time.Second  // how often a live reader recomputes its window
+	startupReadTimeout      time.Duration = 90 * time.Second // bound the first read so a dead swarm errors instead of hanging
+)
+
+// readaheadFor returns the streaming readahead window for a measured download
+// speed: ~2 s of throughput, clamped to [minReadahead, maxReadahead].
+func readaheadFor(speed float64) int64 {
+	ra := minReadahead
+	if speed > 0 {
+		if s := int64(2 * speed); s > ra {
+			ra = s
+		}
+	}
+	if ra > maxReadahead {
+		ra = maxReadahead
+	}
+	return ra
+}
+
+// pinnedReader wraps a torrent file reader. While it is open the engine's
+// openReaders count is >0 so the janitor never evicts the torrent mid-stream
+// (Close decrements exactly once). It also (a) grows the readahead window as the
+// measured speed rises — small at first for a fast start, deeper later for
+// smooth playback — and (b) bounds the FIRST read with a deadline so a dead
+// swarm returns an error instead of hanging the player forever.
 type pinnedReader struct {
-	io.ReadSeekCloser
+	tr   torrent.Reader
 	e    *engine
 	idx  int
 	once sync.Once
+
+	mu        sync.Mutex
+	started   bool      // a read has returned data; later reads block normally
+	deadline  time.Time // startup read deadline
+	nextRAAdj time.Time // next readahead recompute time
+}
+
+func (p *pinnedReader) Read(b []byte) (int, error) {
+	p.adjustReadahead()
+	p.mu.Lock()
+	started, dl := p.started, p.deadline
+	p.mu.Unlock()
+	if started {
+		return p.tr.Read(b)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), dl)
+	defer cancel()
+	n, err := p.tr.ReadContext(ctx, b)
+	if n > 0 {
+		p.mu.Lock()
+		p.started = true
+		p.mu.Unlock()
+	}
+	return n, err
+}
+
+func (p *pinnedReader) Seek(offset int64, whence int) (int64, error) {
+	return p.tr.Seek(offset, whence)
 }
 
 func (p *pinnedReader) Close() error {
-	err := p.ReadSeekCloser.Close()
+	err := p.tr.Close()
 	p.once.Do(func() {
 		p.e.mu.Lock()
 		p.e.openReaders--
@@ -755,6 +799,77 @@ func (p *pinnedReader) Close() error {
 		p.e.mu.Unlock()
 	})
 	return err
+}
+
+// adjustReadahead recomputes the window from the latest measured speed, at most
+// once per readaheadAdjustInterval, so the buffer deepens as throughput rises.
+func (p *pinnedReader) adjustReadahead() {
+	now := time.Now()
+	p.mu.Lock()
+	if now.Before(p.nextRAAdj) {
+		p.mu.Unlock()
+		return
+	}
+	p.nextRAAdj = now.Add(readaheadAdjustInterval)
+	p.mu.Unlock()
+	p.e.mu.Lock()
+	sp := p.e.lastDLSpeed
+	p.e.mu.Unlock()
+	p.tr.SetReadahead(readaheadFor(sp))
+}
+
+// prefetchNext opportunistically warms the NEXT video file's header and tail
+// (moov) at low (Normal) priority, so advancing to the next episode of a season
+// pack starts fast. It touches only a few boundary pieces (not the whole file)
+// and never raises them above the active stream's read window, so it uses only
+// spare bandwidth and cannot starve current playback. Runs once per source file;
+// the prefetch target is not added to e.selected, so demotion never touches it.
+func (e *engine) prefetchNext(idx int) {
+	if idx < 0 || !e.hasInfo() {
+		return
+	}
+	e.mu.Lock()
+	if e.prefetched == nil {
+		e.prefetched = map[int]struct{}{}
+	}
+	if _, ok := e.prefetched[idx]; ok {
+		e.mu.Unlock()
+		return
+	}
+	e.prefetched[idx] = struct{}{}
+	e.mu.Unlock()
+
+	next := e.nextVideoIdx(idx)
+	if next < 0 {
+		return
+	}
+	files := e.t.Files()
+	f := files[next]
+	begin := f.BeginPieceIndex()
+	end := f.EndPieceIndex()
+	const prefetchPieces = 4 // header + index only, opportunistic
+	for i := begin; i < begin+prefetchPieces && i < end; i++ {
+		e.t.Piece(i).SetPriority(torrent.PiecePriorityNormal)
+	}
+	tailStart := end - prefetchPieces
+	if tailStart < begin {
+		tailStart = begin
+	}
+	for i := tailStart; i < end; i++ {
+		e.t.Piece(i).SetPriority(torrent.PiecePriorityNormal)
+	}
+	log.Printf("engine: prefetched next-file boundary for %s (file idx %d)", e.infoHash, next)
+}
+
+// nextVideoIdx returns the index of the first video file after idx, or -1.
+func (e *engine) nextVideoIdx(idx int) int {
+	files := e.t.Files()
+	for i := idx + 1; i < len(files); i++ {
+		if videoExts[strings.ToLower(filepath.Ext(files[i].DisplayPath()))] {
+			return i
+		}
+	}
+	return -1
 }
 
 // GuessFileIdx returns the index of the largest video file, falling back to the
