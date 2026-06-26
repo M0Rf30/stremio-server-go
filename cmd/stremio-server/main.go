@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof" //nolint:gosec // G108: pprof is served only on the loopback STREMIO_PPROF listener, never the main handler
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -180,6 +181,18 @@ func main() {
 			log.Fatalf("http server: %v", err)
 		}
 	}()
+
+	// Optional pprof endpoint for diagnostics; disabled unless STREMIO_PPROF is
+	// set (e.g. STREMIO_PPROF=127.0.0.1:6060). Handlers come from net/http/pprof.
+	if addr := os.Getenv("STREMIO_PPROF"); addr != "" {
+		pp := &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			log.Printf("pprof listening at http://%s/debug/pprof/", addr)
+			if err := pp.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("pprof server: %v", err)
+			}
+		}()
+	}
 
 	var tlsSrv *http.Server
 	if cfg.HTTPSPort > 0 {

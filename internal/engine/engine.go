@@ -130,12 +130,15 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	cc.DisableWebseeds = false   // BEP19 HTTP webseeds
 	cc.Seed = true               // keep uploading while/after streaming (swarm health; uses IPv6 inbound)
 	cc.AcceptPeerConnections = true
-	cc.DisableAcceptRateLimiting = true
+	cc.DisableAcceptRateLimiting = false // rate-limit inbound accepts to bound connection-handling CPU
 
-	// Generous budgets for fast metadata fetch + streaming.
-	cc.EstablishedConnsPerTorrent = 80
-	cc.HalfOpenConnsPerTorrent = 50
-	cc.TorrentPeersHighWater = 1000
+	// Connection budgets tuned for streaming: enough peers for full throughput
+	// without excessive MSE/RC4 handshakes and dial churn, which are the dominant
+	// engine CPU cost on large, fast swarms (4K). These match anacrolix defaults
+	// (50/25) with a trimmed peer high-water; raise them only if throughput-bound.
+	cc.EstablishedConnsPerTorrent = 50
+	cc.HalfOpenConnsPerTorrent = 25
+	cc.TorrentPeersHighWater = 500
 
 	// Honor the documented contract: 0 = OS-assigned (random) port. anacrolix's
 	// NewDefaultClientConfig hardcodes 42069, so we must set it unconditionally
