@@ -47,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -172,6 +173,10 @@ var (
 // imdbSem caps the number of concurrent IMDB-resolution goroutines so a large
 // first scan does not open thousands of outbound HTTP connections at once.
 var imdbSem = make(chan struct{}, 20)
+
+// localIMDBDisabled gates the local-files add-on's IMDB resolution
+// (STREMIO_LOCAL_IMDB). Zero value = enabled; New() sets it from cfg.LocalIMDB.
+var localIMDBDisabled atomic.Bool
 
 // — Scan cache —
 
@@ -303,6 +308,9 @@ func resolveIMDB(title string, year int, ctype string) (ttID, poster string) {
 // given file if no result is cached and no goroutine is already in flight.
 // The goroutine updates imdbByLocal and ttToPath when done.
 func ensureIMDBResolved(localHex, title string, year int, ctype, absPath string) {
+	if localIMDBDisabled.Load() {
+		return
+	}
 	if title == "" {
 		return
 	}

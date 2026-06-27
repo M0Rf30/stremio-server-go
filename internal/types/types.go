@@ -20,6 +20,9 @@ type Config struct {
 	WebUI           string // redirect target for "GET /" (e.g. https://web.stremio.com/)
 	Version         string // value reported as settings.serverVersion
 	TrackersMax     int    // max ranked UDP/HTTP trackers per torrent (STREMIO_TRACKERS_MAX; 0 = default)
+	// remote tracker list source (STREMIO_TRACKERS_URL); "" disables the remote
+	// fetch (embedded/cached list + DHT/PEX only). Default: a curated public list.
+	TrackersURL string
 	// disable ALL BitTorrent tracker announces (DHT/PEX/webseeds still used); STREMIO_DISABLE_TRACKERS; default false
 	DisableTrackers bool
 	// disable WebTorrent/WebRTC peers (pion); cuts ~60% of goroutines + RAM; STREMIO_DISABLE_WEBTORRENT; default true (disabled)
@@ -51,6 +54,12 @@ type Config struct {
 	// addon speaking /meta/{type}/{id}.json (Cinemeta, a self-hosted mirror, or
 	// a TMDB/aiometadata addon's configured base).
 	MetadataURL string
+
+	// LocalIMDB enables the local-files add-on's IMDB title->id resolution
+	// (queries IMDb's suggestion API; STREMIO_LOCAL_IMDB, default true). When
+	// false, local files keep filename-parsed titles and local: ids — no
+	// external IMDb call is made.
+	LocalIMDB bool
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.

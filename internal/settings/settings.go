@@ -93,7 +93,7 @@ func makeDefaults(cfg types.Config) map[string]interface{} {
 		// cachedTrackers; trackersLastUpdated holds the Unix timestamp of the last
 		// successful fetch.  These fields are engine-managed at runtime but must
 		// survive Save/Load so the ranked list is not discarded on restart.
-		"trackersSourceUrl":   "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt",
+		"trackersSourceUrl":   cfg.TrackersURL,
 		"cachedTrackers":      []string{},
 		"trackersLastUpdated": int64(0),
 

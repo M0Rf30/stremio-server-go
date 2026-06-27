@@ -15,11 +15,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Curated public trackers from XIU2/TrackersListCollection (best list) plus a
-// few verified WebTorrent (wss) trackers so WebRTC peers can be discovered. The
-// list is refreshed from upstream at startup; this embedded snapshot is the
-// fallback.
-const trackersBestURL = "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt"
+// The remote tracker source URL is configurable (STREMIO_TRACKERS_URL, wired via
+// types.Config.TrackersURL). The embeddedTrackers snapshot below is the always
+// available fallback when the remote fetch is disabled or unreachable, so
+// startup is never blocked.
 
 // defaultTrackerTopN is the fallback number of ranked UDP/HTTP trackers attached
 // per torrent when STREMIO_TRACKERS_MAX is unset or invalid. Kept small:
@@ -137,7 +136,7 @@ func announceableTiers(tiers [][]string, allowWS bool) [][]string {
 // background goroutine that fetches, probes, ranks, and re-persists the list.
 // The goroutine repeats every 24 h and stops when done is closed.
 // The embedded snapshot always serves as the fallback so startup is never blocked.
-func initTrackers(cacheDir string, maxTrackers int, done <-chan struct{}) {
+func initTrackers(cacheDir string, maxTrackers int, srcURL string, done <-chan struct{}) {
 	cache := filepath.Join(cacheDir, "trackers_best.txt")
 	// Synchronous fast-path: serve the last ranked list immediately if cached.
 	if b, err := os.ReadFile(cache); err == nil {
@@ -146,8 +145,11 @@ func initTrackers(cacheDir string, maxTrackers int, done <-chan struct{}) {
 		}
 	}
 	// Background: fetch → probe → rank → persist, then repeat every 24 h.
+	if srcURL == "" {
+		return // remote refresh disabled; serve the embedded/cached list only
+	}
 	go func() {
-		doRefreshTrackers(cache, maxTrackers)
+		doRefreshTrackers(cache, maxTrackers, srcURL)
 		ticker := time.NewTicker(trackerRefreshIntv)
 		defer ticker.Stop()
 		for {
@@ -155,7 +157,7 @@ func initTrackers(cacheDir string, maxTrackers int, done <-chan struct{}) {
 			case <-done:
 				return
 			case <-ticker.C:
-				doRefreshTrackers(cache, maxTrackers)
+				doRefreshTrackers(cache, maxTrackers, srcURL)
 			}
 		}
 	}()
@@ -166,11 +168,11 @@ func initTrackers(cacheDir string, maxTrackers int, done <-chan struct{}) {
 // the fastest maxTrackers, merges all wss trackers (fetched + embedded) back in,
 // updates the in-memory list, and persists the ranked UDP/HTTP list for a fast
 // next startup.
-func doRefreshTrackers(cache string, maxTrackers int) {
+func doRefreshTrackers(cache string, maxTrackers int, srcURL string) {
 	if maxTrackers <= 0 {
 		maxTrackers = defaultTrackerTopN
 	}
-	candidates := fetchTrackerList(trackersBestURL)
+	candidates := fetchTrackerList(srcURL)
 	if len(candidates) == 0 {
 		return // upstream unreachable — keep the current/embedded list
 	}

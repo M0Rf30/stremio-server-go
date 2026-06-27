@@ -68,6 +68,7 @@ type server struct {
 
 // New returns the HTTP handler for the streaming server.
 func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProber, cfg types.Config) http.Handler {
+	localIMDBDisabled.Store(!cfg.LocalIMDB)
 	return &server{
 		em:        em,
 		ss:        ss,

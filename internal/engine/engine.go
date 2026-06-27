@@ -225,7 +225,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	// Load curated trackers (cached) and refresh + rank from upstream in the background.
 	// Skip tracker list fetch when announces are disabled (tests / private mode).
 	if !cfg.DisableTrackers {
-		initTrackers(cfg.CacheRoot, cfg.TrackersMax, done)
+		initTrackers(cfg.CacheRoot, cfg.TrackersMax, cfg.TrackersURL, done)
 	}
 
 	return &manager{

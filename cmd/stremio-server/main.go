@@ -96,6 +96,23 @@ func metadataURL() string {
 	return strings.TrimRight(strings.TrimSpace(v), "/")
 }
 
+// defaultTrackersURL is the curated public tracker list fetched and ranked at
+// startup. Override via STREMIO_TRACKERS_URL; an empty/off value disables the
+// remote fetch entirely (the embedded/cached list plus DHT/PEX still apply).
+const defaultTrackersURL = "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt"
+
+func trackersURL() string {
+	v, ok := os.LookupEnv("STREMIO_TRACKERS_URL")
+	if !ok {
+		return defaultTrackersURL
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off", "0", "false", "no", "disable", "disabled":
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
 // @title        stremio-server-go enginefs API
 // @version      4.21.0
 // @description  HTTP API served by stremio-server-go, a pure-Go drop-in for Stremio's streaming server (server.js). serverVersion is reported as 4.21.0 for client feature-gating; it is independent of the binary build version.
@@ -154,6 +171,8 @@ func main() {
 		DisableWebtorrent: envBool("STREMIO_DISABLE_WEBTORRENT", true), // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers
 		EnableDLNA:        envBool("STREMIO_ENABLE_DLNA", false),       // default disabled; set =1/true to enable /casting DLNA discovery + control
 		PeersPerTorrent:   envInt("STREMIO_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
+		TrackersURL:       trackersURL(),                               // remote tracker list; "" disables remote fetch (STREMIO_TRACKERS_URL)
+		LocalIMDB:         envBool("STREMIO_LOCAL_IMDB", true),         // local-files addon IMDB resolution; default on
 	}
 	if cfg.DisableWebtorrent {
 		logging.For("engine").Info("webtorrent/webrtc peers disabled")
@@ -163,6 +182,12 @@ func main() {
 	}
 	if cfg.MetadataURL == "" {
 		logging.For("metadata").Info("metadata (cinemeta) resolution disabled")
+	}
+	if cfg.TrackersURL == "" {
+		logging.For("engine").Info("remote tracker list disabled (DHT/PEX/embedded only)")
+	}
+	if !cfg.LocalIMDB {
+		logging.For("localaddon").Info("IMDB resolution disabled")
 	}
 
 	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also
