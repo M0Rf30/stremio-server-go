@@ -273,6 +273,17 @@ func main() {
 		} else {
 			holder := &certHolder{}
 			holder.set(cert)
+			if h, ok := handler.(interface{ SetCertReloadHook(func()) }); ok {
+				h.SetCertReloadHook(func() {
+					c, err := tls.LoadX509KeyPair(certFile, keyFile)
+					if err != nil {
+						log.Printf("https: live cert reload failed: %v", err)
+						return
+					}
+					holder.set(c)
+					log.Printf("https: live cert reloaded from %s", certFile)
+				})
+			}
 			tlsSrv = &http.Server{
 				Addr:              fmt.Sprintf(":%d", cfg.HTTPSPort),
 				Handler:           handler,

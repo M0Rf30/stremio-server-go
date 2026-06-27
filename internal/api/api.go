@@ -55,12 +55,13 @@ var videoMimes = map[string]string{
 }
 
 type server struct {
-	em     types.EngineManager
-	ss     types.SettingsStore
-	prober types.MediaProber
-	cfg    types.Config
-	logReq bool
-	sp     *streamproxy.Handler
+	em         types.EngineManager
+	ss         types.SettingsStore
+	prober     types.MediaProber
+	cfg        types.Config
+	logReq     bool
+	sp         *streamproxy.Handler
+	certReload func() // hot-swap the live HTTPS cert after /get-https writes new files (wired by cmd)
 }
 
 // New returns the HTTP handler for the streaming server.

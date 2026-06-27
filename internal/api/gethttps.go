@@ -10,7 +10,10 @@
 // and no files are written.
 package api
 
-import "net/http"
+import (
+	"errors"
+	"net/http"
+)
 
 // handleGetHTTPS handles GET /get-https?authKey=..&ipAddress=..
 //
@@ -44,7 +47,8 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 	res, err := ProvisionCert(s.cfg.AppPath, authKey, ipAddress)
 	if err != nil {
 		status := http.StatusBadGateway
-		if pe, ok := err.(*provisionError); ok {
+		var pe *provisionError
+		if errors.As(err, &pe) {
 			status = pe.status
 		}
 		http.Error(w, err.Error(), status)
@@ -54,9 +58,19 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 	// Remember the authKey so the background renewer can refresh the cert.
 	CacheAuthKey(s.cfg.AppPath, authKey)
 
+	// Hot-swap the live HTTPS listener so the freshly installed cert takes effect
+	// immediately, with no restart. No-op until cmd wires the reload hook.
+	if s.certReload != nil {
+		s.certReload()
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ipAddress": ipAddress,
 		"domain":    res.Domain,
 		"port":      s.cfg.HTTPSPort,
 	})
 }
+
+// SetCertReloadHook registers a callback invoked after /get-https installs a new
+// certificate, so the running HTTPS listener can hot-swap it without a restart.
+func (s *server) SetCertReloadHook(fn func()) { s.certReload = fn }
