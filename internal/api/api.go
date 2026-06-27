@@ -196,6 +196,12 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleBitmagnet(w, r, seg)
 	case "torznab":
 		s.handleTorznab(w, r, seg)
+	case "zip", "rar", "7zip", "tar", "tgz":
+		s.handleArchive(w, r, seg, seg[0])
+	case "nzb":
+		s.handleNZB(w, r, seg)
+	case "ftp":
+		s.handleFTP(w, r, seg)
 	case "thumb.jpg":
 		http.NotFound(w, r) // no thumbnail service; cosmetic 404
 	case "metrics":

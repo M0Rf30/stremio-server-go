@@ -30,7 +30,7 @@ Not affiliated with or endorsed by Stremio.
 Prebuilt binaries for **Linux, macOS, Windows, and Android (arm64)** are attached
 to each [release](https://github.com/M0Rf30/stremio-server-go/releases).
 
-From source (Go 1.24+; CGO is not required):
+From source (Go 1.26+; CGO is not required):
 
 ```sh
 go install github.com/M0Rf30/stremio-server-go/cmd/stremio-server@latest
