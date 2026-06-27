@@ -129,6 +129,122 @@ podman build --format docker -t stremio-server-go .
 | `LOCAL_FILES_DIR` | _(unset)_ | directory scanned by the local-files addon; mount a volume and set this to enable |
 | `STREMIO_HWACCEL` | _(auto)_ | `0` forces software libx264; or pin `vaapi` / `nvenc` / `qsv` / `videotoolbox` / `v4l2m2m` |
 | `STREMIO_HTTP_LOG` | _(unset)_ | set to `1` to log each request path |
+| `STREMIO_MEMORY_CACHE_SIZE` | `0` | in-RAM piece-cache budget in bytes; `0` writes pieces to `/data`. Set `>0` to never touch disk (ideal on ephemeral Spaces / low-disk hosts) |
+| `STREMIO_MEM_LIMIT` | _(unset)_ | soft memory ceiling in bytes (`GOMEMLIMIT` also honoured); RSS high-water is returned to the OS every 5 min |
+| `STREMIO_DISABLE_WEBTORRENT` | `1` (image) | WebTorrent/WebRTC (pion) peers are off by default in the image — cuts ~60% of goroutines & RAM; set `0` to re-enable |
+| `STREMIO_DISABLE_TRACKERS` | _(unset)_ | `1` = DHT/PEX/webseeds only (no tracker announces); for private / DHT-only operation |
+| `STREMIO_TRACKERS_URL` | _(curated list)_ | source URL for the public tracker list; empty / `off` skips the remote fetch (embedded + DHT/PEX only) |
+| `STREMIO_BT_ENCRYPTION` | `prefer` | peer-connection encryption; `require` refuses plaintext peers (DPI evasion), `disable` turns obfuscation off |
+| `STREMIO_BT_PROXY` | _(unset)_ | SOCKS5/HTTP proxy for tracker announces, webseeds, metainfo + tracker-list fetch (e.g. `socks5://127.0.0.1:9050`). Peer connections stay direct |
+| `STREMIO_DHT_BOOTSTRAP` | _(defaults)_ | extra comma-separated `host:port` DHT bootstrap nodes, appended to the defaults, for filtered networks |
+| `STREMIO_BT_ANONYMOUS` | _(unset)_ | `1` hides the client version/fingerprint advertised to peers |
+| `STREMIO_PROXY_PASSWORD` | _(unset)_ | `api_password` required on `/proxy/*` (set as a **secret**) |
+| `STREMIO_PROXY_SECRET` | _(auto)_ | signing key for signed proxy URLs; set explicitly on ephemeral hosts (an auto value changes on every restart) |
+| `STREMIO_PROXY_PUBLIC_URL` | _(derive)_ | external base URL written into rewritten manifests — required behind an edge proxy (HF Spaces) |
+| `STREMIO_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for `/proxy` fetches (`socks5`/`http`/`https`) |
+| `STREMIO_BITMAGNET_URL` | _(unset)_ | Bitmagnet GraphQL endpoint → enables the `/bitmagnet` add-on |
+| `STREMIO_TORZNAB_URL` | _(unset)_ | Torznab indexer base URL → enables the `/torznab` add-on |
+| `STREMIO_TORZNAB_APIKEY` | _(unset)_ | API key for the Torznab indexer (required by Prowlarr / Jackett) |
+
+---
+
+## Example configurations
+
+Curated `podman run` recipes (swap `podman`→`docker`; all flags are identical).
+The full env-var reference lives in the project
+[README](../README.md#environment).
+
+### Ephemeral / low-disk (in-RAM piece cache)
+
+Stream through a bounded RAM cache and never write piece data to disk — ideal on
+a HuggingFace Space without persistent storage, or any low-disk host:
+
+```sh
+podman run -d \
+  --name stremio-server \
+  -p 11470:11470 \
+  -e STREMIO_MEMORY_CACHE_SIZE=536870912 \
+  -e STREMIO_MEM_LIMIT=1073741824 \
+  stremio-server-go
+```
+
+512 MiB piece cache under a 1 GiB soft memory ceiling. Raise both for higher
+bitrates; lower them on tightly constrained Spaces.
+
+### Censorship-resistant (DPI evasion + proxy)
+
+Force encrypted peer handshakes and route tracker/metadata traffic through a
+SOCKS5 proxy (here a host-side Tor daemon) for networks that block trackers or
+fingerprint BitTorrent via DPI:
+
+```sh
+podman run -d \
+  --name stremio-server \
+  --network host \
+  -e STREMIO_BT_ENCRYPTION=require \
+  -e STREMIO_BT_PROXY=socks5://127.0.0.1:9050 \
+  -e STREMIO_BT_ANONYMOUS=1 \
+  -v stremio-data:/data \
+  stremio-server-go
+```
+
+`--network host` (or a shared pod) lets the container reach the host's Tor
+SOCKS port. Supply `STREMIO_DHT_BOOTSTRAP=host:port,…` as well when the default
+DHT routers are filtered. Peer connections themselves are not tunneled — see the
+[censorship-resistance notes](../README.md#censorship-resistance).
+
+### MediaFlow-compatible stream-proxy relay
+
+Expose the authenticated `/proxy` relay (signed URLs, HLS/DASH rewriting) behind
+a public endpoint — the configuration used by the HuggingFace Space. Set the
+password and secret as **secrets**, not in the image:
+
+```sh
+podman run -d \
+  --name stremio-server \
+  -p 11470:11470 \
+  -e STREMIO_PROXY_PUBLIC_URL=https://your-host.example \
+  -e STREMIO_PROXY_PASSWORD=change-me \
+  -e STREMIO_PROXY_SECRET=$(openssl rand -hex 32) \
+  -e STREMIO_PROXY_IP_ACL=10.0.0.0/8 \
+  -v stremio-data:/data \
+  stremio-server-go
+```
+
+`STREMIO_PROXY_PUBLIC_URL` must be the externally reachable base URL, otherwise
+rewritten child segment/key URLs are unreachable behind the edge proxy. Pin
+`STREMIO_PROXY_SECRET` explicitly so signed URLs survive restarts.
+
+### Private / DHT-only (no tracker announces)
+
+Discover peers via DHT, PEX, and webseeds only — no outbound tracker announces:
+
+```sh
+podman run -d \
+  --name stremio-server \
+  -p 11470:11470 \
+  -e STREMIO_DISABLE_TRACKERS=1 \
+  -v stremio-data:/data \
+  stremio-server-go
+```
+
+### Indexer-backed streams (Torznab / Bitmagnet)
+
+Enable the catalog add-ons that resolve streams from a self-hosted indexer:
+
+```sh
+podman run -d \
+  --name stremio-server \
+  -p 11470:11470 \
+  -e STREMIO_TORZNAB_URL=http://prowlarr:9696/1/api \
+  -e STREMIO_TORZNAB_APIKEY=your-api-key \
+  -e STREMIO_BITMAGNET_URL=http://bitmagnet:3333/graphql \
+  -v stremio-data:/data \
+  stremio-server-go
+```
+
+Add the served `/torznab` and `/bitmagnet` manifests to Stremio. Full guides:
+[docs/TORZNAB.md](TORZNAB.md), [docs/BITMAGNET.md](BITMAGNET.md).
 
 ---
 
@@ -213,6 +329,10 @@ Force software transcode to avoid auto-detect overhead on systems without a GPU:
    |---|---|
    | `STREMIO_HWACCEL` | `0` |
    | `STREMIO_HTTP_LOG` | `1` |
+   | `STREMIO_MEMORY_CACHE_SIZE` | `536870912` |
+   | `STREMIO_PROXY_PUBLIC_URL` | `https://<your-space>.hf.space` |
+   | `STREMIO_PROXY_PASSWORD` | _(secret)_ |
+   | `STREMIO_PROXY_SECRET` | _(secret, 32-byte hex)_ |
 
    Secrets are injected as environment variables at runtime and are not visible
    in build logs.
