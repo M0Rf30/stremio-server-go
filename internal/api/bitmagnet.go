@@ -8,7 +8,8 @@
 //	     → {streams:[{infoHash,...}]} from self-hosted Bitmagnet DHT index
 //
 // Bitmagnet is queried via its GraphQL API (POST to STREMIO_BITMAGNET_URL).
-// Title and year are resolved via Cinemeta (v3-cinemeta.strem.io) and cached
+// Title and year are resolved via a Cinemeta-compatible metadata addon
+// (STREMIO_METADATA_URL, default Cinemeta) and cached
 // for 6 hours. If STREMIO_BITMAGNET_URL is unset the manifest still serves but
 // all stream requests return an empty result set.
 package api
@@ -203,7 +204,7 @@ func (s *server) bitmagnetStream(w http.ResponseWriter, r *http.Request, content
 	}
 
 	// Resolve title + year via Cinemeta; fall back to the IMDB id on failure.
-	metaName, year := resolveCinemeta(r, contentType, baseImdb)
+	metaName, year := resolveCinemeta(r, s.cfg.MetadataURL, contentType, baseImdb)
 	if metaName == "" {
 		logging.For("bitmagnet").Warn("cinemeta lookup failed; using id as query", "type", contentType, "imdb", baseImdb)
 		metaName = baseImdb
@@ -319,7 +320,10 @@ func bmItemMatchesSeries(item bmItem, season, episode int) bool {
 // resolveCinemeta fetches title and release year from Cinemeta for the given
 // content type and IMDB id. Results are cached for cineMetaTTL. Returns empty
 // strings/zero on any error; the caller is responsible for fallback behaviour.
-func resolveCinemeta(r *http.Request, contentType, imdbID string) (name string, year int) {
+func resolveCinemeta(r *http.Request, base, contentType, imdbID string) (name string, year int) {
+	if base == "" {
+		return "", 0
+	}
 	cacheKey := contentType + ":" + imdbID
 
 	cineMetaMu.Lock()
@@ -329,7 +333,7 @@ func resolveCinemeta(r *http.Request, contentType, imdbID string) (name string, 
 	}
 	cineMetaMu.Unlock()
 
-	url := "https://v3-cinemeta.strem.io/meta/" + contentType + "/" + imdbID + ".json"
+	url := strings.TrimRight(base, "/") + "/meta/" + contentType + "/" + imdbID + ".json"
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
 	if err != nil {
 		return "", 0

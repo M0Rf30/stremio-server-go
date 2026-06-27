@@ -79,6 +79,22 @@ func envBool(key string, def bool) bool {
 	}
 }
 
+// metadataURL resolves the Cinemeta-compatible metadata addon base URL used by
+// the /bitmagnet and /torznab add-ons to turn an IMDB id into a title. Unset →
+// the official Cinemeta. An explicit empty value or off/0/false/no/disabled
+// turns resolution off (the add-ons then query by the raw IMDB id).
+func metadataURL() string {
+	v, ok := os.LookupEnv("STREMIO_METADATA_URL")
+	if !ok {
+		return "https://v3-cinemeta.strem.io"
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off", "0", "false", "no", "disable", "disabled":
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(v), "/")
+}
+
 // @title        stremio-server-go enginefs API
 // @version      4.21.0
 // @description  HTTP API served by stremio-server-go, a pure-Go drop-in for Stremio's streaming server (server.js). serverVersion is reported as 4.21.0 for client feature-gating; it is independent of the binary build version.
@@ -132,6 +148,7 @@ func main() {
 		BitmagnetURL:      getenv("STREMIO_BITMAGNET_URL", ""),
 		TorznabURL:        getenv("STREMIO_TORZNAB_URL", ""),
 		TorznabAPIKey:     getenv("STREMIO_TORZNAB_APIKEY", ""),
+		MetadataURL:       metadataURL(),                               // Cinemeta-compatible meta addon base; "" disables (STREMIO_METADATA_URL)
 		DisableTrackers:   os.Getenv("STREMIO_DISABLE_TRACKERS") != "", // disable all tracker announces (DHT/PEX/webseeds still used)
 		DisableWebtorrent: envBool("STREMIO_DISABLE_WEBTORRENT", true), // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers
 		EnableDLNA:        envBool("STREMIO_ENABLE_DLNA", false),       // default disabled; set =1/true to enable /casting DLNA discovery + control
@@ -142,6 +159,9 @@ func main() {
 	}
 	if !cfg.EnableDLNA {
 		logging.For("casting").Info("dlna disabled")
+	}
+	if cfg.MetadataURL == "" {
+		logging.For("metadata").Info("metadata (cinemeta) resolution disabled")
 	}
 
 	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also

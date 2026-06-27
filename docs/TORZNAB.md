@@ -87,6 +87,11 @@ If the IMDB id query returns no results, the add-on falls back to a keyword sear
 (`t=search&q=<title>`) using the title resolved from
 [Cinemeta](https://v3-cinemeta.strem.io) (6-hour cache).
 
+> The metadata source is the Cinemeta-compatible add-on at `STREMIO_METADATA_URL`
+> (default `https://v3-cinemeta.strem.io`; set to empty/`off` to disable). Since
+> Torznab searches by IMDB id first, disabling it only removes the title-search
+> fallback.
+
 ---
 
 ## Caveats

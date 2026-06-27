@@ -260,7 +260,7 @@ func (s *server) torznabStream(w http.ResponseWriter, r *http.Request, contentTy
 
 	// Fallback: if no items returned, resolve title via Cinemeta and retry with q=.
 	if len(items) == 0 {
-		title, _ := resolveCinemeta(r, contentType, baseImdb)
+		title, _ := resolveCinemeta(r, s.cfg.MetadataURL, contentType, baseImdb)
 		if title != "" {
 			items, err = tnQueryTitle(r, s.cfg.TorznabURL, s.cfg.TorznabAPIKey, contentType, title, season, episode)
 			if err != nil {

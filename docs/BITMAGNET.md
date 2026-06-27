@@ -110,6 +110,12 @@ When Stremio requests streams for a title:
 4. The Stremio client hands the infoHash back to the same server, which streams
    via its DHT engine.
 
+> **Metadata source / privacy.** Step 1 calls a Cinemeta-compatible metadata
+> add-on, set by `STREMIO_METADATA_URL` (default `https://v3-cinemeta.strem.io`).
+> Point it at a self-hosted Cinemeta mirror or a TMDB/aiometadata add-on's
+> configured base, or set it to empty/`off` to disable the lookup — the add-on
+> then queries Bitmagnet by the raw IMDB id (lower match quality).
+
 A fresh Bitmagnet instance returns no results until the DHT crawler has
 discovered and classified matching content. Coverage improves as the crawler
 runs continuously.

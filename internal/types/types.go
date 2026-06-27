@@ -44,6 +44,13 @@ type Config struct {
 	// Torznab integration (Prowlarr/Jackett/NZBHydra/Bitmagnet /torznab).
 	TorznabURL    string // Torznab endpoint base URL; "" disables stream queries
 	TorznabAPIKey string // Optional API key appended as &apikey=; "" = no auth
+
+	// Cinemeta-compatible metadata addon base URL used by the /bitmagnet and
+	// /torznab add-ons to resolve an IMDB id to a title (STREMIO_METADATA_URL).
+	// Default https://v3-cinemeta.strem.io; "" disables the lookup. Accepts any
+	// addon speaking /meta/{type}/{id}.json (Cinemeta, a self-hosted mirror, or
+	// a TMDB/aiometadata addon's configured base).
+	MetadataURL string
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.
