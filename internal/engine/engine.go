@@ -13,6 +13,9 @@ import (
 	"io/fs"
 	"log/slog"
 	"math"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,9 +23,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/mse"
 	"github.com/anacrolix/torrent/storage"
+	"golang.org/x/net/proxy"
 	"golang.org/x/time/rate"
 
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
@@ -213,6 +219,17 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	cc.DownloadRateLimiter = downLimiter
 	cc.UploadRateLimiter = upLimiter
 
+	// Censorship resistance / anonymity (all default = anacrolix default behavior)
+	applyBTEncryption(cc, cfg.BTEncryption)
+	if err := applyBTProxy(cc, cfg.BTProxy); err != nil {
+		return nil, fmt.Errorf("engine: bt proxy: %w", err)
+	}
+	applyDHTBootstrap(cc, cfg.DHTBootstrap)
+	cc.AnonymousMode = cfg.BTAnonymous
+	if cfg.BTAnonymous {
+		logging.For("engine").Info("bittorrent anonymous mode enabled")
+	}
+
 	client, err := torrent.NewClient(cc)
 	if err != nil {
 		return nil, fmt.Errorf("engine: create torrent client: %w", err)
@@ -225,7 +242,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	// Load curated trackers (cached) and refresh + rank from upstream in the background.
 	// Skip tracker list fetch when announces are disabled (tests / private mode).
 	if !cfg.DisableTrackers {
-		initTrackers(cfg.CacheRoot, cfg.TrackersMax, cfg.TrackersURL, done)
+		initTrackers(cfg.CacheRoot, cfg.TrackersMax, cfg.TrackersURL, cfg.BTProxy, done)
 	}
 
 	return &manager{
@@ -1252,4 +1269,90 @@ func peerBudget(n int) (established, halfOpen, highWater int) {
 		n = 50
 	}
 	return n, n / 2, n * 10
+}
+
+// --------------------------------------------------------------------------
+// Censorship-resistance / anonymity helpers
+// --------------------------------------------------------------------------
+
+// applyBTEncryption sets the MSE/RC4 header-obfuscation policy on cc.
+// mode is compared case-insensitively after trimming whitespace.
+//   - "require": only RC4-encrypted peer connections are accepted.
+//   - "disable": plaintext only; no MSE handshake offered.
+//   - anything else ("prefer" / ""): anacrolix defaults are left untouched
+//     (MSE preferred, plaintext accepted — already the safest default).
+func applyBTEncryption(cc *torrent.ClientConfig, mode string) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "require":
+		cc.HeaderObfuscationPolicy = torrent.HeaderObfuscationPolicy{Preferred: true, RequirePreferred: true}
+		cc.CryptoProvides = mse.CryptoMethodRC4
+		cc.CryptoSelector = func(mse.CryptoMethod) mse.CryptoMethod { return mse.CryptoMethodRC4 }
+		logging.For("engine").Info("bt encryption required", "mode", "require")
+	case "disable":
+		cc.HeaderObfuscationPolicy = torrent.HeaderObfuscationPolicy{Preferred: false, RequirePreferred: false}
+		logging.For("engine").Info("bt encryption disabled", "mode", "disable")
+		// "prefer" / "" — anacrolix defaults already correct; nothing to do
+	}
+}
+
+// applyBTProxy routes tracker announces, HTTP webseeds, and metainfo fetches
+// through proxyURL (socks5[h]://… or http[s]://…). When proxyURL is empty the
+// function is a no-op and returns nil.
+//
+// Peer TCP/uTP connections are NOT routed through the proxy: anacrolix's peer
+// dialer uses the listen-bound socket path (not HTTPDialContext/TrackerDialContext).
+// Use encryption=require for DPI-evasion of peer traffic.
+func applyBTProxy(cc *torrent.ClientConfig, proxyURL string) error {
+	if proxyURL == "" {
+		return nil
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return fmt.Errorf("parse proxy url: %w", err)
+	}
+	cc.HTTPProxy = http.ProxyURL(u)
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "socks5" || scheme == "socks5h" {
+		d, err := proxy.FromURL(u, proxy.Direct)
+		if err != nil {
+			return fmt.Errorf("create socks5 dialer: %w", err)
+		}
+		if cd, ok := d.(proxy.ContextDialer); ok {
+			cc.TrackerDialContext = cd.DialContext
+			cc.HTTPDialContext = cd.DialContext
+		}
+	}
+	// Log scheme://host only — never expose userinfo (credentials).
+	logging.For("engine").Info("bittorrent proxy enabled", "url", u.Scheme+"://"+u.Host)
+	return nil
+}
+
+// applyDHTBootstrap appends extra DHT bootstrap nodes to the default global
+// list. nodes is a comma-separated list of host:port pairs; blank entries are
+// silently skipped. When nodes is empty the function is a no-op.
+func applyDHTBootstrap(cc *torrent.ClientConfig, nodes string) {
+	if nodes == "" {
+		return
+	}
+	var parsed []string
+	for _, hp := range strings.Split(nodes, ",") {
+		if hp = strings.TrimSpace(hp); hp != "" {
+			parsed = append(parsed, hp)
+		}
+	}
+	if len(parsed) == 0 {
+		return
+	}
+	cc.DhtStartingNodes = func(network string) dht.StartingNodesGetter {
+		return func() ([]dht.Addr, error) {
+			addrs, _ := dht.GlobalBootstrapAddrs(network)
+			for _, hp := range parsed {
+				if ua, e := net.ResolveUDPAddr(network, hp); e == nil {
+					addrs = append(addrs, dht.NewAddr(ua))
+				}
+			}
+			return addrs, nil
+		}
+	}
+	logging.For("engine").Info("extra dht bootstrap nodes", "count", len(parsed))
 }

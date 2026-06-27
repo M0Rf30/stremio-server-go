@@ -105,9 +105,47 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_CERT_IP` | _(primary IPv4)_ | IP encoded into the provisioned cert's domain; defaults to the first non-loopback IPv4. |
 | `STREMIO_PEERS_PER_TORRENT` | `50` | established peer connections per torrent (half-open=n/2, high-water=n*10); lower (e.g. 30) trims peer goroutines/RAM |
 | `STREMIO_MEM_LIMIT` | _(unset)_ | soft memory ceiling in bytes (runtime/debug.SetMemoryLimit; GOMEMLIMIT env also works). RSS high-water is returned to the OS every 5 min regardless |
+| `STREMIO_BT_ENCRYPTION` | `prefer` | BitTorrent peer-connection encryption (MSE/PE header obfuscation). `prefer` encrypts when the peer supports it and falls back to plaintext (default, DPI-detectable). `require` refuses plaintext entirely (RC4 only) for DPI evasion in censored networks. `disable` turns obfuscation off. |
+| `STREMIO_BT_PROXY` | _(unset)_ | Upstream proxy for BitTorrent **tracker announces, HTTP webseeds, metainfo fetch, and the tracker-list download** (`socks5://host:port` or `http(s)://host:port`). Lets you reach trackers blocked by your ISP. **Peer connections are not proxied** — use `STREMIO_BT_ENCRYPTION=require` for peer-traffic DPI evasion. |
+| `STREMIO_DHT_BOOTSTRAP` | _(defaults)_ | Comma-separated `host:port` DHT bootstrap nodes appended to the built-in defaults. Use your own reachable nodes when the default bootstrap routers are blocked. |
+| `STREMIO_BT_ANONYMOUS` | _(off)_ | `1`/`true` hides the client version/fingerprint advertised to peers (anacrolix AnonymousMode). |
 
 The stream proxy (HLS/DASH manifest rewriting, on-the-fly decryption, signed
 URLs) is documented in [docs/PROXY.md](docs/PROXY.md).
+
+### Censorship resistance
+
+The server uses DHT (BEP32), PEX (BEP11), HTTP webseeds, and a ranked public
+tracker list, so peer discovery continues even when individual trackers are
+blocked. Four knobs let you harden further in censored or monitored networks:
+
+- **`STREMIO_BT_ENCRYPTION=require`** — forces RC4 header obfuscation on every
+  peer handshake, defeating DPI signatures that fingerprint plain BitTorrent
+  traffic. Peers that refuse encryption are dropped.
+- **`STREMIO_BT_PROXY`** — routes tracker announces, metainfo fetches, HTTP
+  webseeds, and the tracker-list download through a SOCKS5 or HTTP proxy
+  (e.g. `socks5://127.0.0.1:9050` for Tor). Use this when your ISP blocks
+  trackers or the tracker-list host (`raw.githubusercontent.com`).
+- **`STREMIO_DHT_BOOTSTRAP`** — supplies alternate DHT bootstrap nodes when the
+  default routers (`router.bittorrent.com`, `dht.transmissionbt.com`, etc.) are
+  filtered; accepts a comma-separated `host:port` list appended to the defaults.
+- **`STREMIO_BT_ANONYMOUS=1`** — suppresses the client version string advertised
+  to peers, reducing passive fingerprintability.
+
+Example — running behind Tor:
+
+```sh
+STREMIO_BT_ENCRYPTION=require \
+STREMIO_BT_PROXY=socks5://127.0.0.1:9050 \
+STREMIO_BT_ANONYMOUS=1 \
+stremio-server
+```
+
+**Limitation:** the proxy covers tracker/webseed/metainfo traffic only. Peer
+TCP/uTP connections are established through the listen socket directly and are
+not tunneled. For full peer anonymity a network-level VPN or transparent Tor
+proxy is still required; the proxy + encryption knobs primarily defeat
+tracker-level blocking and DPI-based fingerprinting of peer handshakes.
 
 ## Platforms
 

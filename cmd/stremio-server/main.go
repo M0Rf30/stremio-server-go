@@ -173,6 +173,10 @@ func main() {
 		PeersPerTorrent:   envInt("STREMIO_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
 		TrackersURL:       trackersURL(),                               // remote tracker list; "" disables remote fetch (STREMIO_TRACKERS_URL)
 		LocalIMDB:         envBool("STREMIO_LOCAL_IMDB", true),         // local-files addon IMDB resolution; default on
+		BTEncryption:      getenv("STREMIO_BT_ENCRYPTION", "prefer"),
+		BTProxy:           getenv("STREMIO_BT_PROXY", ""),
+		DHTBootstrap:      getenv("STREMIO_DHT_BOOTSTRAP", ""),
+		BTAnonymous:       envBool("STREMIO_BT_ANONYMOUS", false),
 	}
 	if cfg.DisableWebtorrent {
 		logging.For("engine").Info("webtorrent/webrtc peers disabled")
@@ -188,6 +192,21 @@ func main() {
 	}
 	if !cfg.LocalIMDB {
 		logging.For("localaddon").Info("IMDB resolution disabled")
+	}
+	if cfg.BTEncryption == "require" {
+		logging.For("engine").Info("bittorrent encryption required (plaintext peers refused)")
+	}
+	if cfg.BTEncryption == "disable" {
+		logging.For("engine").Info("bittorrent encryption disabled")
+	}
+	if cfg.BTProxy != "" {
+		logging.For("engine").Info("bittorrent proxy configured (trackers/webseeds/metainfo only; peers direct)", "proxy", cfg.BTProxy)
+	}
+	if cfg.DHTBootstrap != "" {
+		logging.For("engine").Info("extra dht bootstrap nodes configured", "nodes", cfg.DHTBootstrap)
+	}
+	if cfg.BTAnonymous {
+		logging.For("engine").Info("anonymous mode enabled (client fingerprint hidden)")
 	}
 
 	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also

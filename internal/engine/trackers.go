@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -136,7 +137,7 @@ func announceableTiers(tiers [][]string, allowWS bool) [][]string {
 // background goroutine that fetches, probes, ranks, and re-persists the list.
 // The goroutine repeats every 24 h and stops when done is closed.
 // The embedded snapshot always serves as the fallback so startup is never blocked.
-func initTrackers(cacheDir string, maxTrackers int, srcURL string, done <-chan struct{}) {
+func initTrackers(cacheDir string, maxTrackers int, srcURL string, proxyURL string, done <-chan struct{}) {
 	cache := filepath.Join(cacheDir, "trackers_best.txt")
 	// Synchronous fast-path: serve the last ranked list immediately if cached.
 	if b, err := os.ReadFile(cache); err == nil {
@@ -149,7 +150,7 @@ func initTrackers(cacheDir string, maxTrackers int, srcURL string, done <-chan s
 		return // remote refresh disabled; serve the embedded/cached list only
 	}
 	go func() {
-		doRefreshTrackers(cache, maxTrackers, srcURL)
+		doRefreshTrackers(cache, maxTrackers, srcURL, proxyURL)
 		ticker := time.NewTicker(trackerRefreshIntv)
 		defer ticker.Stop()
 		for {
@@ -157,7 +158,7 @@ func initTrackers(cacheDir string, maxTrackers int, srcURL string, done <-chan s
 			case <-done:
 				return
 			case <-ticker.C:
-				doRefreshTrackers(cache, maxTrackers, srcURL)
+				doRefreshTrackers(cache, maxTrackers, srcURL, proxyURL)
 			}
 		}
 	}()
@@ -168,11 +169,11 @@ func initTrackers(cacheDir string, maxTrackers int, srcURL string, done <-chan s
 // the fastest maxTrackers, merges all wss trackers (fetched + embedded) back in,
 // updates the in-memory list, and persists the ranked UDP/HTTP list for a fast
 // next startup.
-func doRefreshTrackers(cache string, maxTrackers int, srcURL string) {
+func doRefreshTrackers(cache string, maxTrackers int, srcURL string, proxyURL string) {
 	if maxTrackers <= 0 {
 		maxTrackers = defaultTrackerTopN
 	}
-	candidates := fetchTrackerList(srcURL)
+	candidates := fetchTrackerList(srcURL, proxyURL)
 	if len(candidates) == 0 {
 		return // upstream unreachable — keep the current/embedded list
 	}
@@ -207,9 +208,19 @@ func doRefreshTrackers(cache string, maxTrackers int, srcURL string) {
 
 // fetchTrackerList GETs a newline-delimited tracker list and returns the parsed
 // URLs. Returns nil on any error so the caller falls back to the current list.
-func fetchTrackerList(url string) []string {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+func fetchTrackerList(rawURL, proxyURL string) []string {
+	transport := &http.Transport{}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(u)
+		}
+		// On parse error: fall back to direct (no proxy) — never block startup.
+	}
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}
+	resp, err := client.Get(rawURL)
 	if err != nil {
 		return nil
 	}

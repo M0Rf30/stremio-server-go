@@ -60,6 +60,19 @@ type Config struct {
 	// false, local files keep filename-parsed titles and local: ids — no
 	// external IMDb call is made.
 	LocalIMDB bool
+
+	// Censorship resistance / anonymity.
+	// BitTorrent peer encryption policy (STREMIO_BT_ENCRYPTION): "prefer" (default; encrypt if peer supports, else
+	// plaintext), "require" (refuse plaintext — DPI evasion), "disable" (no obfuscation).
+	BTEncryption string
+	// upstream proxy for BitTorrent tracker announces, HTTP webseeds, metainfo + tracker-list fetch
+	// (STREMIO_BT_PROXY; socks5://host:port or http(s)://host:port). "" = direct.
+	// NOTE: peer connections are not proxied (anacrolix uses listen-bound sockets for peer dials).
+	BTProxy string
+	// extra DHT bootstrap nodes appended to defaults (STREMIO_DHT_BOOTSTRAP; comma-separated host:port). "" = defaults only.
+	DHTBootstrap string
+	// hide client version/fingerprint from peers (STREMIO_BT_ANONYMOUS; cc.AnonymousMode). default false.
+	BTAnonymous bool
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.
