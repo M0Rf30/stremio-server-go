@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"time"
 )
 
 // Config is the runtime configuration shared by all subsystems.
@@ -73,6 +74,12 @@ type Config struct {
 	DHTBootstrap string
 	// hide client version/fingerprint from peers (STREMIO_BT_ANONYMOUS; cc.AnonymousMode). default false.
 	BTAnonymous bool
+	// IdleTimeout removes a torrent that has had no open stream readers and no
+	// access for this long (STREMIO_TORRENT_IDLE_TIMEOUT, seconds; default 300,
+	// 0 = disabled). Matches the official server's inactive-torrent reclaim so a
+	// stopped torrent is dropped even when cacheSize is unlimited, while staying
+	// alive long enough for instant scrub/resume/next-episode.
+	IdleTimeout time.Duration
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.

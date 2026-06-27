@@ -177,6 +177,7 @@ func main() {
 		BTProxy:           getenv("STREMIO_BT_PROXY", ""),
 		DHTBootstrap:      getenv("STREMIO_DHT_BOOTSTRAP", ""),
 		BTAnonymous:       envBool("STREMIO_BT_ANONYMOUS", false),
+		IdleTimeout:       time.Duration(envInt("STREMIO_TORRENT_IDLE_TIMEOUT", 300)) * time.Second, // 0 = disabled
 	}
 	if cfg.DisableWebtorrent {
 		logging.For("engine").Info("webtorrent/webrtc peers disabled")
@@ -207,6 +208,11 @@ func main() {
 	}
 	if cfg.BTAnonymous {
 		logging.For("engine").Info("anonymous mode enabled (client fingerprint hidden)")
+	}
+	if cfg.IdleTimeout <= 0 {
+		logging.For("engine").Info("idle torrent removal disabled")
+	} else {
+		logging.For("engine").Info("idle torrent removal enabled", "timeout", cfg.IdleTimeout.String())
 	}
 
 	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also

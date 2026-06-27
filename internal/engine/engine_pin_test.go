@@ -83,6 +83,71 @@ func TestEvictSkipsOpenReaders(t *testing.T) {
 	}
 }
 
+// TestEvictIdle verifies the inactivity reclaim: a torrent with no open readers
+// and a last-access older than the idle timeout is dropped, while a recently
+// accessed one and a pinned (openReaders>0) one are preserved. It also checks
+// that idle<=0 disables the pass entirely (matching the size-based evict's
+// unlimited semantics).
+func TestEvictIdle(t *testing.T) {
+	cfg := types.Config{
+		AppPath:           t.TempDir(),
+		CacheRoot:         t.TempDir(),
+		ListenPort:        0,
+		Version:           "test",
+		DisableTrackers:   true,
+		DisableWebtorrent: true,
+	}
+	em, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer em.Close()
+	m := em.(*manager)
+
+	const ihIdle = "08ada5a7a6183aae1e09d831df6748d566095a10"   // stale, unpinned -> removed
+	const ihRecent = "0a8735c7ea18c99a1a948ec707d9bf3e544fdd2b" // recently accessed -> kept
+	const ihPinned = "0b8735c7ea18c99a1a948ec707d9bf3e544fdd2c" // stale but openReaders>0 -> kept
+
+	for _, ih := range []string{ihIdle, ihRecent, ihPinned} {
+		if _, err := m.EnsureEngine(ih, types.AddOptions{}); err != nil {
+			t.Fatalf("EnsureEngine %s: %v", ih, err)
+		}
+	}
+
+	const idle = 5 * time.Minute
+	stale := time.Now().Add(-10 * time.Minute)
+
+	m.engines[ihIdle].mu.Lock()
+	m.engines[ihIdle].lastAccess = stale
+	m.engines[ihIdle].mu.Unlock()
+
+	m.engines[ihRecent].mu.Lock()
+	m.engines[ihRecent].lastAccess = time.Now()
+	m.engines[ihRecent].mu.Unlock()
+
+	m.engines[ihPinned].mu.Lock()
+	m.engines[ihPinned].lastAccess = stale
+	m.engines[ihPinned].openReaders = 1
+	m.engines[ihPinned].mu.Unlock()
+
+	// idle<=0 must be a no-op even with a stale engine present.
+	m.evictIdle(0)
+	if _, ok := m.engines[ihIdle]; !ok {
+		t.Fatal("evictIdle(0) removed an engine; should be disabled")
+	}
+
+	m.evictIdle(idle)
+	if _, ok := m.engines[ihIdle]; ok {
+		t.Fatal("stale unpinned engine was not removed by evictIdle")
+	}
+	if _, ok := m.engines[ihRecent]; !ok {
+		t.Fatal("recently accessed engine was wrongly removed")
+	}
+	if _, ok := m.engines[ihPinned]; !ok {
+		t.Fatal("pinned (openReaders>0) engine was wrongly removed")
+	}
+}
+
 // TestReadaheadFor verifies the adaptive readahead window: ~2 s of throughput,
 // clamped to the [8 MiB, 64 MiB] floor/ceiling.
 func TestReadaheadFor(t *testing.T) {

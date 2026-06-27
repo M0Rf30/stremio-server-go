@@ -24,7 +24,7 @@ Not affiliated with or endorsed by Stremio.
 - **Archive streaming** - direct playback of media inside ZIP / RAR / 7z / TAR /
   TGZ containers (`/zip`, `/rar`, `/7zip`, `/tar`, `/tgz`), plus **Usenet/NZB**
   (`/nzb`, NNTP + yEnc) and **FTP/FTPS** (`/ftp`) streaming - all pure-Go.
-- **Disk-bounded cache** - LRU eviction honouring the `cacheSize` setting.
+- **Disk-bounded cache** - LRU eviction honouring the `cacheSize` setting, plus idle-torrent removal after inactivity (`STREMIO_TORRENT_IDLE_TIMEOUT`).
 - Self-signed HTTPS on `:12470` for HTTPS web UIs (e.g. WebKitGTK shells).
 - **Metrics** - `GET /metrics` exposes Prometheus-format gauges (goroutines, heap, active torrents, HLS sessions, proxy cache).
 
@@ -86,6 +86,7 @@ Then point any Stremio client's **streaming server URL** at
 | `BT_LISTEN_PORT` | `0` | BitTorrent peer port (`0` = OS-assigned) |
 | `APP_PATH` | `~/.stremio-server` | data/cache root |
 | `STREMIO_MEMORY_CACHE_SIZE` | `0` | in-RAM piece-cache budget in bytes; `0` writes pieces to disk (default). When `>0`, stream through a bounded RAM cache and never write piece data to disk (mobile / low-disk / HuggingFace). |
+| `STREMIO_TORRENT_IDLE_TIMEOUT` | `300` | seconds a torrent may sit with no open stream readers and no access before it is dropped (peers disconnected, cached pieces freed). Matches official Stremio's inactive-torrent reclaim so a stopped stream is released even when `cacheSize` is unlimited, while staying alive long enough for instant scrub/resume/next-episode. `0` disables idle removal (cache-size LRU only). |
 | `WEB_UI_LOCATION` | `https://web.stremio.com/` | redirect target for `GET /` |
 | `LOCAL_FILES_DIR` | _(unset)_ | directory scanned by the local-files addon |
 | `STREMIO_LOCAL_IMDB` | `on` | local-files add-on resolves filenames to IMDB ids/metadata via IMDb's suggestion API (catalog posters/titles). **Enabled by default**; set `=0`/`off` to disable — local files then keep filename titles + `local:` ids and no request is sent to IMDb. |

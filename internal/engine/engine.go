@@ -464,6 +464,7 @@ func (m *manager) StartJanitor(cacheSizeFn func() int64) {
 			select {
 			case <-ticker.C:
 				m.evict(cacheSizeFn())
+				m.evictIdle(m.cfg.IdleTimeout)
 			case <-m.done:
 				return
 			}
@@ -623,6 +624,58 @@ func (m *manager) evict(budget int64) {
 		_ = os.RemoveAll(ent.e.path)
 		total -= ent.size
 		logging.For("engine").Info("evicted torrent", "info_hash", ih, "freed_bytes", ent.size, "budget_bytes", budget)
+	}
+}
+
+// evictIdle drops torrents that have had no open stream readers and no access
+// for longer than idle. idle <= 0 disables it. This mirrors the official
+// server's inactive-torrent reclaim (~5 min) so a stopped torrent is dropped
+// even when cacheSize is unlimited (the size-based evict never fires then),
+// while still keeping it alive long enough for instant scrub/resume/next-episode.
+//
+// Lock ordering matches evict (m.mu -> e.mu); the engine is re-checked under the
+// write lock so a reader that opened since the snapshot is never dropped.
+func (m *manager) evictIdle(idle time.Duration) {
+	if idle <= 0 {
+		return
+	}
+
+	m.mu.RLock()
+	snap := make([]*engine, 0, len(m.engines))
+	for _, e := range m.engines {
+		snap = append(snap, e)
+	}
+	m.mu.RUnlock()
+
+	now := time.Now()
+	for _, e := range snap {
+		e.mu.Lock()
+		idleFor := now.Sub(e.lastAccess)
+		pinned := e.openReaders > 0
+		e.mu.Unlock()
+		if pinned || idleFor < idle {
+			continue
+		}
+		ih := e.infoHash
+		m.mu.Lock()
+		if m.engines[ih] != e {
+			m.mu.Unlock()
+			continue // already removed or replaced by a concurrent caller
+		}
+		// Re-check under the write lock: a reader may have opened since the
+		// snapshot. Lock order m.mu -> e.mu.
+		e.mu.Lock()
+		stillPinned := e.openReaders > 0 || now.Sub(e.lastAccess) < idle
+		e.mu.Unlock()
+		if stillPinned {
+			m.mu.Unlock()
+			continue
+		}
+		e.t.Drop()
+		delete(m.engines, ih)
+		m.mu.Unlock()
+		_ = os.RemoveAll(e.path)
+		logging.For("engine").Info("removed idle torrent", "info_hash", ih, "idle_for", idleFor.Round(time.Second).String())
 	}
 }
 
@@ -897,12 +950,30 @@ func (p *pinnedReader) Seek(offset int64, whence int) (int64, error) {
 func (p *pinnedReader) Close() error {
 	err := p.tr.Close()
 	p.once.Do(func() {
+		var demote bool
 		p.e.mu.Lock()
 		p.e.openReaders--
 		if p.e.reading[p.idx] > 0 {
 			p.e.reading[p.idx]--
 		}
+		// Last reader for this file is gone: stop greedily downloading the rest
+		// of it. Without this the file stays marked Download() and keeps pulling
+		// pieces to completion in the background after the user pressed stop. The
+		// torrent itself stays connected (only the janitor's idle/LRU passes drop
+		// it), so scrub/resume/next-episode are still instant — reopening the file
+		// re-marks it via ensureDownloading + primeBoundary.
+		if p.e.reading[p.idx] == 0 {
+			delete(p.e.selected, p.idx)
+			delete(p.e.primed, p.idx)
+			demote = true
+		}
 		p.e.mu.Unlock()
+		if demote {
+			files := p.e.t.Files()
+			if p.idx >= 0 && p.idx < len(files) {
+				files[p.idx].SetPriority(torrent.PiecePriorityNone)
+			}
+		}
 	})
 	return err
 }
