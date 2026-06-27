@@ -79,10 +79,19 @@ func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProbe
 	}
 }
 
+// Shared, immutable CORS header values, assigned directly into the response
+// header map (canonical keys) to avoid a per-request slice allocation and key
+// canonicalization on every request.
+var (
+	corsAllowOrigin   = []string{"*"}
+	corsExposeHeaders = []string{"Content-Range, Accept-Ranges, Content-Length, Content-Type"}
+)
+
 // ServeHTTP applies CORS, handles preflight, and dispatches to the router.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length, Content-Type")
+	hdr := w.Header()
+	hdr["Access-Control-Allow-Origin"] = corsAllowOrigin
+	hdr["Access-Control-Expose-Headers"] = corsExposeHeaders
 	if r.Method == http.MethodOptions {
 		h := r.Header.Get("Access-Control-Request-Headers")
 		if h == "" {
@@ -1172,9 +1181,38 @@ func truthy(raw json.RawMessage) bool {
 	return s != "" && s != "false" && s != "null" && s != "0" && s != `""`
 }
 
+// Interface enumeration (net.Interfaces + Addrs) is a syscall-heavy operation
+// that dominated /settings and /network-info latency, both of which stremio-web
+// polls. Cache the result briefly; interfaces rarely change within the TTL.
+var (
+	ifaceCacheMu sync.RWMutex
+	ifaceCache   []string
+	ifaceCacheAt time.Time
+)
+
+const ifaceCacheTTL = 30 * time.Second
+
+// availableInterfaces returns the cached interface list, recomputing it at most
+// once per ifaceCacheTTL. The returned slice is shared and must not be mutated.
+func availableInterfaces() []string {
+	ifaceCacheMu.RLock()
+	if ifaceCache != nil && time.Since(ifaceCacheAt) < ifaceCacheTTL {
+		v := ifaceCache
+		ifaceCacheMu.RUnlock()
+		return v
+	}
+	ifaceCacheMu.RUnlock()
+
+	v := computeInterfaces()
+	ifaceCacheMu.Lock()
+	ifaceCache, ifaceCacheAt = v, time.Now()
+	ifaceCacheMu.Unlock()
+	return v
+}
+
 // availableInterfaces returns non-internal, non-link-local IPv4 + global IPv6
 // addresses. This is the IPv6 fix: the original server returned IPv4 only.
-func availableInterfaces() []string {
+func computeInterfaces() []string {
 	var out []string
 	seen := map[string]bool{}
 	ifaces, err := net.Interfaces()
