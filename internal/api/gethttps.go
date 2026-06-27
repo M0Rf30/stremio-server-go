@@ -13,6 +13,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -104,26 +105,58 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Inner certificate JSON. May be double-encoded (string inside JSON).
-	certJSON := string(outer.Result)
-	if len(certJSON) >= 2 && certJSON[0] == '"' {
-		// Unescape the JSON string to get the inner JSON text.
-		var inner string
-		if err := json.Unmarshal(outer.Result, &inner); err == nil {
-			certJSON = inner
+	// Extract the PEM material from the "result" envelope. Two known shapes:
+	//   new: result = {"certificate":"<json string>"} whose inner JSON is
+	//        {"commonName":"*.<h>.stremio.rocks","contents":{"Pem":"<b64 PEM
+	//        chain>","PrivateKey":"<b64 PEM key>","Certificate":"<b64 PEM>"}}
+	//   old: result = {"certificate":"<pem>","privateKey":"<pem>","commonName":..}
+	// outer.Result itself may be double-encoded (a JSON string of the object).
+	raw := outer.Result
+	if len(raw) >= 1 && raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			raw = json.RawMessage(s)
 		}
 	}
-
-	var certData struct {
+	var env struct {
 		Certificate string `json:"certificate"`
 		PrivateKey  string `json:"privateKey"`
 		CommonName  string `json:"commonName"`
 	}
-	if err := json.Unmarshal([]byte(certJSON), &certData); err != nil {
-		http.Error(w, "parse inner certificate JSON: "+err.Error(), http.StatusInternalServerError)
+	if err := json.Unmarshal(raw, &env); err != nil {
+		http.Error(w, "parse certificate result: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if certData.Certificate == "" || certData.PrivateKey == "" {
+
+	var certPEM, keyPEM, commonName string
+	if trimmed := strings.TrimSpace(env.Certificate); strings.HasPrefix(trimmed, "{") {
+		// New schema: certificate is a JSON object string; the PEM material is
+		// base64-encoded under contents.
+		var inner struct {
+			CommonName string `json:"commonName"`
+			Contents   struct {
+				Pem         string `json:"Pem"`
+				PrivateKey  string `json:"PrivateKey"`
+				Certificate string `json:"Certificate"`
+			} `json:"contents"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &inner); err != nil {
+			http.Error(w, "parse inner certificate JSON: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		commonName = inner.CommonName
+		certPEM = decodePEMField(inner.Contents.Pem) // full chain (leaf + intermediates)
+		if certPEM == "" {
+			certPEM = decodePEMField(inner.Contents.Certificate)
+		}
+		keyPEM = decodePEMField(inner.Contents.PrivateKey)
+	} else {
+		// Old flat schema: certificate/privateKey are PEM directly.
+		commonName = env.CommonName
+		certPEM = decodePEMField(env.Certificate)
+		keyPEM = decodePEMField(env.PrivateKey)
+	}
+	if certPEM == "" || keyPEM == "" {
 		http.Error(w, "certificate or privateKey missing in API response", http.StatusNotFound)
 		return
 	}
@@ -135,12 +168,12 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 	certPath := filepath.Join(appPath, "https-cert.pem")
 	keyPath := filepath.Join(appPath, "https-key.pem")
 
-	certTmp, err := writeTempPEM(appPath, "https-cert-*.pem", certData.Certificate)
+	certTmp, err := writeTempPEM(appPath, "https-cert-*.pem", certPEM)
 	if err != nil {
 		http.Error(w, "write https-cert.pem: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	keyTmp, err := writeTempPEM(appPath, "https-key-*.pem", certData.PrivateKey)
+	keyTmp, err := writeTempPEM(appPath, "https-key-*.pem", keyPEM)
 	if err != nil {
 		_ = os.Remove(certTmp)
 		http.Error(w, "write https-key.pem: "+err.Error(), http.StatusInternalServerError)
@@ -159,10 +192,13 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build domain: <ip-dashes>-<commonName-without-wildcard>
-	// e.g. 192.168.1.100 + *.strem.io → "192-168-1-100-.strem.io"
-	domain := strings.ReplaceAll(ipAddress, ".", "-") +
-		"-" + strings.ReplaceAll(certData.CommonName, "*", "")
+	// Build the domain by substituting the wildcard label with the dashed IP,
+	// e.g. *.519b…stremio.rocks + 192.168.0.62 → 192-168-0-62.519….stremio.rocks
+	ipDashes := strings.ReplaceAll(ipAddress, ".", "-")
+	domain := strings.Replace(commonName, "*", ipDashes, 1)
+	if domain == commonName { // no wildcard in CN — prefix the dashed IP instead
+		domain = ipDashes + "." + commonName
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ipAddress": ipAddress,
@@ -190,4 +226,17 @@ func writeTempPEM(dir, pattern, content string) (string, error) {
 		return "", closeErr
 	}
 	return name, nil
+}
+
+// decodePEMField returns PEM text from an API field that is either raw PEM
+// (already starts with "-----BEGIN") or base64-encoded PEM. Empty input → "".
+func decodePEMField(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.HasPrefix(s, "-----BEGIN") {
+		return s
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return string(b)
+	}
+	return s
 }
