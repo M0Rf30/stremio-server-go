@@ -137,13 +137,14 @@ func (s *store) Extend(patch map[string]interface{}) {
 // <appPath>/server-settings.json (write to .tmp then os.Rename).
 func (s *store) Save() error {
 	s.mu.Lock()
-	data, err := json.MarshalIndent(s.values, "", "  ")
-	appPath := s.appPath
-	s.mu.Unlock()
+	defer s.mu.Unlock()
 
+	data, err := json.MarshalIndent(s.values, "", "  ")
 	if err != nil {
 		return fmt.Errorf("settings: marshal: %w", err)
 	}
+
+	appPath := s.appPath
 	if err := os.MkdirAll(appPath, 0o755); err != nil {
 		return fmt.Errorf("settings: mkdir %s: %w", appPath, err)
 	}

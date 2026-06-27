@@ -3,6 +3,7 @@ package streamproxy
 import (
 	"container/list"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -12,6 +13,11 @@ import (
 
 // defaultCacheMaxBytes is the default total-byte cap for the segment cache (~256 MB).
 const defaultCacheMaxBytes = 256 * 1024 * 1024
+
+// maxSegmentBytes is the per-segment read ceiling inside cachedFetch.
+// Upstream responses exceeding this value are refused rather than buffered
+// unboundedly; 50 MiB is generous for any real HLS/DASH segment.
+const maxSegmentBytes int64 = 50 * 1024 * 1024
 
 // cacheEntry holds a cached segment with its metadata.
 type cacheEntry struct {
@@ -110,14 +116,21 @@ func (c *segCache) getFull(key string) *cacheEntry {
 // Returns body, response headers, HTTP status, and any error.
 func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Header, proxyURL string) ([]byte, http.Header, int, error) {
 	if h.cache == nil || h.cfg.SegCacheTTL == 0 {
-		// Caching disabled — fetch directly.
+		// Caching disabled — fetch directly, but cap the read to prevent OOM.
 		resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil, proxyURL)
 		if err != nil {
 			return nil, nil, 0, err
 		}
-		defer resp.Body.Close()
-		data, err := io.ReadAll(resp.Body)
-		return data, resp.Header, resp.StatusCode, err
+		defer func() { _ = resp.Body.Close() }()
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBytes+1))
+		if err != nil {
+			return nil, nil, resp.StatusCode, err
+		}
+		if int64(len(data)) > maxSegmentBytes {
+			return nil, nil, http.StatusBadGateway,
+				fmt.Errorf("upstream segment too large (> %d bytes)", maxSegmentBytes)
+		}
+		return data, resp.Header, resp.StatusCode, nil
 	}
 
 	// Cache hit.
@@ -138,10 +151,16 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	// Bound the read: if the segment exceeds maxSegmentBytes we do not cache it
+	// (skip caching) and return an error rather than buffering unboundedly.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBytes+1))
 	if err != nil {
 		return nil, nil, resp.StatusCode, err
+	}
+	if int64(len(data)) > maxSegmentBytes {
+		return nil, nil, http.StatusBadGateway,
+			fmt.Errorf("upstream segment too large to cache (> %d bytes)", maxSegmentBytes)
 	}
 	if resp.StatusCode == http.StatusOK {
 		h.cache.putFull(rawurl, data, resp.Header.Clone(), resp.StatusCode)
@@ -150,7 +169,11 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 }
 
 // prefetch asynchronously warms the cache for up to cfg.Prebuffer URLs.
-// Errors are silently ignored. No-op when Prebuffer <= 0 or SegCacheTTL == 0.
+// Each goroutine runs under a fresh context bounded by prefetchTimeout so it
+// cannot outlive a slow upstream indefinitely. Concurrent goroutines are
+// capped by h.prefetchSem; if all slots are occupied the remaining URLs are
+// skipped rather than blocked. Errors are silently ignored.
+// No-op when Prebuffer <= 0 or SegCacheTTL == 0.
 func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header, proxyURL string) {
 	if h.cfg.Prebuffer <= 0 || h.cache == nil {
 		return
@@ -160,9 +183,20 @@ func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header, 
 		limit = len(urls)
 	}
 	for _, u := range urls[:limit] {
-		u := u
+		// Non-blocking semaphore acquire — skip remaining URLs when all slots busy.
+		select {
+		case h.prefetchSem <- struct{}{}:
+		default:
+			return
+		}
 		go func() {
-			h.cachedFetch(ctx, u, hdr, proxyURL) //nolint:errcheck
+			defer func() { <-h.prefetchSem }()
+			// Detach from the request's cancellation (prefetch must outlive the
+			// originating response) while keeping its values and an explicit
+			// wall-clock bound.
+			pCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prefetchTimeout)
+			defer cancel()
+			_, _, _, _ = h.cachedFetch(pCtx, u, hdr, proxyURL)
 		}()
 	}
 }

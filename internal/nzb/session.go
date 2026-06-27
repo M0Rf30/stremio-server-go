@@ -6,6 +6,35 @@ import (
 	"sort"
 )
 
+// limitedWriter wraps an io.Writer and returns an error if the total bytes
+// written would exceed limit. A limit of 0 disables the cap.
+type limitedWriter struct {
+	w       io.Writer
+	limit   int64
+	written int64
+}
+
+func (lw *limitedWriter) Write(p []byte) (int, error) {
+	if lw.limit > 0 {
+		if lw.written >= lw.limit {
+			return 0, fmt.Errorf("nzb: assembled output exceeds declared size %d bytes", lw.limit)
+		}
+		remain := lw.limit - lw.written
+		if int64(len(p)) > remain {
+			// Write only up to the limit, then return an overflow error.
+			n, err := lw.w.Write(p[:remain])
+			lw.written += int64(n)
+			if err != nil {
+				return n, err
+			}
+			return n, fmt.Errorf("nzb: assembled output exceeds declared size %d bytes", lw.limit)
+		}
+	}
+	n, err := lw.w.Write(p)
+	lw.written += int64(n)
+	return n, err
+}
+
 // Session holds the NNTP server configuration and the parsed file list for one
 // NZB job. It dials a fresh connection for each AssembleFile call, which keeps
 // the implementation simple and avoids idle-timeout issues.
@@ -27,6 +56,8 @@ func (sess *Session) Files() []File {
 // AssembleFile downloads all segments for the file named name in order and
 // writes the decoded bytes to dst. Segments are fetched sequentially over a
 // single NNTP connection; the connection is closed when done.
+// The total bytes written is capped at the declared file size to prevent disk
+// exhaustion from malformed or adversarial NZB data.
 func (sess *Session) AssembleFile(name string, dst io.Writer) error {
 	var target *File
 	for i := range sess.files {
@@ -43,7 +74,7 @@ func (sess *Session) AssembleFile(name string, dst io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("nzb: %w", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	// Defensive copy sorted by segment number.
 	segs := make([]Segment, len(target.Segments))
@@ -52,8 +83,14 @@ func (sess *Session) AssembleFile(name string, dst io.Writer) error {
 		return segs[i].Number < segs[j].Number
 	})
 
+	// Wrap dst with a size cap to prevent writing beyond the declared file size.
+	w := dst
+	if target.Size > 0 {
+		w = &limitedWriter{w: dst, limit: target.Size}
+	}
+
 	for _, seg := range segs {
-		if err := c.Body(seg.MessageID, dst); err != nil {
+		if err := c.Body(seg.MessageID, w); err != nil {
 			return fmt.Errorf("nzb: segment %s: %w", seg.MessageID, err)
 		}
 	}

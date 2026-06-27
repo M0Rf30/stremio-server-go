@@ -21,8 +21,12 @@ func selfSignedCert() (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, err
 	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
 	tmpl := x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "stremio-server-go local"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().AddDate(10, 0, 0),

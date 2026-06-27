@@ -259,7 +259,7 @@ func resolveIMDB(title string, year int, ctype string) (ttID, poster string) {
 	titleLow := strings.ToLower(title)
 
 	bestIdx := -1
-	bestScore := -1
+	bestScore := 0
 	for i, d := range sug.D {
 		if !strings.HasPrefix(d.ID, "tt") {
 			continue
@@ -294,12 +294,6 @@ func resolveIMDB(title string, year int, ctype string) (ttID, poster string) {
 	}
 
 	if bestIdx < 0 {
-		// Fall back to first tt* result.
-		for _, d := range sug.D {
-			if strings.HasPrefix(d.ID, "tt") {
-				return d.ID, d.I.ImageURL
-			}
-		}
 		return "", ""
 	}
 	return sug.D[bestIdx].ID, sug.D[bestIdx].I.ImageURL
@@ -338,11 +332,11 @@ func ensureIMDBResolved(localHex, title string, year int, ctype, absPath string)
 
 		ttID, poster := resolveIMDB(title, year, ctype)
 
-		imdbCacheMu.Lock()
-		imdbByLocal[localHex] = imdbEntry{TTID: ttID, Poster: poster}
-		imdbCacheMu.Unlock()
-
 		if ttID != "" {
+			imdbCacheMu.Lock()
+			imdbByLocal[localHex] = imdbEntry{TTID: ttID, Poster: poster}
+			imdbCacheMu.Unlock()
+
 			ttPathMu.Lock()
 			ttToPath[ttID] = absPath
 			ttPathMu.Unlock()
@@ -507,7 +501,7 @@ func (s *server) localAddonStream(w http.ResponseWriter, r *http.Request, _, id 
 			"streams": []any{
 				map[string]any{
 					"title": m.Name,
-					"url":   "file://" + m.Path,
+					"url":   fileURL(m.Path),
 					"behaviorHints": map[string]any{
 						"notWebReady": true, // local file:// is not browser-accessible
 					},
@@ -540,6 +534,17 @@ func (s *server) localAddonStream(w http.ResponseWriter, r *http.Request, _, id 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"streams": []any{}})
+}
+
+// fileURL builds a properly percent-encoded file:// URL from an absolute path.
+// Each path segment is encoded via url.PathEscape so spaces and special
+// characters are safe for URL parsers, while directory separators (/) are preserved.
+func fileURL(absPath string) string {
+	segs := strings.Split(absPath, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return "file://" + strings.Join(segs, "/")
 }
 
 // scanLocalFiles walks LOCAL_FILES_DIR and returns a list of localMeta entries.

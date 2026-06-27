@@ -408,7 +408,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 	w.Header().Set("transferMode.dlna.org", "Streaming")
 	w.Header().Set("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
 	if q.Get("download") != "" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q;", f.Name))
+		w.Header().Set("Content-Disposition", contentDisposition(f.Name))
 	}
 	if subs := q.Get("subtitles"); subs != "" {
 		w.Header().Set("CaptionInfo.sec", subs)
@@ -459,6 +459,7 @@ func resolveIndex(seg string, files []types.FileInfo, mustInc []*regexp.Regexp, 
 				}
 			}
 		}
+		return -1 // mustInc filters provided but no file matched → caller returns 404
 	}
 	if n, err := strconv.Atoi(seg); err == nil {
 		if n == -1 {
@@ -528,6 +529,9 @@ func parseRange(h string, length int64) (start, end int64, ok bool, unsatisfiabl
 		}
 		if n > length {
 			n = length
+		}
+		if n == 0 { // length==0: suffix of empty file is unsatisfiable (RFC 7233 §4.4)
+			return 0, 0, false, true
 		}
 		return length - n, length - 1, true, false
 	}
@@ -1378,8 +1382,8 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 	w.WriteHeader(resp.StatusCode)
 	if r.Method != http.MethodHead {
 		bufp := streamBufPool.Get().(*[]byte)
+		defer streamBufPool.Put(bufp)
 		_, _ = io.CopyBuffer(w, resp.Body, *bufp)
-		streamBufPool.Put(bufp)
 	}
 }
 
@@ -1402,4 +1406,39 @@ func detectHWAccels() []any {
 		}
 	})
 	return hwAccelsCache
+}
+
+// contentDisposition builds a Content-Disposition attachment header value with
+// an ASCII-safe filename= fallback (RFC 2183) and an RFC 5987 filename*= field
+// for proper handling of non-ASCII filenames by modern browsers.
+func contentDisposition(name string) string {
+	ascii := strings.Map(func(r rune) rune {
+		if r >= 0x20 && r <= 0x7E && r != '"' && r != '\\' {
+			return r
+		}
+		return '_'
+	}, name)
+	return "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''" + rfc5987Encode(name)
+}
+
+// rfc5987Encode percent-encodes a UTF-8 string for use as an RFC 5987 ext-value.
+// attr-char octets (ALPHA / DIGIT / selected symbols) pass through unchanged;
+// all other bytes are %XX encoded over their UTF-8 representation.
+func rfc5987Encode(s string) string {
+	const hx = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '!' || c == '#' || c == '$' || c == '&' || c == '+' || c == '-' ||
+			c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~' {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('%')
+			b.WriteByte(hx[c>>4])
+			b.WriteByte(hx[c&0xF])
+		}
+	}
+	return b.String()
 }

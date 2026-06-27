@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -234,7 +235,7 @@ func httpRangeGet(url string, from, to int64) ([]byte, error) {
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", from, to))
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -265,7 +266,7 @@ func readLocalChunks(path string) (size int64, head, tail []byte, err error) {
 
 	head = make([]byte, chunkSize)
 	n, rerr := io.ReadFull(f, head)
-	if rerr == io.ErrUnexpectedEOF || rerr == io.EOF {
+	if errors.Is(rerr, io.ErrUnexpectedEOF) || errors.Is(rerr, io.EOF) {
 		// File fits entirely within one chunk.
 		head = head[:n]
 		return size, head, head, nil
@@ -284,7 +285,7 @@ func readLocalChunks(path string) (size int64, head, tail []byte, err error) {
 
 	tail = make([]byte, chunkSize)
 	n, rerr = io.ReadFull(f, tail)
-	if rerr == io.ErrUnexpectedEOF || rerr == io.EOF {
+	if errors.Is(rerr, io.ErrUnexpectedEOF) || errors.Is(rerr, io.EOF) {
 		tail = tail[:n]
 	} else if rerr != nil {
 		return 0, nil, nil, rerr

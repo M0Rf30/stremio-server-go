@@ -7,6 +7,16 @@ import (
 	"net"
 	"net/textproto"
 	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	// dialTimeout is the maximum time allowed to establish a TCP/TLS connection.
+	dialTimeout = 30 * time.Second
+	// opTimeout is the per-operation deadline applied around greeting, auth, and
+	// each BODY fetch. It is refreshed before every Body call.
+	opTimeout = 60 * time.Second
 )
 
 // ServerConfig holds the connection parameters for one NNTP server.
@@ -26,9 +36,16 @@ type Client struct {
 	conn net.Conn
 }
 
+// containsCRLF reports whether s contains a carriage return or line feed,
+// which would allow injection into the NNTP command stream.
+func containsCRLF(s string) bool {
+	return strings.ContainsAny(s, "\r\n")
+}
+
 // Dial opens a TCP (or TLS) connection to the NNTP server described by cfg,
 // performs the initial handshake, and authenticates when credentials are set.
 // Default ports: 119 (plain), 563 (SSL) when cfg.Port == 0.
+// A 30 s dial timeout and 60 s per-operation deadlines are enforced.
 func Dial(cfg ServerConfig) (*Client, error) {
 	port := cfg.Port
 	if port == 0 {
@@ -44,14 +61,21 @@ func Dial(cfg ServerConfig) (*Client, error) {
 	var conn net.Conn
 	var err error
 	if cfg.SSL {
-		conn, err = tls.Dial("tcp", addr, &tls.Config{
+		dialer := &net.Dialer{Timeout: dialTimeout}
+		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
 			ServerName: cfg.Host,
 		})
 	} else {
-		conn, err = net.Dial("tcp", addr)
+		conn, err = net.DialTimeout("tcp", addr, dialTimeout)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("nntp: dial %s: %w", addr, err)
+	}
+
+	// Set a deadline covering the greeting and any authentication exchange.
+	if err := conn.SetDeadline(time.Now().Add(opTimeout)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("nntp: set deadline: %w", err)
 	}
 
 	tp := textproto.NewConn(conn)
@@ -59,11 +83,11 @@ func Dial(cfg ServerConfig) (*Client, error) {
 	// Read server greeting: 200 (post allowed) or 201 (read-only).
 	code, _, err := tp.ReadResponse(0)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("nntp: greeting: %w", err)
 	}
 	if code != 200 && code != 201 {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("nntp: unexpected greeting code %d", code)
 	}
 
@@ -71,9 +95,15 @@ func Dial(cfg ServerConfig) (*Client, error) {
 
 	if cfg.User != "" {
 		if err := c.authinfo(cfg.User, cfg.Pass); err != nil {
-			c.Close()
+			_ = c.Close()
 			return nil, err
 		}
+	}
+
+	// Clear the handshake deadline; Body sets a fresh deadline per request.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("nntp: clear deadline: %w", err)
 	}
 
 	return c, nil
@@ -81,6 +111,13 @@ func Dial(cfg ServerConfig) (*Client, error) {
 
 // authinfo performs AUTHINFO USER / PASS authentication.
 func (c *Client) authinfo(user, pass string) error {
+	if containsCRLF(user) {
+		return fmt.Errorf("nntp: AUTHINFO: username contains invalid characters")
+	}
+	if containsCRLF(pass) {
+		return fmt.Errorf("nntp: AUTHINFO: password contains invalid characters")
+	}
+
 	if err := c.tp.PrintfLine("AUTHINFO USER %s", user); err != nil {
 		return fmt.Errorf("nntp: AUTHINFO USER: %w", err)
 	}
@@ -109,11 +146,20 @@ func (c *Client) authinfo(user, pass string) error {
 
 // Body fetches the body of the article identified by messageID, yEnc-decodes
 // it, and writes the decoded bytes to w. The leading/trailing angle brackets
-// on messageID are optional; Dial adds them if absent.
+// on messageID are optional; Body adds them if absent.
 func (c *Client) Body(messageID string, w io.Writer) error {
+	if containsCRLF(messageID) {
+		return fmt.Errorf("nntp: Body: messageID contains invalid characters")
+	}
+
 	// Normalise message-id: ensure angle brackets.
 	if len(messageID) == 0 || messageID[0] != '<' {
 		messageID = "<" + messageID + ">"
+	}
+
+	// Refresh the per-operation deadline before each fetch.
+	if err := c.conn.SetDeadline(time.Now().Add(opTimeout)); err != nil {
+		return fmt.Errorf("nntp: set deadline: %w", err)
 	}
 
 	if err := c.tp.PrintfLine("BODY %s", messageID); err != nil {

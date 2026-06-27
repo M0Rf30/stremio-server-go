@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,11 +57,27 @@ func OpenFile(fpath, ext string) (Reader, error) {
 	}
 }
 
-// normName converts an archive entry name to a clean forward-slash path by
-// replacing any back-slashes (Windows archives) and collapsing redundant
-// separators and dot-segments.
+// normName converts an archive entry name to a clean forward-slash path.
+// It replaces back-slashes (Windows archives), collapses redundant separators
+// and dot-segments, strips leading slashes (absolute → relative), and removes
+// any leading ../ sequences that survive cleaning so that a malicious archive
+// cannot cause path traversal outside the extraction directory.
 func normName(s string) string {
-	return path.Clean(strings.ReplaceAll(s, "\\", "/"))
+	s = path.Clean(strings.ReplaceAll(s, "\\", "/"))
+	// Absolute path → strip leading slashes.
+	s = strings.TrimLeft(s, "/")
+	// Strip any remaining leading ../ segments (e.g. "../../evil" becomes "evil").
+	for s == ".." || strings.HasPrefix(s, "../") {
+		if s == ".." {
+			s = "."
+			break
+		}
+		s = s[3:]
+	}
+	if s == "" {
+		s = "."
+	}
+	return s
 }
 
 // ── zip ──────────────────────────────────────────────────────────────────────
@@ -125,7 +142,7 @@ func openTgz(fpath string) (Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	gr, err := gzip.NewReader(f)
 	if err != nil {
 		return nil, fmt.Errorf("archive: not a valid gzip stream: %w", err)
@@ -172,12 +189,12 @@ func (r *tarReader) List() ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer cl.Close()
+	defer func() { _ = cl.Close() }()
 
 	var out []Entry
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -208,7 +225,7 @@ func (r *tarReader) Open(name string) (io.ReadCloser, error) {
 	}
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			_ = cl.Close()
 			return nil, fmt.Errorf("archive: %q not found in tar", name)
 		}
@@ -247,12 +264,12 @@ func (r *rarReader) List() ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	var out []Entry
 	for {
 		hdr, err := rc.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -283,7 +300,7 @@ func (r *rarReader) Open(name string) (io.ReadCloser, error) {
 	}
 	for {
 		hdr, err := rc.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			_ = rc.Close()
 			return nil, fmt.Errorf("archive: %q not found in rar", name)
 		}

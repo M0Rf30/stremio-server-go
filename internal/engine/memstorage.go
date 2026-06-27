@@ -226,6 +226,12 @@ func (mp *memPiece) WriteAt(b []byte, off int64) (int, error) {
 	s := mp.store
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if off < 0 {
+		return 0, errors.New("engine: memstorage: negative offset")
+	}
+	if off >= mp.length {
+		return 0, io.EOF
+	}
 	if mp.data == nil {
 		// First write: make room for this piece, then allocate it resident.
 		// mp is not yet in the LRU, so eviction cannot target it.

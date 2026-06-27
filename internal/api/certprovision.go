@@ -162,9 +162,10 @@ func parseCertResult(result json.RawMessage) (certPEM, keyPEM, commonName string
 	return certPEM, keyPEM, commonName, nil
 }
 
-// installCertFiles writes cert and key atomically: each to a temp file in the
-// same directory, then rename both. A failure at any step leaves the existing
-// files untouched, so a key-write failure can never strand a mismatched cert.
+// installCertFiles writes cert and key atomically: both are written to temp
+// files first, then renamed into place. If the key rename fails, the cert
+// rename is rolled back so certPath and keyPath are never left as a mismatched
+// or missing pair.
 func installCertFiles(appPath, certPEM, keyPEM string) error {
 	certPath := filepath.Join(appPath, "https-cert.pem")
 	keyPath := filepath.Join(appPath, "https-key.pem")
@@ -184,8 +185,9 @@ func installCertFiles(appPath, certPEM, keyPEM string) error {
 		return perr(http.StatusInternalServerError, "install https-cert.pem: %v", err)
 	}
 	if err := os.Rename(keyTmp, keyPath); err != nil {
-		_ = os.Remove(certPath) // undo the cert rename
-		_ = os.Remove(keyTmp)
+		_ = os.Rename(certPath, certTmp) // roll back cert rename: move new cert off certPath
+		_ = os.Remove(certTmp)           // clean up cert temp
+		_ = os.Remove(keyTmp)            // clean up key temp
 		return perr(http.StatusInternalServerError, "install https-key.pem: %v", err)
 	}
 	return nil

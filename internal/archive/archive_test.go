@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/M0Rf30/stremio-server-go/internal/archive"
@@ -186,6 +187,60 @@ func TestFormatRouting(t *testing.T) {
 		_, err := archive.OpenFile("/nonexistent/path", ext)
 		if err == nil {
 			t.Errorf("ext %q: expected error for missing file, got nil", ext)
+		}
+	}
+}
+
+// TestNormNamePathTraversal verifies that List() never returns entry names that
+// could cause path traversal (absolute paths or names starting with "..").
+func TestNormNamePathTraversal(t *testing.T) {
+	// Build a zip whose entries have dangerous raw names.
+	f, err := os.CreateTemp(t.TempDir(), "traversal-*.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	zw := zip.NewWriter(f)
+	dangerous := []string{
+		"../secret.txt",
+		"../../etc/passwd",
+		"/etc/shadow",
+		"safe/file.txt",
+		"subdir/../also-safe.txt", // path.Clean resolves this to "also-safe.txt"
+	}
+	for _, name := range dangerous {
+		fw, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte("data")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := archive.OpenFile(f.Name(), "zip")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	entries, err := r.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name, "/") {
+			t.Errorf("entry %q: absolute path leaked through normName", e.Name)
+		}
+		for _, comp := range strings.Split(e.Name, "/") {
+			if comp == ".." {
+				t.Errorf("entry %q: contains '..' path component", e.Name)
+			}
 		}
 	}
 }

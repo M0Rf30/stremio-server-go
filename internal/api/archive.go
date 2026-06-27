@@ -60,6 +60,20 @@ var (
 
 const archiveSessionTTL = time.Hour
 
+// archiveMaxDownloadBytes is the maximum number of bytes that archiveDownload
+// will stream from a remote URL to a local temp file. Archives larger than
+// this limit are rejected to prevent unbounded disk consumption.
+// 4 GiB covers the largest single-file archives seen in practice.
+const archiveMaxDownloadBytes = 4 << 30 // 4 GiB
+
+// archiveMaxLZEncoded is the maximum accepted byte length of a raw ?lz= query
+// value before decompression. Prevents memory blowup before decode begins.
+const archiveMaxLZEncoded = 1 << 20 // 1 MiB
+
+// archiveMaxLZDecoded is the maximum byte length of the JSON string produced
+// by lz-string decompression. Guards against decompression bombs.
+const archiveMaxLZDecoded = 8 << 20 // 8 MiB
+
 // archiveStartJanitor starts a background goroutine that evicts idle sessions.
 // It is started at most once, on the first incoming request.
 func archiveStartJanitor() {
@@ -112,9 +126,15 @@ func archiveParsePayload(r *http.Request) (*archivePayload, error) {
 	var raw []byte
 
 	if lzParam := r.URL.Query().Get("lz"); lzParam != "" {
+		if len(lzParam) > archiveMaxLZEncoded {
+			return nil, fmt.Errorf("lz param too large (%d bytes; limit %d)", len(lzParam), archiveMaxLZEncoded)
+		}
 		decoded, err := lzstring.DecompressFromEncodedURIComponent(lzParam)
 		if err != nil {
 			return nil, fmt.Errorf("lz decode: %w", err)
+		}
+		if len(decoded) > archiveMaxLZDecoded {
+			return nil, fmt.Errorf("lz decoded payload too large (%d bytes; limit %d)", len(decoded), archiveMaxLZDecoded)
 		}
 		raw = []byte(decoded)
 	} else if r.Body != nil {
@@ -239,7 +259,7 @@ func archiveDownload(u string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GET %s: status %d", u, resp.StatusCode)
 	}
@@ -247,10 +267,16 @@ func archiveDownload(u string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	// Cap at archiveMaxDownloadBytes; use +1 so we can detect an overflow by
+	// checking whether we copied strictly more than the limit.
+	n, copyErr := io.Copy(f, io.LimitReader(resp.Body, archiveMaxDownloadBytes+1))
+	if copyErr != nil || n > archiveMaxDownloadBytes {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
-		return "", err
+		if copyErr != nil {
+			return "", fmt.Errorf("download %s: %w", u, copyErr)
+		}
+		return "", fmt.Errorf("download %s: response exceeds size limit (%d bytes)", u, archiveMaxDownloadBytes)
 	}
 	name := f.Name()
 	_ = f.Close()
@@ -294,7 +320,24 @@ func archiveExtractEntry(sess *archiveSession, entryName string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("open archive: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
+	// Obtain the declared (uncompressed) size from the archive index. This is
+	// used below to cap the extraction and prevent zip-bomb decompression.
+	entries, err := r.List()
+	if err != nil {
+		return "", fmt.Errorf("list archive: %w", err)
+	}
+	var declaredSize int64 = -1
+	for _, e := range entries {
+		if e.Name == entryName {
+			declaredSize = e.Size
+			break
+		}
+	}
+	if declaredSize < 0 {
+		return "", fmt.Errorf("entry %q not found in archive", entryName)
+	}
 
 	rc, err := r.Open(entryName)
 	if err != nil {
@@ -307,12 +350,20 @@ func archiveExtractEntry(sess *archiveSession, entryName string) (string, error)
 		_ = rc.Close()
 		return "", fmt.Errorf("create temp: %w", err)
 	}
-	_, copyErr := io.Copy(f, rc)
+
+	// Use LimitReader(rc, declaredSize+1) to enforce the zip-bomb guard:
+	// at most declaredSize bytes are written; if the source yields more we
+	// remove the partial file and return an error.
+	n, copyErr := io.Copy(f, io.LimitReader(rc, declaredSize+1))
 	_ = rc.Close()
 	_ = f.Close()
 	if copyErr != nil {
 		_ = os.Remove(f.Name())
 		return "", fmt.Errorf("extract %q: %w", entryName, copyErr)
+	}
+	if n > declaredSize {
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("extract %q: content (%d bytes) exceeds declared size (%d bytes)", entryName, n, declaredSize)
 	}
 	tmpPath := f.Name()
 
@@ -553,7 +604,7 @@ func (s *server) archiveHandleStream(w http.ResponseWriter, r *http.Request, seg
 		http.Error(w, "open extracted file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	w.Header().Set("Content-Type", mimeByName(entryName))
 	w.Header().Set("Accept-Ranges", "bytes")

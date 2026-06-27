@@ -40,6 +40,13 @@ type ipCacheEntry struct {
 	expiresAt time.Time
 }
 
+// prefetchTimeout is the wall-clock deadline for each prefetch goroutine.
+const prefetchTimeout = 30 * time.Second
+
+// maxConcurrentPrefetch caps the total number of prefetch goroutines that may
+// run simultaneously across all requests handled by a single Handler.
+const maxConcurrentPrefetch = 8
+
 // Handler is the stream proxy request handler.
 type Handler struct {
 	cfg          Config
@@ -48,6 +55,9 @@ type Handler struct {
 	proxyClients map[string]*http.Client
 	ipMu         sync.Mutex
 	ipCache      map[string]ipCacheEntry
+	// prefetchSem is a semaphore that bounds the number of goroutines spawned
+	// by prefetch across all concurrent requests.
+	prefetchSem chan struct{}
 }
 
 // New creates a Handler. A nil Client is replaced with http.DefaultClient.
@@ -64,6 +74,7 @@ func New(cfg Config) *Handler {
 		cache:        c,
 		proxyClients: make(map[string]*http.Client),
 		ipCache:      make(map[string]ipCacheEntry),
+		prefetchSem:  make(chan struct{}, maxConcurrentPrefetch),
 	}
 }
 
@@ -462,10 +473,14 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "upstream error", http.StatusBadGateway)
 				return
 			}
-			defer resp.Body.Close()
-			raw, readErr := io.ReadAll(resp.Body)
+			defer func() { _ = resp.Body.Close() }()
+			raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBytes+1))
 			if readErr != nil {
 				http.Error(w, "upstream read error", http.StatusBadGateway)
+				return
+			}
+			if int64(len(raw)) > maxSegmentBytes {
+				http.Error(w, "upstream segment too large", http.StatusBadGateway)
 				return
 			}
 			decrypted, decErr := segmentDecryptor(h, params, raw)

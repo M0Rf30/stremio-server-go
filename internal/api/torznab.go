@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -32,6 +33,9 @@ import (
 
 // tnClient is the dedicated HTTP client for Torznab indexer requests.
 var tnClient = &http.Client{Timeout: 15 * time.Second}
+
+// tnRespLimit caps the XML response body to bound memory from hostile indexers.
+const tnRespLimit = 4 << 20 // 4 MiB
 
 // ---- XML RSS types (local to this file) ------------------------------------
 
@@ -397,7 +401,7 @@ func tnFetch(r *http.Request, fullURL string) ([]tnItem, error) {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	var rss tnRSS
-	if err := xml.NewDecoder(resp.Body).Decode(&rss); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, tnRespLimit)).Decode(&rss); err != nil {
 		return nil, fmt.Errorf("decode XML: %w", err)
 	}
 	return rss.Channel.Items, nil

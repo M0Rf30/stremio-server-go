@@ -279,6 +279,20 @@ func localize(u string) string {
 	return strings.ReplaceAll(u, "https://127.0.0.1:12470", "http://127.0.0.1:11470")
 }
 
+// sanitizeM3U8Attr removes characters that are illegal inside a quoted-string
+// M3U8 attribute value: double-quote, carriage return, newline, and comma.
+// These would break the playlist syntax; stripping them is safe because the
+// values are only decorative labels (NAME, LANGUAGE).
+func sanitizeM3U8Attr(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '"', '\r', '\n', ',':
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // ── probeMedia ────────────────────────────────────────────────────────────────
 
 // probeMediaResult carries the output of a combined ffprobe run.
@@ -392,7 +406,7 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 		return "", fmt.Errorf("hls: missing mediaURL")
 	}
 	// Reject ids that could escape the base directory via path traversal.
-	if id == "" || id != filepath.Base(id) || strings.Contains(id, "..") {
+	if id == "" || id == "." || id == ".." || id != filepath.Base(id) || strings.Contains(id, "..") {
 		return "", fmt.Errorf("hls: invalid session id %q", id)
 	}
 	m.mu.Lock()
@@ -491,7 +505,7 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 			}
 			fmt.Fprintf(&b,
 				"#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",LANGUAGE=\"%s\",NAME=\"%s\",DEFAULT=%s,AUTOSELECT=YES,FORCED=NO,URI=\"sub%d.m3u8\"\n",
-				lang, name, isDefault, k,
+				sanitizeM3U8Attr(lang), sanitizeM3U8Attr(name), isDefault, k,
 			)
 		}
 	}
@@ -537,11 +551,11 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 		// Optional LANGUAGE attribute (BCP-47 tag forwarded from the container).
 		langAttr := ""
 		if a.Language != "" {
-			langAttr = fmt.Sprintf(",LANGUAGE=\"%s\"", a.Language)
+			langAttr = fmt.Sprintf(",LANGUAGE=\"%s\"", sanitizeM3U8Attr(a.Language))
 		}
 		fmt.Fprintf(&b,
 			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\"%s,NAME=\"%s\",DEFAULT=%s,AUTOSELECT=%s,URI=\"audio%d.m3u8\"\n",
-			langAttr, name, defaultVal, autoVal, k,
+			langAttr, sanitizeM3U8Attr(name), defaultVal, autoVal, k,
 		)
 	}
 
@@ -572,12 +586,15 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, string, error) {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
+	if ok {
+		// Touch lastAccess while still holding m.mu so the reaper cannot evict
+		// this session between the map lookup and the update.
+		s.lastAccess.Store(time.Now().UnixNano())
+	}
 	m.mu.Unlock()
 	if !ok {
 		return "", "", fmt.Errorf("hls: unknown session %s", id)
 	}
-	// Touch lastAccess before any work so the reaper knows this session is active.
-	s.lastAccess.Store(time.Now().UnixNano())
 
 	name = filepath.Base(name)
 	// Belt-and-suspenders: ensure the joined path stays inside the session directory.
@@ -1057,6 +1074,7 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 		return "", fmt.Errorf("hls: transcode %s: %w", filename, err)
 	}
 	if err := os.Rename(tmp, segFile); err != nil {
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	return segFile, nil

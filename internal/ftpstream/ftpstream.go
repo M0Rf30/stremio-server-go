@@ -127,6 +127,14 @@ func openFTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, i
 		return nil, -1, fmt.Errorf("ftpstream: RETR %s: %w", p.path, err)
 	}
 
+	// jlaffaye/ftp does not expose context parameters for Login, FileSize,
+	// Retr, or RetrFrom — DialWithContext applies to the initial dial only.
+	// Apply any context deadline to the data-connection response so that
+	// reads respect the caller's deadline/cancellation as closely as possible.
+	if dl, ok := ctx.Deadline(); ok {
+		_ = resp.SetDeadline(dl)
+	}
+
 	return &ftpReadCloser{resp: resp, conn: conn}, size, nil
 }
 

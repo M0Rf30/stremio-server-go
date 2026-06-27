@@ -36,12 +36,14 @@ import (
 // ---- session store ---------------------------------------------------------
 
 // nzbFileState tracks the assembly of a single file within a session.
-// sync.Once guarantees exactly one download attempt per file even under
-// concurrent requests.
+// A mutex serialises concurrent callers. On success the result is cached
+// permanently (done=true); on failure the lock is released so a subsequent
+// request may retry, preserving the single-flight-on-success guarantee.
 type nzbFileState struct {
-	once sync.Once
+	mu   sync.Mutex
+	done bool // true once assembly has succeeded; path is valid forever
 	path string
-	err  error
+	err  error // last assembly error; meaningful only when !done
 }
 
 // nzbSession holds all state for one NZB streaming session.
@@ -318,6 +320,16 @@ func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string)
 		return
 	}
 
+	// Find target's index in sess.files so the temp filename is unique even when
+	// two NZB entries share the same basename (prevents collision in tmpDir).
+	fileIdx := 0
+	for i := range sess.files {
+		if sess.files[i].Name == target.Name {
+			fileIdx = i
+			break
+		}
+	}
+
 	// Look up or initialise the per-file assembly state.
 	sess.mu.Lock()
 	fs, exists := sess.fileStates[target.Name]
@@ -327,43 +339,56 @@ func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string)
 	}
 	sess.mu.Unlock()
 
-	// Exactly one goroutine performs the assembly; others block until it finishes.
-	fs.once.Do(func() {
+	// Exactly one goroutine at a time performs assembly (others wait on fs.mu).
+	// On success the path is cached permanently; on failure the mutex is released
+	// so a later request can retry.
+	assembledPath, assembleErr := func() (string, error) {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+
+		if fs.done {
+			return fs.path, nil
+		}
+
 		safeName := filepath.Base(target.Name)
 		if safeName == "" || safeName == "." || safeName == "/" {
 			safeName = "media.bin"
 		}
-		tmpPath := filepath.Join(sess.tmpDir, safeName)
+		// Prefix with the file index to make the temp name unique per NZB entry.
+		tmpPath := filepath.Join(sess.tmpDir, fmt.Sprintf("%d-%s", fileIdx, safeName))
 
 		f, err := os.Create(tmpPath)
 		if err != nil {
 			fs.err = err
-			return
+			return "", err
 		}
 
 		nzbSess := nzb.NewSession(sess.cfg, sess.files)
 		if err := nzbSess.AssembleFile(target.Name, f); err != nil {
-			f.Close()
+			_ = f.Close()
 			_ = os.Remove(tmpPath)
 			fs.err = fmt.Errorf("nzb assemble: %w", err)
-			return
+			return "", fs.err
 		}
-		f.Close()
+		_ = f.Close()
+		fs.done = true
 		fs.path = tmpPath
-	})
+		fs.err = nil
+		return tmpPath, nil
+	}()
 
-	if fs.err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": fs.err.Error()})
+	if assembleErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": assembleErr.Error()})
 		return
 	}
 
 	// Open and serve the assembled file with full Range/HEAD support.
-	f, err := os.Open(fs.path)
+	f, err := os.Open(assembledPath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -235,18 +236,20 @@ func main() {
 
 	go func() {
 		log.Printf("stremio-server %s listening at %s (app path %s)", version, baseLocal, appPath)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("http server: %v", err)
 		}
 	}()
 
 	// Optional pprof endpoint for diagnostics; disabled unless STREMIO_PPROF is
 	// set (e.g. STREMIO_PPROF=127.0.0.1:6060). Handlers come from net/http/pprof.
+	// ppSrv is declared here so it can join the graceful-shutdown WaitGroup below.
+	var ppSrv *http.Server
 	if addr := os.Getenv("STREMIO_PPROF"); addr != "" {
-		pp := &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
+		ppSrv = &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			log.Printf("pprof listening at http://%s/debug/pprof/", addr)
-			if err := pp.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := ppSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("pprof server: %v", err)
 			}
 		}()
@@ -292,7 +295,7 @@ func main() {
 			}
 			go func() {
 				log.Printf("stremio-server %s HTTPS at https://127.0.0.1:%d", version, cfg.HTTPSPort)
-				if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					log.Printf("https server: %v", err)
 				}
 			}()
@@ -323,6 +326,10 @@ func main() {
 	if tlsSrv != nil {
 		shutWg.Add(1)
 		go shutOne(tlsSrv, "https")
+	}
+	if ppSrv != nil {
+		shutWg.Add(1)
+		go shutOne(ppSrv, "pprof")
 	}
 	shutWg.Wait()
 }

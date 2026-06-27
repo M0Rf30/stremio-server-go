@@ -107,9 +107,10 @@ func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string)
 		return
 	}
 
-	// Extract the range start byte before opening the connection so the
-	// underlying transport can seek to the right position upfront (FTP RETR
-	// with REST; HTTP Range header).
+	// Seek to start for the common case (FTP REST / HTTP Range). We don't know
+	// the total size until after Open returns, so we open optimistically and
+	// reopen at 0 if size is unknown — a valid 206 Content-Range requires the
+	// total size, so we must fall back to 200 when it is unavailable.
 	rangeHdr := r.Header.Get("Range")
 	start, hasRange := ftpExtractRangeStart(rangeHdr)
 
@@ -117,6 +118,18 @@ func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string)
 	if err != nil {
 		http.Error(w, "stream open: "+err.Error(), http.StatusBadGateway)
 		return
+	}
+	// Range was requested and we seeked ahead, but total size is unknown so a
+	// valid Content-Range header cannot be emitted. Close this connection and
+	// reopen from byte 0; serve 200 instead.
+	if hasRange && size < 0 && start > 0 {
+		_ = rc.Close()
+		rc, size, err = ftpstream.Open(r.Context(), payload.FtpURL, 0)
+		if err != nil {
+			http.Error(w, "stream open: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		hasRange = false
 	}
 	defer func() { _ = rc.Close() }()
 

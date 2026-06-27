@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -42,6 +43,12 @@ type cineMetaEntry struct {
 }
 
 const cineMetaTTL = 6 * time.Hour
+
+// Response-body read limits to bound memory from a hostile or oversized response.
+const (
+	bmRespLimit   = 4 << 20 // 4 MiB — Bitmagnet GraphQL (up to 50 results)
+	cineMetaLimit = 1 << 20 // 1 MiB — Cinemeta single-item metadata
+)
 
 var (
 	cineMetaMu    sync.Mutex
@@ -331,6 +338,9 @@ func resolveCinemeta(r *http.Request, contentType, imdbID string) (name string, 
 		return "", 0
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", 0
+	}
 
 	var result struct {
 		Meta struct {
@@ -339,7 +349,7 @@ func resolveCinemeta(r *http.Request, contentType, imdbID string) (name string, 
 			ReleaseInfo string          `json:"releaseInfo"`
 		} `json:"meta"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, cineMetaLimit)).Decode(&result); err != nil {
 		return "", 0
 	}
 
@@ -356,9 +366,11 @@ func resolveCinemeta(r *http.Request, contentType, imdbID string) (name string, 
 		year, _ = strconv.Atoi(result.Meta.ReleaseInfo[:4])
 	}
 
-	cineMetaMu.Lock()
-	cineMetaCache[cacheKey] = cineMetaEntry{name: name, year: year, expires: time.Now().Add(cineMetaTTL)}
-	cineMetaMu.Unlock()
+	if name != "" {
+		cineMetaMu.Lock()
+		cineMetaCache[cacheKey] = cineMetaEntry{name: name, year: year, expires: time.Now().Add(cineMetaTTL)}
+		cineMetaMu.Unlock()
+	}
 
 	return name, year
 }
@@ -395,7 +407,7 @@ func queryBitmagnet(r *http.Request, endpoint, queryString string) ([]bmItem, er
 	defer resp.Body.Close()
 
 	var result bmResp
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, bmRespLimit)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if len(result.Errors) > 0 {
