@@ -33,17 +33,19 @@ package engine
 //
 // Correctness — we never serve wrong or stale bytes:
 //
-//   - A non-resident piece reports Completion{Ok: true, Complete: false}. When
-//     anacrolix tries to read a piece whose data has been evicted, reader.readAt
-//     (reader.go) resets its storage reader, resyncs the cached completion via
-//     updatePieceCompletion -> pieceCompleteUncached -> Storage().Completion()
-//     (torrent.go), observes the piece is no longer complete, and — because
-//     hasStorageCap() is true — re-requests and waits for it instead of
-//     returning the bytes. peerconn.go also treats such drops as expected.
-//   - ReadAt on a non-resident piece returns (0, errPieceEvicted), never
-//     (0, nil) — the storage.Piece / storagePieceReader wrappers panic on a
-//     (0, nil) read, and the non-nil error is exactly the signal that drives the
-//     re-fetch above.
+//   - A non-resident piece reports Completion{Ok: true, Complete: false}, and its
+//     ReadAt returns (0, errPieceEvicted), never (0, nil) — the storage.Piece /
+//     storagePieceReader wrappers panic on a (0, nil) read.
+//   - Evicting bytes is NOT enough on its own: anacrolix only clears a piece's
+//     dirty-chunk bitmap on hash *failure*, never on completion, so a completed
+//     piece keeps reading as "have" (reader.available stays > 0). reader.readAt
+//     then spin-retries the failing read forever (a stack overflow) instead of
+//     blocking, because it never sees the piece as unavailable. To close this we
+//     drive a real re-download: ReadAt on an evicted piece calls the refetch hook
+//     (wired by the manager to Torrent.Piece(i).VerifyData), which re-hashes the
+//     empty piece, fails, clears its dirty chunks, and re-requests it — so the
+//     reader blocks for the re-download. A short backoff on the evicted-read path
+//     bounds anacrolix's retry recursion until that re-pend lands.
 //   - We only ever evict COMPLETE pieces, so in-flight (partially written)
 //     pieces are never dropped and anacrolix's chunk bookkeeping is never
 //     invalidated mid-download.
@@ -60,6 +62,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
@@ -82,16 +85,25 @@ type memStorage struct {
 	mu   sync.Mutex
 	used int64      // resident bytes currently accounted (sum of resident piece lengths)
 	lru  *list.List // front = most-recently-used, back = least; values are *memPiece
+
+	// refetch, when set by the manager, forces anacrolix to re-download a piece
+	// whose bytes were evicted. refetchBackoff briefly throttles the evicted-read
+	// path so anacrolix's reader.readAt retry loop cannot recurse into a stack
+	// overflow before the re-download is requested. Both are zero in the direct
+	// unit tests, which drive the backend without a live torrent.
+	refetch        func(ih metainfo.Hash, piece int)
+	refetchBackoff time.Duration
 }
 
 var _ storage.ClientImplCloser = (*memStorage)(nil)
 
 // newMemStorage returns an in-RAM storage backend bounded by capacity bytes,
 // shared across every torrent opened on it.
-func newMemStorage(capacity int64) storage.ClientImplCloser {
+func newMemStorage(capacity int64) *memStorage {
 	s := &memStorage{
-		capacity: capacity,
-		lru:      list.New(),
+		capacity:       capacity,
+		lru:            list.New(),
+		refetchBackoff: 100 * time.Millisecond,
 	}
 	// One shared Capacity function for all torrents => one global budget. The
 	// pointer identity is what anacrolix uses to share the request-order/budget
@@ -106,11 +118,12 @@ func newMemStorage(capacity int64) storage.ClientImplCloser {
 func (s *memStorage) OpenTorrent(
 	_ context.Context,
 	info *metainfo.Info,
-	_ metainfo.Hash,
+	ih metainfo.Hash,
 ) (storage.TorrentImpl, error) {
 	mt := &memTorrent{
-		store:  s,
-		pieces: make([]*memPiece, info.NumPieces()),
+		store:    s,
+		infoHash: ih,
+		pieces:   make([]*memPiece, info.NumPieces()),
 	}
 	return storage.TorrentImpl{
 		Piece:    mt.piece,
@@ -176,8 +189,9 @@ func (s *memStorage) evictLocked(need int64, keep *memPiece) {
 // piece index and lazily populated; the slice never grows, so the stored
 // pointers are stable. All access is guarded by store.mu.
 type memTorrent struct {
-	store  *memStorage
-	pieces []*memPiece
+	store    *memStorage
+	infoHash metainfo.Hash
+	pieces   []*memPiece
 }
 
 // piece returns the (lazily created) memPiece for p.
@@ -188,7 +202,7 @@ func (mt *memTorrent) piece(p metainfo.Piece) storage.PieceImpl {
 	defer s.mu.Unlock()
 	mp := mt.pieces[idx]
 	if mp == nil {
-		mp = &memPiece{store: s, length: p.Length()}
+		mp = &memPiece{store: s, mt: mt, index: idx, length: p.Length()}
 		mt.pieces[idx] = mp
 	}
 	return mp
@@ -211,7 +225,9 @@ func (mt *memTorrent) close() error {
 // memPiece holds one piece's bytes in RAM. All fields are guarded by store.mu.
 type memPiece struct {
 	store  *memStorage
-	length int64 // full length of this piece (bytes)
+	mt     *memTorrent // owning torrent (for infohash on evicted-read refetch)
+	index  int         // piece index (for evicted-read refetch)
+	length int64       // full length of this piece (bytes)
 
 	data     []byte        // nil when not resident (never written or evicted)
 	complete bool          // hash-verified by anacrolix and still resident
@@ -252,18 +268,35 @@ func (mp *memPiece) WriteAt(b []byte, off int64) (int, error) {
 func (mp *memPiece) ReadAt(b []byte, off int64) (int, error) {
 	s := mp.store
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if mp.data == nil {
+		// The verified bytes were evicted to stay within budget, but anacrolix
+		// still has this piece's chunks marked present, so reader.readAt would
+		// spin-retry this read forever (stack overflow) instead of blocking for a
+		// re-download. Ask the engine to force a re-hash of the piece: it fails
+		// (no bytes), which clears the piece's dirty chunks and re-requests it, so
+		// the reader blocks for the re-download. The short backoff bounds
+		// anacrolix's retry recursion until that re-pend lands.
+		refetch, backoff, ih, idx := s.refetch, s.refetchBackoff, mp.mt.infoHash, mp.index
+		s.mu.Unlock()
+		if refetch != nil {
+			refetch(ih, idx)
+			if backoff > 0 {
+				time.Sleep(backoff)
+			}
+		}
 		return 0, errPieceEvicted
 	}
 	if off < 0 {
+		s.mu.Unlock()
 		return 0, errors.New("engine: memstorage: negative offset")
 	}
 	if off >= mp.length {
+		s.mu.Unlock()
 		return 0, io.EOF
 	}
 	n := copy(b, mp.data[off:mp.length])
 	s.touch(mp)
+	s.mu.Unlock()
 	if int64(n) < int64(len(b)) {
 		// Filled to the end of the piece without satisfying the whole request.
 		return n, io.EOF

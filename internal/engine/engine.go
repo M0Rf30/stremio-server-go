@@ -145,11 +145,48 @@ type manager struct {
 	done      chan struct{}      // closed by Close() to stop background goroutines
 	closeOnce sync.Once          // ensures done is closed exactly once (idempotent Close)
 	limitOnce sync.Once          // ensures SetLimitFn goroutine is started at most once
+
+	// refetching dedupes in-flight VerifyData re-downloads of evicted in-RAM
+	// pieces, keyed by refetchKey. Only exercised when the in-RAM cache is on.
+	refetching sync.Map
 }
 
 // Compile-time interface satisfaction checks.
 var _ types.EngineManager = (*manager)(nil)
 var _ types.Engine = (*engine)(nil)
+
+// refetchKey identifies an in-flight re-download of one evicted in-RAM piece.
+type refetchKey struct {
+	infoHash string
+	piece    int
+}
+
+// refetchPiece forces anacrolix to re-download a piece whose in-RAM bytes were
+// evicted. memStorage.ReadAt calls it when an evicted piece is read: VerifyData
+// re-hashes the (now empty) piece, the hash fails, anacrolix clears the piece's
+// dirty-chunk bitmap and re-requests it, and the reader blocks for the
+// re-download instead of spinning reader.readAt into a stack overflow. Each
+// (infohash, piece) verify runs at most once concurrently.
+func (m *manager) refetchPiece(ih metainfo.Hash, piece int) {
+	key := ih.HexString()
+	m.mu.RLock()
+	e := m.engines[key]
+	m.mu.RUnlock()
+	if e == nil || e.t == nil {
+		return
+	}
+	if piece < 0 || piece >= e.t.NumPieces() {
+		return
+	}
+	rk := refetchKey{infoHash: key, piece: piece}
+	if _, inflight := m.refetching.LoadOrStore(rk, struct{}{}); inflight {
+		return
+	}
+	go func() {
+		defer m.refetching.Delete(rk)
+		_ = e.t.Piece(piece).VerifyData()
+	}()
+}
 
 // New creates a dual-stack anacrolix torrent Client and returns an EngineManager.
 // ListenPort 0 lets the OS assign a port. CacheRoot is where piece data is stored.
@@ -199,10 +236,12 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	// the default storage it creates itself, never a provided one, so the manager
 	// closes it (see Close).
 	var memStorageCloser io.Closer
+	var memStore *memStorage
 	if cfg.MemoryCacheSize > 0 {
 		ms := newMemStorage(cfg.MemoryCacheSize)
 		cc.DefaultStorage = ms
 		memStorageCloser = ms
+		memStore = ms
 		logging.For("engine").Info("in-RAM piece cache enabled; piece data not written to disk", "bytes", cfg.MemoryCacheSize)
 	} else {
 		cc.DefaultStorage = storage.NewFileByInfoHash(cfg.CacheRoot)
@@ -245,7 +284,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		initTrackers(cfg.CacheRoot, cfg.TrackersMax, cfg.TrackersURL, cfg.BTProxy, done)
 	}
 
-	return &manager{
+	m := &manager{
 		client:      client,
 		cfg:         cfg,
 		downLimiter: downLimiter,
@@ -253,7 +292,14 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		engines:     make(map[string]*engine),
 		done:        done,
 		memStorage:  memStorageCloser,
-	}, nil
+	}
+	// Wire the evicted-piece re-download hook now that the manager (and its
+	// engine map) exists. No torrents are added until EnsureEngine, so this is
+	// set before any read can occur.
+	if memStore != nil {
+		memStore.refetch = m.refetchPiece
+	}
+	return m, nil
 }
 
 // --------------------------------------------------------------------------

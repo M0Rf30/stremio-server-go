@@ -186,7 +186,7 @@ func TestMemStorageEvictsOldestCompleteKeepsRecentlyRead(t *testing.T) {
 	}
 
 	// Hard budget respected: exactly two pieces (p0, p2) resident.
-	ms := s.(*memStorage)
+	ms := s
 	ms.mu.Lock()
 	used := ms.used
 	ms.mu.Unlock()
@@ -254,7 +254,7 @@ func TestMemStorageConcurrentNeverWrongBytes(t *testing.T) {
 	wg.Wait()
 
 	// Once quiescent, every piece is complete and the budget is enforced.
-	ms := s.(*memStorage)
+	ms := s
 	ms.mu.Lock()
 	used := ms.used
 	ms.mu.Unlock()
@@ -479,7 +479,7 @@ func TestMemStorageTorrentCloseFreesMemory(t *testing.T) {
 		}
 	}
 
-	ms := s.(*memStorage)
+	ms := s
 	ms.mu.Lock()
 	before := ms.used
 	ms.mu.Unlock()
@@ -540,7 +540,7 @@ func TestMemStorageEvictLockedNoVictim(t *testing.T) {
 	}
 
 	// Both pieces are resident: used must equal 2×pieceLen, exceeding capacity.
-	ms := s.(*memStorage)
+	ms := s
 	ms.mu.Lock()
 	used := ms.used
 	ms.mu.Unlock()
@@ -557,5 +557,81 @@ func TestMemStorageEvictLockedNoVictim(t *testing.T) {
 		if !bytes.Equal(got, fillPattern(idx, pieceLen)) {
 			t.Errorf("piece %d: wrong bytes after no-victim eviction", idx)
 		}
+	}
+}
+
+// refetchCall records one invocation of the memStorage refetch hook.
+type refetchCall struct {
+	ih    metainfo.Hash
+	piece int
+}
+
+// TestMemStorageEvictedReadTriggersRefetch verifies the stack-overflow guard:
+// reading a piece whose bytes were evicted invokes the refetch hook with the
+// torrent's infohash and the piece index (so the engine can force a real
+// re-download), and still returns errPieceEvicted so anacrolix re-fetches rather
+// than serving stale bytes.
+func TestMemStorageEvictedReadTriggersRefetch(t *testing.T) {
+	const (
+		pieceLen  = 256
+		numPieces = 3
+	)
+	info := syntheticInfo(pieceLen, numPieces)
+	s := newMemStorage(pieceLen) // budget = exactly one piece → forces eviction
+	s.refetchBackoff = 0         // no artificial delay in tests
+	t.Cleanup(func() { _ = s.Close() })
+
+	var (
+		mu    sync.Mutex
+		calls []refetchCall
+	)
+	s.refetch = func(ih metainfo.Hash, piece int) {
+		mu.Lock()
+		calls = append(calls, refetchCall{ih: ih, piece: piece})
+		mu.Unlock()
+	}
+
+	ih := metainfo.NewHashFromHex("0123456789abcdef0123456789abcdef01234567")
+	ti, err := s.OpenTorrent(context.Background(), info, ih)
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if ti.Close != nil {
+			_ = ti.Close()
+		}
+	})
+
+	// Complete piece 0, then complete piece 1; the one-piece budget evicts piece 0.
+	p0 := ti.Piece(info.Piece(0))
+	if _, err := p0.WriteAt(fillPattern(0, pieceLen), 0); err != nil {
+		t.Fatalf("WriteAt p0: %v", err)
+	}
+	if err := p0.MarkComplete(); err != nil {
+		t.Fatalf("MarkComplete p0: %v", err)
+	}
+	p1 := ti.Piece(info.Piece(1))
+	if _, err := p1.WriteAt(fillPattern(1, pieceLen), 0); err != nil {
+		t.Fatalf("WriteAt p1: %v", err)
+	}
+	if err := p1.MarkComplete(); err != nil {
+		t.Fatalf("MarkComplete p1: %v", err)
+	}
+
+	// Piece 0's bytes are gone: it now reads as not-complete and ReadAt errors.
+	if c := p0.Completion(); !c.Ok || c.Complete {
+		t.Fatalf("evicted p0 Completion = %+v, want {Ok:true, Complete:false}", c)
+	}
+	if _, err := p0.ReadAt(make([]byte, pieceLen), 0); !errors.Is(err, errPieceEvicted) {
+		t.Fatalf("ReadAt(evicted) err = %v, want errPieceEvicted", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("refetch invoked %d times, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].ih != ih || calls[0].piece != 0 {
+		t.Fatalf("refetch(%x, %d), want (%x, 0)", calls[0].ih, calls[0].piece, ih)
 	}
 }
