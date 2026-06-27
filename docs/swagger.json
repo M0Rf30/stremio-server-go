@@ -517,7 +517,7 @@
                         "in": "query"
                     },
                     {
-                        "description": "{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}",
+                        "description": "{servers:[\\",
                         "name": "body",
                         "in": "body",
                         "schema": {
@@ -570,7 +570,7 @@
                         "in": "query"
                     },
                     {
-                        "description": "{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}",
+                        "description": "{servers:[\\",
                         "name": "body",
                         "in": "body",
                         "schema": {

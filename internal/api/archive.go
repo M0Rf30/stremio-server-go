@@ -114,6 +114,7 @@ func archiveEvict() {
 type archivePayload struct {
 	URL             string          `json:"url"`
 	From            string          `json:"from"`
+	URLs            json.RawMessage `json:"urls"`
 	FileIdx         json.RawMessage `json:"fileIdx"`
 	FileMustInclude json.RawMessage `json:"fileMustInclude"`
 }
@@ -160,6 +161,49 @@ func archiveParsePayload(r *http.Request) (*archivePayload, error) {
 		return nil, fmt.Errorf("parse payload JSON: %w", err)
 	}
 	return &obj, nil
+}
+
+// source returns the archive source URL/path. It accepts the legacy `url`/`from`
+// string fields and the canonical `urls` array used by stremio-core, whose
+// entries are `[url, bytes?]` tuples (it also tolerates `["url"]` strings or
+// `{"url":…}` objects). The first entry is used.
+func (p *archivePayload) source() string {
+	if p.URL != "" {
+		return p.URL
+	}
+	if p.From != "" {
+		return p.From
+	}
+	if len(p.URLs) == 0 {
+		return ""
+	}
+	var entries []json.RawMessage
+	if json.Unmarshal(p.URLs, &entries) != nil || len(entries) == 0 {
+		return ""
+	}
+	return archiveURLFromEntry(entries[0])
+}
+
+// archiveURLFromEntry extracts a URL string from one `urls` entry, which may be
+// a bare string, a `[url, bytes?]` tuple, or a `{"url":…}` object.
+func archiveURLFromEntry(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var tuple []json.RawMessage
+	if json.Unmarshal(raw, &tuple) == nil && len(tuple) > 0 {
+		if json.Unmarshal(tuple[0], &s) == nil {
+			return s
+		}
+	}
+	var obj struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		return obj.URL
+	}
+	return ""
 }
 
 // ── entry selection ──────────────────────────────────────────────────────────
@@ -432,10 +476,7 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 	}
 
 	// Resolve source URL or local path.
-	source := payload.URL
-	if source == "" {
-		source = payload.From
-	}
+	source := payload.source()
 	if source == "" {
 		http.Error(w, "payload missing url or from field", http.StatusBadRequest)
 		return

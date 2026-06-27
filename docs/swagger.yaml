@@ -744,7 +744,7 @@ paths:
         in: query
         name: lz
         type: string
-      - description: '{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}'
+      - description: '{servers:[\'
         in: body
         name: body
         schema:
@@ -778,7 +778,7 @@ paths:
         in: query
         name: lz
         type: string
-      - description: '{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}'
+      - description: '{servers:[\'
         in: body
         name: body
         schema:

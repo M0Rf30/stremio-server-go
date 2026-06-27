@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -109,8 +111,9 @@ type nzbServerCfg struct {
 }
 
 type nzbCreateReq struct {
-	Servers []nzbServerCfg `json:"servers"`
-	NZBUrl  string         `json:"nzbUrl"`
+	Servers json.RawMessage `json:"servers"`
+	NZBUrl  string          `json:"nzbUrl"`
+	NZBUrls []string        `json:"nzbUrls"`
 }
 
 // ---- handler ---------------------------------------------------------------
@@ -152,7 +155,7 @@ func (s *server) handleNZB(w http.ResponseWriter, r *http.Request, seg []string)
 // @Produce  json
 // @Param    key   path   string  false  "caller-supplied session key"
 // @Param    lz    query  string  false  "lz-string encoded JSON body"
-// @Param    body  body   object  false  "{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}"
+// @Param    body  body   object  false  "{servers:[\"nntps://host\"], nzbUrl} (servers also accept {host,port,...} objects)"
 // @Success  200  {object}  map[string]string  "session key"
 // @Failure  400
 // @Failure  501
@@ -184,17 +187,27 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 		}
 	}
 
-	if len(req.Servers) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "servers list required"})
-		return
+	nzbURL := req.NZBUrl
+	if nzbURL == "" && len(req.NZBUrls) > 0 {
+		nzbURL = req.NZBUrls[0]
 	}
-	if req.NZBUrl == "" {
+	if nzbURL == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "nzbUrl required"})
 		return
 	}
 
+	servers, err := parseNzbServers(req.Servers)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(servers) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "servers list required"})
+		return
+	}
+
 	// Fetch the NZB file from the provided URL.
-	nzbData, err := httpGet(req.NZBUrl)
+	nzbData, err := httpGet(nzbURL)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
@@ -208,7 +221,7 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 	}
 
 	// Build server config from the first server entry.
-	srv := req.Servers[0]
+	srv := servers[0]
 	cfg := nzb.ServerConfig{
 		Host:        srv.Host,
 		Port:        srv.Port,
@@ -262,6 +275,61 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 	nzbSessionsMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{"key": key})
+}
+
+// parseNzbServers accepts either the canonical stremio-core form — a JSON array
+// of NNTP URL strings (nntp://user:pass@host:port, nntps:// for TLS) — or the
+// legacy array of {host,port,user,pass,ssl,connections} objects.
+func parseNzbServers(raw json.RawMessage) ([]nzbServerCfg, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("servers list required")
+	}
+	// Canonical form: array of NNTP URL strings.
+	var urls []string
+	if json.Unmarshal(raw, &urls) == nil && len(urls) > 0 {
+		out := make([]nzbServerCfg, 0, len(urls))
+		for _, u := range urls {
+			cfg, err := nzbServerFromURL(u)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, cfg)
+		}
+		return out, nil
+	}
+	// Legacy form: array of server objects.
+	var objs []nzbServerCfg
+	if err := json.Unmarshal(raw, &objs); err != nil {
+		return nil, fmt.Errorf("invalid servers: %w", err)
+	}
+	return objs, nil
+}
+
+// nzbServerFromURL parses an NNTP server URL into an nzbServerCfg. The scheme
+// selects TLS (nntps/snews → SSL), userinfo carries credentials, and a missing
+// port defaults later to 119 (plain) or 563 (TLS).
+func nzbServerFromURL(raw string) (nzbServerCfg, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nzbServerCfg{}, fmt.Errorf("invalid nntp server url %q: %w", raw, err)
+	}
+	cfg := nzbServerCfg{
+		Host: u.Hostname(),
+		SSL:  u.Scheme == "nntps" || u.Scheme == "snews",
+	}
+	if cfg.Host == "" {
+		return nzbServerCfg{}, fmt.Errorf("nntp server url %q has no host", raw)
+	}
+	if p := u.Port(); p != "" {
+		cfg.Port, _ = strconv.Atoi(p)
+	}
+	if u.User != nil {
+		cfg.User = u.User.Username()
+		if pass, ok := u.User.Password(); ok {
+			cfg.Pass = pass
+		}
+	}
+	return cfg, nil
 }
 
 // nzbStream handles GET /nzb/stream?key={key} and /nzb/stream/{key}/{file...}.
