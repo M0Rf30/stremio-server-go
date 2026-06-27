@@ -103,6 +103,177 @@ paths:
       summary: Redirect to the Stremio web UI
       tags:
       - System
+  /{archiveType}/create:
+    get:
+      consumes:
+      - application/json
+      parameters:
+      - description: 'archive format: zip, rar, 7zip, tar, or tgz'
+        in: path
+        name: archiveType
+        required: true
+        type: string
+      - description: lz-string encoded JSON payload (url/fileIdx/fileMustInclude)
+        in: query
+        name: lz
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: session key
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "307":
+          description: redirect to the stream URL (GET)
+        "400":
+          description: Bad Request
+        "404":
+          description: Not Found
+      summary: Create an archive streaming session (zip/rar/7zip/tar/tgz)
+      tags:
+      - Archive
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: 'archive format: zip, rar, 7zip, tar, or tgz'
+        in: path
+        name: archiveType
+        required: true
+        type: string
+      - description: lz-string encoded JSON payload (url/fileIdx/fileMustInclude)
+        in: query
+        name: lz
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: session key
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "307":
+          description: redirect to the stream URL (GET)
+        "400":
+          description: Bad Request
+        "404":
+          description: Not Found
+      summary: Create an archive streaming session (zip/rar/7zip/tar/tgz)
+      tags:
+      - Archive
+  /{archiveType}/create/{key}:
+    get:
+      consumes:
+      - application/json
+      parameters:
+      - description: 'archive format: zip, rar, 7zip, tar, or tgz'
+        in: path
+        name: archiveType
+        required: true
+        type: string
+      - description: caller-supplied session key
+        in: path
+        name: key
+        type: string
+      - description: lz-string encoded JSON payload (url/fileIdx/fileMustInclude)
+        in: query
+        name: lz
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: session key
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "307":
+          description: redirect to the stream URL (GET)
+        "400":
+          description: Bad Request
+        "404":
+          description: Not Found
+      summary: Create an archive streaming session (zip/rar/7zip/tar/tgz)
+      tags:
+      - Archive
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: 'archive format: zip, rar, 7zip, tar, or tgz'
+        in: path
+        name: archiveType
+        required: true
+        type: string
+      - description: caller-supplied session key
+        in: path
+        name: key
+        type: string
+      - description: lz-string encoded JSON payload (url/fileIdx/fileMustInclude)
+        in: query
+        name: lz
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: session key
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "307":
+          description: redirect to the stream URL (GET)
+        "400":
+          description: Bad Request
+        "404":
+          description: Not Found
+      summary: Create an archive streaming session (zip/rar/7zip/tar/tgz)
+      tags:
+      - Archive
+  /{archiveType}/stream/{key}/{file}:
+    get:
+      parameters:
+      - description: 'archive format: zip, rar, 7zip, tar, or tgz'
+        in: path
+        name: archiveType
+        required: true
+        type: string
+      - description: session key
+        in: path
+        name: key
+        required: true
+        type: string
+      - description: file path within the archive
+        in: path
+        name: file
+        type: string
+      - description: byte range (RFC 7233)
+        in: header
+        name: Range
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: OK
+        "206":
+          description: partial content
+          schema:
+            type: string
+        "307":
+          description: redirect to the canonical file URL
+        "404":
+          description: Not Found
+      summary: Stream a file from an archive session
+      tags:
+      - Archive
   /{infoHash}/{fileIdx}:
     get:
       parameters:
@@ -260,6 +431,32 @@ paths:
       summary: Get stats for a specific torrent engine file
       tags:
       - Stats
+  /bitmagnet/manifest.json:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Bitmagnet self-hosted DHT Stremio add-on (manifest/stream)
+      tags:
+      - BitmagnetAddon
+  /bitmagnet/stream/{type}/{id}.json:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Bitmagnet self-hosted DHT Stremio add-on (manifest/stream)
+      tags:
+      - BitmagnetAddon
   /casting:
     get:
       produces:
@@ -271,7 +468,7 @@ paths:
             items:
               type: object
             type: array
-      summary: Discover DLNA renderers via SSDP
+      summary: Discover DLNA renderers
       tags:
       - Casting
   /casting/{id}/player:
@@ -359,6 +556,41 @@ paths:
       summary: Report available hardware acceleration devices
       tags:
       - System
+  /ftp/{filename}:
+    get:
+      parameters:
+      - description: media filename for MIME-type detection
+        in: path
+        name: filename
+        required: true
+        type: string
+      - description: lz-string encoded {\
+        in: query
+        name: lz
+        required: true
+        type: string
+      - description: byte range (RFC 7233)
+        in: header
+        name: Range
+        type: string
+      responses:
+        "200":
+          description: full streaming content
+          schema:
+            type: string
+        "206":
+          description: partial content
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+        "501":
+          description: Not Implemented
+        "502":
+          description: Bad Gateway
+      summary: Stream a remote FTP, FTPS, or HTTP(S) file
+      tags:
+      - Streaming
   /get-https:
     get:
       parameters:
@@ -478,6 +710,18 @@ paths:
       summary: Local-files Stremio add-on (manifest/catalog/meta/stream)
       tags:
       - LocalAddon
+  /metrics:
+    get:
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: Prometheus text exposition
+          schema:
+            type: string
+      summary: Prometheus-format runtime and app gauges
+      tags:
+      - System
   /network-info:
     get:
       produces:
@@ -491,6 +735,124 @@ paths:
       summary: List available network interfaces
       tags:
       - System
+  /nzb/create:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: lz-string encoded JSON body
+        in: query
+        name: lz
+        type: string
+      - description: '{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}'
+        in: body
+        name: body
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: session key
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+        "501":
+          description: Not Implemented
+      summary: Create an NZB/Usenet streaming session
+      tags:
+      - NZB
+  /nzb/create/{key}:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: caller-supplied session key
+        in: path
+        name: key
+        type: string
+      - description: lz-string encoded JSON body
+        in: query
+        name: lz
+        type: string
+      - description: '{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}'
+        in: body
+        name: body
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: session key
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+        "501":
+          description: Not Implemented
+      summary: Create an NZB/Usenet streaming session
+      tags:
+      - NZB
+  /nzb/stream:
+    get:
+      parameters:
+      - description: session key (query form)
+        in: query
+        name: key
+        type: string
+      - description: byte range (RFC 7233)
+        in: header
+        name: Range
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: OK
+        "206":
+          description: partial content
+          schema:
+            type: string
+        "404":
+          description: Not Found
+      summary: Stream an assembled file from an NZB session
+      tags:
+      - NZB
+  /nzb/stream/{key}/{file}:
+    get:
+      parameters:
+      - description: session key (query form)
+        in: query
+        name: key
+        type: string
+      - description: file name within the NZB
+        in: path
+        name: file
+        type: string
+      - description: byte range (RFC 7233)
+        in: header
+        name: Range
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: OK
+        "206":
+          description: partial content
+          schema:
+            type: string
+        "404":
+          description: Not Found
+      summary: Stream an assembled file from an NZB session
+      tags:
+      - NZB
   /opensubHash:
     get:
       parameters:
@@ -645,6 +1007,32 @@ paths:
       summary: List subtitle tracks for a subtitle URL
       tags:
       - Media
+  /torznab/manifest.json:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Torznab indexer Stremio add-on (manifest/stream)
+      tags:
+      - TorznabAddon
+  /torznab/stream/{type}/{id}.json:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Torznab indexer Stremio add-on (manifest/stream)
+      tags:
+      - TorznabAddon
   /tracks/{url}:
     get:
       parameters:

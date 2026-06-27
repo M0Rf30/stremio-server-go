@@ -21,6 +21,9 @@ Not affiliated with or endorsed by Stremio.
 - **Reverse proxy** (`/proxy`), **DLNA casting** (`/casting`, SSDP discovery +
   UPnP AVTransport control), **local-files addon** (`/local-addon`, IMDB-resolved),
   **YouTube** (`/yt`, via `yt-dlp`), and **`/get-https`** (Stremio cert provisioning).
+- **Archive streaming** - direct playback of media inside ZIP / RAR / 7z / TAR /
+  TGZ containers (`/zip`, `/rar`, `/7zip`, `/tar`, `/tgz`), plus **Usenet/NZB**
+  (`/nzb`, NNTP + yEnc) and **FTP/FTPS** (`/ftp`) streaming - all pure-Go.
 - **Disk-bounded cache** - LRU eviction honouring the `cacheSize` setting.
 - Self-signed HTTPS on `:12470` for HTTPS web UIs (e.g. WebKitGTK shells).
 - **Metrics** - `GET /metrics` exposes Prometheus-format gauges (goroutines, heap, active torrents, HLS sessions, proxy cache).
@@ -116,9 +119,12 @@ URLs) is documented in [docs/PROXY.md](docs/PROXY.md).
 | `cmd/stremio-server` | entrypoint, wiring, TLS, version |
 | `internal/types` | shared contract (structs + interfaces) |
 | `internal/engine` | anacrolix client, readers, stats, trackers, cache eviction |
-| `internal/api` | enginefs routes, streaming, proxy, casting, local-addon, youtube |
+| `internal/api` | enginefs routes, streaming, proxy, casting, local-addon, youtube, archive/nzb/ftp |
 | `internal/settings` | settings store (`server-settings.json`) |
 | `internal/media` | ffprobe, HLS transcode, subtitles, opensub hash |
+| `internal/archive` | uniform reader over zip / rar / 7zip / tar / tgz entries |
+| `internal/nzb` | NZB parser, yEnc decoder, NNTP client, segment assembler |
+| `internal/ftpstream` | FTP/FTPS + HTTP(S) byte-range stream opener |
 | `docs/swagger.yaml` | OpenAPI/Swagger spec, generated from code (`make swagger`) |
 | `scripts/smoke.sh` | end-to-end API smoke test |
 

@@ -30,6 +30,46 @@
                 }
             }
         },
+        "/bitmagnet/manifest.json": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "BitmagnetAddon"
+                ],
+                "summary": "Bitmagnet self-hosted DHT Stremio add-on (manifest/stream)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/bitmagnet/stream/{type}/{id}.json": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "BitmagnetAddon"
+                ],
+                "summary": "Bitmagnet self-hosted DHT Stremio add-on (manifest/stream)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/casting": {
             "get": {
                 "produces": [
@@ -38,7 +78,7 @@
                 "tags": [
                     "Casting"
                 ],
-                "summary": "Discover DLNA renderers via SSDP",
+                "summary": "Discover DLNA renderers",
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -178,6 +218,59 @@
                             "type": "object",
                             "additionalProperties": true
                         }
+                    }
+                }
+            }
+        },
+        "/ftp/{filename}": {
+            "get": {
+                "tags": [
+                    "Streaming"
+                ],
+                "summary": "Stream a remote FTP, FTPS, or HTTP(S) file",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "media filename for MIME-type detection",
+                        "name": "filename",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded {\\",
+                        "name": "lz",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "byte range (RFC 7233)",
+                        "name": "Range",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "full streaming content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "206": {
+                        "description": "partial content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "501": {
+                        "description": "Not Implemented"
+                    },
+                    "502": {
+                        "description": "Bad Gateway"
                     }
                 }
             }
@@ -365,6 +458,25 @@
                 }
             }
         },
+        "/metrics": {
+            "get": {
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "Prometheus-format runtime and app gauges",
+                "responses": {
+                    "200": {
+                        "description": "Prometheus text exposition",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/network-info": {
             "get": {
                 "produces": [
@@ -381,6 +493,190 @@
                             "type": "object",
                             "additionalProperties": true
                         }
+                    }
+                }
+            }
+        },
+        "/nzb/create": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "NZB"
+                ],
+                "summary": "Create an NZB/Usenet streaming session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded JSON body",
+                        "name": "lz",
+                        "in": "query"
+                    },
+                    {
+                        "description": "{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}",
+                        "name": "body",
+                        "in": "body",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "session key",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "501": {
+                        "description": "Not Implemented"
+                    }
+                }
+            }
+        },
+        "/nzb/create/{key}": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "NZB"
+                ],
+                "summary": "Create an NZB/Usenet streaming session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "caller-supplied session key",
+                        "name": "key",
+                        "in": "path"
+                    },
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded JSON body",
+                        "name": "lz",
+                        "in": "query"
+                    },
+                    {
+                        "description": "{servers:[{host,port,user,pass,ssl,connections}], nzbUrl}",
+                        "name": "body",
+                        "in": "body",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "session key",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "501": {
+                        "description": "Not Implemented"
+                    }
+                }
+            }
+        },
+        "/nzb/stream": {
+            "get": {
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "NZB"
+                ],
+                "summary": "Stream an assembled file from an NZB session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "session key (query form)",
+                        "name": "key",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "byte range (RFC 7233)",
+                        "name": "Range",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "206": {
+                        "description": "partial content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            }
+        },
+        "/nzb/stream/{key}/{file}": {
+            "get": {
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "NZB"
+                ],
+                "summary": "Stream an assembled file from an NZB session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "session key (query form)",
+                        "name": "key",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "file name within the NZB",
+                        "name": "file",
+                        "in": "path"
+                    },
+                    {
+                        "type": "string",
+                        "description": "byte range (RFC 7233)",
+                        "name": "Range",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "206": {
+                        "description": "partial content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found"
                     }
                 }
             }
@@ -621,6 +917,46 @@
                 }
             }
         },
+        "/torznab/manifest.json": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "TorznabAddon"
+                ],
+                "summary": "Torznab indexer Stremio add-on (manifest/stream)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/torznab/stream/{type}/{id}.json": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "TorznabAddon"
+                ],
+                "summary": "Torznab indexer Stremio add-on (manifest/stream)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/tracks/{url}": {
             "get": {
                 "produces": [
@@ -686,6 +1022,266 @@
                     },
                     "501": {
                         "description": "Not Implemented"
+                    }
+                }
+            }
+        },
+        "/{archiveType}/create": {
+            "get": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Archive"
+                ],
+                "summary": "Create an archive streaming session (zip/rar/7zip/tar/tgz)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "archive format: zip, rar, 7zip, tar, or tgz",
+                        "name": "archiveType",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded JSON payload (url/fileIdx/fileMustInclude)",
+                        "name": "lz",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "session key",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "307": {
+                        "description": "redirect to the stream URL (GET)"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Archive"
+                ],
+                "summary": "Create an archive streaming session (zip/rar/7zip/tar/tgz)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "archive format: zip, rar, 7zip, tar, or tgz",
+                        "name": "archiveType",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded JSON payload (url/fileIdx/fileMustInclude)",
+                        "name": "lz",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "session key",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "307": {
+                        "description": "redirect to the stream URL (GET)"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            }
+        },
+        "/{archiveType}/create/{key}": {
+            "get": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Archive"
+                ],
+                "summary": "Create an archive streaming session (zip/rar/7zip/tar/tgz)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "archive format: zip, rar, 7zip, tar, or tgz",
+                        "name": "archiveType",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "caller-supplied session key",
+                        "name": "key",
+                        "in": "path"
+                    },
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded JSON payload (url/fileIdx/fileMustInclude)",
+                        "name": "lz",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "session key",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "307": {
+                        "description": "redirect to the stream URL (GET)"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Archive"
+                ],
+                "summary": "Create an archive streaming session (zip/rar/7zip/tar/tgz)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "archive format: zip, rar, 7zip, tar, or tgz",
+                        "name": "archiveType",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "caller-supplied session key",
+                        "name": "key",
+                        "in": "path"
+                    },
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded JSON payload (url/fileIdx/fileMustInclude)",
+                        "name": "lz",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "session key",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "307": {
+                        "description": "redirect to the stream URL (GET)"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            }
+        },
+        "/{archiveType}/stream/{key}/{file}": {
+            "get": {
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "Archive"
+                ],
+                "summary": "Stream a file from an archive session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "archive format: zip, rar, 7zip, tar, or tgz",
+                        "name": "archiveType",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "session key",
+                        "name": "key",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "file path within the archive",
+                        "name": "file",
+                        "in": "path"
+                    },
+                    {
+                        "type": "string",
+                        "description": "byte range (RFC 7233)",
+                        "name": "Range",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "206": {
+                        "description": "partial content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "307": {
+                        "description": "redirect to the canonical file URL"
+                    },
+                    "404": {
+                        "description": "Not Found"
                     }
                 }
             }
