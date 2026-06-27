@@ -75,7 +75,7 @@ type engine struct {
 	annoMu     sync.Mutex
 	annoExpiry time.Time
 	cachedURLs []string
-	cachedOpts map[string]any // full Opts map; rebuilt when cachedURLs are refreshed
+	cachedOpts types.Options // full Opts; rebuilt when cachedURLs are refreshed
 }
 
 // ensureDownloading marks file idx for full background download and demotes any
@@ -1005,21 +1005,12 @@ func (e *engine) Stats(idx int) *types.Stats {
 		peerSrcs = append(peerSrcs, "dht:"+e.infoHash)
 		peerSrcs = append(peerSrcs, urls...)
 		e.cachedURLs = urls
-		e.cachedOpts = map[string]any{
-			"connections":      nil,
-			"dht":              true,
-			"growler":          map[string]any{"flood": 0, "pulse": nil},
-			"handshakeTimeout": nil,
-			"path":             e.path,
-			"peerSearch": map[string]any{
-				"min":     40,
-				"max":     200,
-				"sources": peerSrcs,
-			},
-			"swarmCap": map[string]any{"maxSpeed": nil, "minPeers": nil},
-			"timeout":  nil,
-			"tracker":  true,
-			"virtual":  false,
+		e.cachedOpts = types.Options{
+			DHT:        true,
+			Growler:    types.Growler{Flood: 0},
+			Path:       e.path,
+			PeerSearch: types.PeerSearch{Min: 40, Max: 200, Sources: peerSrcs},
+			Tracker:    true,
 		}
 		e.annoExpiry = now.Add(annoTTL)
 	}

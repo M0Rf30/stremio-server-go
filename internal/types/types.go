@@ -83,6 +83,42 @@ type Source struct {
 	NumRequests  int    `json:"numRequests"`
 }
 
+// Options mirrors stats.opts (the torrent engine options object) consumed by
+// stremio-core's strict Statistics.opts deserializer. Optional numeric fields
+// are pointers so they marshal as JSON null. A typed struct (vs map[string]any)
+// avoids reflect map-encoding + key sorting on every stats poll.
+type Options struct {
+	Connections      *int       `json:"connections"`
+	DHT              bool       `json:"dht"`
+	Growler          Growler    `json:"growler"`
+	HandshakeTimeout *int       `json:"handshakeTimeout"`
+	Path             string     `json:"path"`
+	PeerSearch       PeerSearch `json:"peerSearch"`
+	SwarmCap         SwarmCap   `json:"swarmCap"`
+	Timeout          *int       `json:"timeout"`
+	Tracker          bool       `json:"tracker"`
+	Virtual          bool       `json:"virtual"`
+}
+
+// Growler is stats.opts.growler.
+type Growler struct {
+	Flood int  `json:"flood"`
+	Pulse *int `json:"pulse"`
+}
+
+// PeerSearch is stats.opts.peerSearch.
+type PeerSearch struct {
+	Min     int      `json:"min"`
+	Max     int      `json:"max"`
+	Sources []string `json:"sources"`
+}
+
+// SwarmCap is stats.opts.swarmCap.
+type SwarmCap struct {
+	MaxSpeed *float64 `json:"maxSpeed"`
+	MinPeers *int     `json:"minPeers"`
+}
+
 // Stats mirrors getStatistics(engine[, idx]) from the original server.js.
 // Field names and JSON tags MUST match exactly. Per-file (idx>=0) fields are
 // pointers so they are omitted at torrent level.

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -170,13 +171,19 @@ func main() {
 		debug.SetMemoryLimit(lim)
 		logging.For("runtime").Info("soft memory limit set", "bytes", lim)
 	}
-	// Return idle RSS high-water (freed goroutine stacks + scavenged heap from
-	// connection churn) to the OS periodically; cheap on a long-running server.
+	// Periodically return reclaimable idle heap (e.g. freed after a large
+	// torrent or cache drained) to the OS. Guarded by a threshold so an idle or
+	// steady-state server skips the forced GC entirely instead of paying a
+	// stop-the-world collection on every tick.
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()
+		var ms runtime.MemStats
 		for range t.C {
-			debug.FreeOSMemory()
+			runtime.ReadMemStats(&ms)
+			if ms.HeapIdle-ms.HeapReleased > 64<<20 {
+				debug.FreeOSMemory()
+			}
 		}
 	}()
 

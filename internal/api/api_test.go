@@ -66,7 +66,7 @@ func (e *fakeEngine) Stats(idx int) *types.Stats {
 		DownloadSpeed:     1024,
 		UploadSpeed:       512,
 		Sources:           []types.Source{},
-		Opts:              map[string]any{"connections": float64(50), "dht": true},
+		Opts:              types.Options{DHT: true, Path: "/cache", PeerSearch: types.PeerSearch{Min: 40, Max: 200, Sources: []string{"dht:abc"}}, Tracker: true},
 		PeerSearchRunning: false,
 	}
 	if idx >= 0 {
