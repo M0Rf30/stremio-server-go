@@ -635,3 +635,60 @@ func TestMemStorageEvictedReadTriggersRefetch(t *testing.T) {
 		t.Fatalf("refetch(%x, %d), want (%x, 0)", calls[0].ih, calls[0].piece, ih)
 	}
 }
+
+// TestMemStoragePastEndReadTriggersRefetch covers the stack-overflow guard for a
+// RESIDENT, complete piece read at/after its end. anacrolix can spin-retry such
+// a zero-byte read forever under a capped storage; ReadAt must funnel it through
+// the same refetch+backoff guard (still returning io.EOF) so the retry is
+// bounded instead of recursing without limit.
+func TestMemStoragePastEndReadTriggersRefetch(t *testing.T) {
+	const pieceLen = 256
+	info := syntheticInfo(pieceLen, 2)
+	s := newMemStorage(pieceLen * 2)
+	s.refetchBackoff = 0
+	t.Cleanup(func() { _ = s.Close() })
+
+	var (
+		mu    sync.Mutex
+		calls []refetchCall
+	)
+	s.refetch = func(ih metainfo.Hash, piece int) {
+		mu.Lock()
+		calls = append(calls, refetchCall{ih: ih, piece: piece})
+		mu.Unlock()
+	}
+
+	ih := metainfo.NewHashFromHex("89abcdef0123456789abcdef0123456789abcdef")
+	ti, err := s.OpenTorrent(context.Background(), info, ih)
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if ti.Close != nil {
+			_ = ti.Close()
+		}
+	})
+
+	p := ti.Piece(info.Piece(1))
+	if _, err := p.WriteAt(fillPattern(1, pieceLen), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	if err := p.MarkComplete(); err != nil {
+		t.Fatalf("MarkComplete: %v", err)
+	}
+
+	// In-bounds read still succeeds without any refetch.
+	if n, err := p.ReadAt(make([]byte, 16), 0); n != 16 || err != nil {
+		t.Fatalf("in-bounds ReadAt = (%d, %v), want (16, nil)", n, err)
+	}
+	// Read at the piece end: zero bytes, io.EOF, and the guard fires.
+	if n, err := p.ReadAt(make([]byte, 16), pieceLen); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("past-end ReadAt = (%d, %v), want (0, io.EOF)", n, err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 || calls[0].ih != ih || calls[0].piece != 1 {
+		t.Fatalf("refetch calls = %+v, want one {%x, 1}", calls, ih)
+	}
+}

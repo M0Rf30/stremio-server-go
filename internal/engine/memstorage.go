@@ -268,40 +268,47 @@ func (mp *memPiece) WriteAt(b []byte, off int64) (int, error) {
 func (mp *memPiece) ReadAt(b []byte, off int64) (int, error) {
 	s := mp.store
 	s.mu.Lock()
-	if mp.data == nil {
-		// The verified bytes were evicted to stay within budget, but anacrolix
-		// still has this piece's chunks marked present, so reader.readAt would
-		// spin-retry this read forever (stack overflow) instead of blocking for a
-		// re-download. Ask the engine to force a re-hash of the piece: it fails
-		// (no bytes), which clears the piece's dirty chunks and re-requests it, so
-		// the reader blocks for the re-download. The short backoff bounds
-		// anacrolix's retry recursion until that re-pend lands.
-		refetch, backoff, ih, idx := s.refetch, s.refetchBackoff, mp.mt.infoHash, mp.index
+	// Fast path: resident bytes in range. This is the ONLY way ReadAt returns a
+	// non-zero count; every other outcome is a zero-byte "miss" handled below.
+	if mp.data != nil && off >= 0 && off < mp.length {
+		n := copy(b, mp.data[off:mp.length])
+		s.touch(mp)
 		s.mu.Unlock()
-		if refetch != nil {
-			refetch(ih, idx)
-			if backoff > 0 {
-				time.Sleep(backoff)
-			}
+		if int64(n) < int64(len(b)) {
+			// Filled to the end of the piece without satisfying the whole request.
+			return n, io.EOF
 		}
-		return 0, errPieceEvicted
+		return n, nil
 	}
-	if off < 0 {
-		s.mu.Unlock()
+	refetch, backoff, ih, idx := s.refetch, s.refetchBackoff, mp.mt.infoHash, mp.index
+	evicted := mp.data == nil
+	s.mu.Unlock()
+
+	// Any zero-byte read of a piece anacrolix may still consider present — its
+	// bytes were evicted to stay within budget, or the requested offset is at/
+	// past our piece end — would make anacrolix's reader.readAt spin-retry the
+	// read forever under a capped storage (BEP "hasStorageCap" recursion), i.e.
+	// a stack overflow, because the piece keeps reading as available. Force a
+	// real re-download (VerifyData re-hashes the piece; for evicted bytes the
+	// hash fails, which clears the piece's dirty chunks and re-requests it) and
+	// rate-limit the retry so the reader blocks for the refetch instead of
+	// recursing without bound. refetch is nil in the direct unit tests, which
+	// then observe the bare error returns below.
+	if refetch != nil {
+		refetch(ih, idx)
+		if backoff > 0 {
+			time.Sleep(backoff)
+		}
+	}
+	switch {
+	case off < 0:
 		return 0, errors.New("engine: memstorage: negative offset")
-	}
-	if off >= mp.length {
-		s.mu.Unlock()
+	case evicted:
+		return 0, errPieceEvicted
+	default:
+		// Resident, but the requested offset is at/after the piece end.
 		return 0, io.EOF
 	}
-	n := copy(b, mp.data[off:mp.length])
-	s.touch(mp)
-	s.mu.Unlock()
-	if int64(n) < int64(len(b)) {
-		// Filled to the end of the piece without satisfying the whole request.
-		return n, io.EOF
-	}
-	return n, nil
 }
 
 // MarkComplete records that anacrolix verified the piece hash. The piece becomes
