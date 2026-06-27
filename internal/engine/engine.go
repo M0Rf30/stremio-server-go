@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"log/slog"
 	"math"
 	"os"
@@ -21,12 +20,12 @@ import (
 	"sync"
 	"time"
 
-	anacrolixlog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/time/rate"
 
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
 
@@ -171,7 +170,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	// Silence anacrolix's benign context-canceled reader ERROR spam (player
 	// seeks/disconnects and our background warm/prefetch cancellations) while
 	// preserving genuine errors and the existing log format.
-	cc.Slogger = slog.New(newReadCancelFilter(anacrolixlog.Default.SlogHandler()))
+	cc.Slogger = slog.New(newReadCancelFilter(logging.For("torrent").Handler()))
 
 	// Connection budgets tuned for streaming: enough peers for full throughput
 	// without excessive MSE/RC4 handshakes and dial churn, which are the dominant
@@ -198,10 +197,10 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		ms := newMemStorage(cfg.MemoryCacheSize)
 		cc.DefaultStorage = ms
 		memStorageCloser = ms
-		log.Printf("engine: in-RAM piece cache enabled (%d bytes); piece data is NOT written to disk", cfg.MemoryCacheSize)
+		logging.For("engine").Info("in-RAM piece cache enabled; piece data not written to disk", "bytes", cfg.MemoryCacheSize)
 	} else {
 		cc.DefaultStorage = storage.NewFileByInfoHash(cfg.CacheRoot)
-		log.Printf("engine: disk piece cache at %s", cfg.CacheRoot)
+		logging.For("engine").Info("disk piece cache", "path", cfg.CacheRoot)
 	}
 
 	// Bandwidth rate limiters — start unlimited; SetLimitFn() adjusts them live.
@@ -385,7 +384,7 @@ func (m *manager) Close() error {
 	m.client.Close()
 	if m.memStorage != nil {
 		if err := m.memStorage.Close(); err != nil {
-			log.Printf("engine: closing in-RAM piece cache: %v", err)
+			logging.For("engine").Error("closing in-RAM piece cache", "err", err)
 		}
 	}
 	return nil
@@ -560,7 +559,7 @@ func (m *manager) evict(budget int64) {
 		// Remove cached data from disk outside the write lock.
 		_ = os.RemoveAll(ent.e.path)
 		total -= ent.size
-		log.Printf("engine: evicted %s (freed %d B; budget %d B)", ih, ent.size, budget)
+		logging.For("engine").Info("evicted torrent", "info_hash", ih, "freed_bytes", ent.size, "budget_bytes", budget)
 	}
 }
 
@@ -902,7 +901,7 @@ func (e *engine) prefetchNext(idx int) {
 	for i := tailStart; i < end; i++ {
 		e.t.Piece(i).SetPriority(torrent.PiecePriorityNormal)
 	}
-	log.Printf("engine: prefetched next-file boundary for %s (file idx %d)", e.infoHash, next)
+	logging.For("engine").Debug("prefetched next-file boundary", "info_hash", e.infoHash, "file_idx", next)
 }
 
 // nextVideoIdx returns the index of the first video file after idx, or -1.
@@ -1235,9 +1234,7 @@ func (e *engine) primeBoundary(idx int) {
 	for i := tailStart; i < end; i++ {
 		e.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
 	}
-	log.Printf("engine: boundary-prioritized %d+%d pieces for %s (file idx %d, pieces [%d,%d))",
-		min(boundaryPieces, end-begin), min(boundaryPieces, end-tailStart),
-		e.infoHash, idx, begin, end)
+	logging.For("engine").Debug("boundary-prioritized pieces", "info_hash", e.infoHash, "file_idx", idx, "begin", begin, "end", end, "head", min(boundaryPieces, end-begin), "tail", min(boundaryPieces, end-tailStart))
 }
 
 // min/max helpers for int and int64 (pre-Go 1.21 generics workaround; these

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,6 +19,8 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
+
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
 
 // Config holds the runtime configuration for the proxy handler.
@@ -669,7 +670,7 @@ func (h *Handler) clientFor(proxyURL string) *http.Client {
 	}
 	c, err := buildProxyClient(proxyURL)
 	if err != nil {
-		log.Printf("streamproxy: cannot build client for %q: %v; using default", proxyURL, err)
+		logging.For("streamproxy").Warn("cannot build proxy client; using default", "proxy_url", proxyURL, "err", err)
 		return base
 	}
 	h.proxyClients[proxyURL] = c

@@ -3,13 +3,13 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/M0Rf30/stremio-server-go/internal/api"
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
 
 // renewBefore triggers renewal when the live cert expires within this window.
@@ -90,7 +90,7 @@ func renewCertLoop(appPath string, holder *certHolder, stop <-chan struct{}) {
 		}
 		res, err := api.ProvisionCert(appPath, authKey, ip)
 		if err != nil {
-			log.Printf("https: auto-provision failed (%s): %v", reason, err)
+			logging.For("https").Error("auto-provision failed", "reason", reason, "err", err)
 			return
 		}
 		cert, err := tls.LoadX509KeyPair(
@@ -98,12 +98,11 @@ func renewCertLoop(appPath string, holder *certHolder, stop <-chan struct{}) {
 			filepath.Join(appPath, "https-key.pem"),
 		)
 		if err != nil {
-			log.Printf("https: reload after provision failed: %v", err)
+			logging.For("https").Error("reload after provision failed", "err", err)
 			return
 		}
 		holder.set(cert)
-		log.Printf("https: provisioned cert for %s (%s; valid until %s)",
-			res.Domain, reason, res.NotAfter.Format(time.RFC3339))
+		logging.For("https").Info("provisioned cert", "domain", res.Domain, "reason", reason, "valid_until", res.NotAfter.Format(time.RFC3339))
 	}
 
 	check() // attempt once at startup

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
 
 // segDur is the HLS segment length in seconds.
@@ -257,9 +258,9 @@ func newHLS() *hlsManager {
 	}
 	enc := selectEncoder()
 	if enc.isHW {
-		log.Printf("media: HLS transcode using hardware encoder %q (device %q)", enc.codec, enc.driDevice)
+		logging.For("media").Info("HLS transcode using hardware encoder", "encoder", enc.codec, "device", enc.driDevice)
 	} else {
-		log.Printf("media: HLS transcode using SOFTWARE encoder %q — no hardware acceleration active; expect high CPU. Set STREMIO_HWACCEL=vaapi (Intel/AMD on Linux) and ensure /dev/dri access, or pass --device /dev/dri in a container.", enc.codec)
+		logging.For("media").Warn("HLS transcode using software encoder; expect high CPU", "encoder", enc.codec, "hint", "set STREMIO_HWACCEL=vaapi and ensure /dev/dri access")
 	}
 	m := &hlsManager{
 		base:         base,

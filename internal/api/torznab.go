@@ -19,7 +19,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -27,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
 
 // ---- HTTP client -----------------------------------------------------------
@@ -252,7 +253,7 @@ func (s *server) torznabStream(w http.ResponseWriter, r *http.Request, contentTy
 	// Primary query: search by IMDB id.
 	items, err := tnQueryIMDB(r, s.cfg.TorznabURL, s.cfg.TorznabAPIKey, contentType, numeric, season, episode)
 	if err != nil {
-		log.Printf("torznab: imdb query %s/%s: %v", contentType, baseImdb, err)
+		logging.For("torznab").Error("imdb query failed", "type", contentType, "imdb", baseImdb, "err", err)
 		writeJSON(w, http.StatusOK, empty)
 		return
 	}
@@ -263,7 +264,7 @@ func (s *server) torznabStream(w http.ResponseWriter, r *http.Request, contentTy
 		if title != "" {
 			items, err = tnQueryTitle(r, s.cfg.TorznabURL, s.cfg.TorznabAPIKey, contentType, title, season, episode)
 			if err != nil {
-				log.Printf("torznab: title query %s/%q: %v", contentType, title, err)
+				logging.For("torznab").Warn("title query failed", "type", contentType, "title", title, "err", err)
 			}
 		}
 	}

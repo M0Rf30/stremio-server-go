@@ -82,7 +82,9 @@ Then point any Stremio client's **streaming server URL** at
 | `WEB_UI_LOCATION` | `https://web.stremio.com/` | redirect target for `GET /` |
 | `LOCAL_FILES_DIR` | _(unset)_ | directory scanned by the local-files addon |
 | `STREMIO_HWACCEL` | _(auto)_ | `0` forces software transcode; or pin `vaapi`/`nvenc`/… |
-| `STREMIO_HTTP_LOG` | _(off)_ | `1` logs each request (path only) |
+| `STREMIO_HTTP_LOG` | _(off)_ | `1` emits a structured access log line per request (`method`, `uri`, `status`, `duration_ms`, `bytes`, `remote`) |
+| `STREMIO_LOG_LEVEL` | `info` | log verbosity: `debug` / `info` / `warn` / `error` |
+| `STREMIO_LOG_FORMAT` | `text` | log output format: `text` (compact `time LEVEL component: msg key=value`) or `json` |
 | `STREMIO_PROXY_PASSWORD` | _(unset)_ | `api_password` required on `/proxy/*` requests |
 | `STREMIO_PROXY_SECRET` | _(auto)_ | signing key for signed proxy URLs (auto-generated under `APP_PATH`) |
 | `STREMIO_PROXY_IP_ACL` | _(unset)_ | comma-separated CIDR allowlist for proxy clients |
@@ -125,6 +127,7 @@ URLs) is documented in [docs/PROXY.md](docs/PROXY.md).
 | `internal/archive` | uniform reader over zip / rar / 7zip / tar / tgz entries |
 | `internal/nzb` | NZB parser, yEnc decoder, NNTP client, segment assembler |
 | `internal/ftpstream` | FTP/FTPS + HTTP(S) byte-range stream opener |
+| `internal/logging` | structured slog logger (leveled, component-tagged, text/json) |
 | `docs/swagger.yaml` | OpenAPI/Swagger spec, generated from code (`make swagger`) |
 | `scripts/smoke.sh` | end-to-end API smoke test |
 

@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	_ "net/http/pprof" //nolint:gosec // G108: pprof is served only on the loopback STREMIO_PPROF listener, never the main handler
 	"os"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/M0Rf30/stremio-server-go/internal/api"
 	"github.com/M0Rf30/stremio-server-go/internal/engine"
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/media"
 	"github.com/M0Rf30/stremio-server-go/internal/settings"
 	"github.com/M0Rf30/stremio-server-go/internal/types"
@@ -49,7 +49,7 @@ func envInt(key string, def int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
-		log.Printf("env %s: invalid integer %q, using default %d", key, v, def)
+		logging.For("config").Warn("invalid integer env", "key", key, "value", v, "default", def)
 	}
 	return def
 }
@@ -59,7 +59,7 @@ func envInt64(key string, def int64) int64 {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
 		}
-		log.Printf("env %s: invalid integer %q, using default %d", key, v, def)
+		logging.For("config").Warn("invalid integer env", "key", key, "value", v, "default", def)
 	}
 	return def
 }
@@ -88,6 +88,7 @@ func envBool(key string, def bool) bool {
 // @BasePath     /
 // @schemes      http https
 func main() {
+	logging.Setup()
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "-version", "--version":
@@ -100,7 +101,7 @@ func main() {
 	}
 	home, homeErr := os.UserHomeDir()
 	if homeErr != nil {
-		log.Printf("cannot determine home directory: %v; defaulting to /tmp", homeErr)
+		logging.For("config").Warn("cannot determine home directory; using /tmp", "err", homeErr)
 		home = "/tmp"
 	}
 	appPath := os.Getenv("APP_PATH")
@@ -108,7 +109,7 @@ func main() {
 		appPath = filepath.Join(home, ".stremio-server")
 	}
 	if err := os.MkdirAll(appPath, 0o755); err != nil {
-		log.Fatalf("cannot create app path %s: %v", appPath, err)
+		logging.Fatal("cannot create app path", "err", err, "path", appPath)
 	}
 
 	cfg := types.Config{
@@ -137,17 +138,17 @@ func main() {
 		PeersPerTorrent:   envInt("STREMIO_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
 	}
 	if cfg.DisableWebtorrent {
-		log.Printf("engine: WebTorrent/WebRTC peers disabled (default; set STREMIO_DISABLE_WEBTORRENT=0 to enable)")
+		logging.For("engine").Info("webtorrent/webrtc peers disabled")
 	}
 	if !cfg.EnableDLNA {
-		log.Printf("casting: DLNA disabled (default; set STREMIO_ENABLE_DLNA=1 to enable)")
+		logging.For("casting").Info("dlna disabled")
 	}
 
 	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also
 	// honors the native GOMEMLIMIT env). 0 = unset.
 	if lim := envInt64("STREMIO_MEM_LIMIT", 0); lim > 0 {
 		debug.SetMemoryLimit(lim)
-		log.Printf("runtime: soft memory limit %d bytes", lim)
+		logging.For("runtime").Info("soft memory limit set", "bytes", lim)
 	}
 	// Return idle RSS high-water (freed goroutine stacks + scavenged heap from
 	// connection churn) to the OS periodically; cheap on a long-running server.
@@ -161,11 +162,11 @@ func main() {
 
 	ss, err := settings.New(cfg)
 	if err != nil {
-		log.Fatalf("settings: %v", err)
+		logging.Fatal("settings init failed", "err", err)
 	}
 	em, err := engine.New(cfg)
 	if err != nil {
-		log.Fatalf("engine: %v", err)
+		logging.Fatal("engine init failed", "err", err)
 	}
 	defer func() { _ = em.Close() }()
 
@@ -235,9 +236,9 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("stremio-server %s listening at %s (app path %s)", version, baseLocal, appPath)
+		logging.For("http").Info("listening", "version", version, "addr", baseLocal, "app_path", appPath)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http server: %v", err)
+			logging.Fatal("http server error", "err", err)
 		}
 	}()
 
@@ -248,9 +249,9 @@ func main() {
 	if addr := os.Getenv("STREMIO_PPROF"); addr != "" {
 		ppSrv = &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
-			log.Printf("pprof listening at http://%s/debug/pprof/", addr)
+			logging.For("pprof").Info("listening", "addr", addr)
 			if err := ppSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Printf("pprof server: %v", err)
+				logging.For("pprof").Error("server error", "err", err)
 			}
 		}()
 	}
@@ -266,13 +267,13 @@ func main() {
 		keyFile := filepath.Join(appPath, "https-key.pem")
 		cert, certErr := tls.LoadX509KeyPair(certFile, keyFile)
 		if certErr != nil {
-			log.Printf("https: no persisted cert (%v); falling back to self-signed", certErr)
+			logging.For("https").Warn("no persisted cert; falling back to self-signed", "err", certErr)
 			cert, certErr = selfSignedCert()
 		} else {
-			log.Printf("https: using persisted cert from %s", certFile)
+			logging.For("https").Info("using persisted cert", "path", certFile)
 		}
 		if certErr != nil {
-			log.Printf("https: cert init failed: %v (https disabled)", certErr)
+			logging.For("https").Warn("cert init failed; https disabled", "err", certErr)
 		} else {
 			holder := &certHolder{}
 			holder.set(cert)
@@ -280,11 +281,11 @@ func main() {
 				h.SetCertReloadHook(func() {
 					c, err := tls.LoadX509KeyPair(certFile, keyFile)
 					if err != nil {
-						log.Printf("https: live cert reload failed: %v", err)
+						logging.For("https").Error("live cert reload failed", "err", err)
 						return
 					}
 					holder.set(c)
-					log.Printf("https: live cert reloaded from %s", certFile)
+					logging.For("https").Info("live cert reloaded", "path", certFile)
 				})
 			}
 			tlsSrv = &http.Server{
@@ -294,9 +295,9 @@ func main() {
 				TLSConfig:         &tls.Config{GetCertificate: holder.get},
 			}
 			go func() {
-				log.Printf("stremio-server %s HTTPS at https://127.0.0.1:%d", version, cfg.HTTPSPort)
+				logging.For("https").Info("listening", "version", version, "addr", fmt.Sprintf("https://127.0.0.1:%d", cfg.HTTPSPort), "app_path", appPath)
 				if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					log.Printf("https server: %v", err)
+					logging.For("https").Error("server error", "err", err)
 				}
 			}()
 			// Auto-provision/renew a browser-trusted cert from api.strem.io when an
@@ -309,7 +310,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
-	log.Println("shutting down...")
+	logging.For("http").Info("shutting down")
 	close(provStop) // stop the cert renewer
 
 	var shutWg sync.WaitGroup
@@ -318,7 +319,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.Shutdown(ctx); err != nil {
-			log.Printf("%s shutdown: %v", name, err)
+			logging.For(name).Error("shutdown error", "err", err)
 		}
 	}
 	shutWg.Add(1)
@@ -354,11 +355,11 @@ func proxySecret(appPath string) string {
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		log.Fatalf("proxy: failed to generate random secret: %v", err)
+		logging.Fatal("failed to generate proxy secret", "err", err)
 	}
 	secret := hex.EncodeToString(buf)
 	if err := os.WriteFile(secretFile, []byte(secret), 0o600); err != nil {
-		log.Printf("proxy: failed to persist secret to %s: %v", secretFile, err)
+		logging.For("proxy").Warn("failed to persist secret", "path", secretFile, "err", err)
 	}
 	return secret
 }

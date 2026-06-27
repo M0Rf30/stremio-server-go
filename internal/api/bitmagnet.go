@@ -18,13 +18,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
 
 // ---- HTTP clients ---------------------------------------------------------
@@ -204,7 +205,7 @@ func (s *server) bitmagnetStream(w http.ResponseWriter, r *http.Request, content
 	// Resolve title + year via Cinemeta; fall back to the IMDB id on failure.
 	metaName, year := resolveCinemeta(r, contentType, baseImdb)
 	if metaName == "" {
-		log.Printf("bitmagnet: cinemeta lookup failed for %s/%s; using id as query", contentType, baseImdb)
+		logging.For("bitmagnet").Warn("cinemeta lookup failed; using id as query", "type", contentType, "imdb", baseImdb)
 		metaName = baseImdb
 	}
 
@@ -223,7 +224,7 @@ func (s *server) bitmagnetStream(w http.ResponseWriter, r *http.Request, content
 
 	items, err := queryBitmagnet(r, s.cfg.BitmagnetURL, queryString)
 	if err != nil {
-		log.Printf("bitmagnet: search %q: %v", queryString, err)
+		logging.For("bitmagnet").Error("search failed", "query", queryString, "err", err)
 		writeJSON(w, http.StatusOK, empty)
 		return
 	}

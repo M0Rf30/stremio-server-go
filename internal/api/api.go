@@ -15,7 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"mime"
 	"net"
 	"net/http"
@@ -31,6 +31,7 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/streamproxy"
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
@@ -60,6 +61,7 @@ type server struct {
 	prober     types.MediaProber
 	cfg        types.Config
 	logReq     bool
+	accessLog  *slog.Logger
 	sp         *streamproxy.Handler
 	certReload func() // hot-swap the live HTTPS cert after /get-https writes new files (wired by cmd)
 }
@@ -67,20 +69,18 @@ type server struct {
 // New returns the HTTP handler for the streaming server.
 func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProber, cfg types.Config) http.Handler {
 	return &server{
-		em:     em,
-		ss:     ss,
-		prober: prober,
-		cfg:    cfg,
-		logReq: os.Getenv("STREMIO_HTTP_LOG") != "",
-		sp:     streamproxy.New(buildStreamProxyConfig(cfg)),
+		em:        em,
+		ss:        ss,
+		prober:    prober,
+		cfg:       cfg,
+		logReq:    os.Getenv("STREMIO_HTTP_LOG") != "",
+		accessLog: logging.For("http"),
+		sp:        streamproxy.New(buildStreamProxyConfig(cfg)),
 	}
 }
 
 // ServeHTTP applies CORS, handles preflight, and dispatches to the router.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.logReq {
-		log.Printf("HTTP %s %s origin=%q", r.Method, r.URL.Path, r.Header.Get("Origin"))
-	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length, Content-Type")
 	if r.Method == http.MethodOptions {
@@ -92,6 +92,20 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Headers", h)
 		w.Header().Set("Access-Control-Max-Age", "1728000")
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if s.logReq {
+		start := time.Now()
+		rec := logging.NewResponseRecorder(w)
+		s.route(rec, r)
+		s.accessLog.Info("request",
+			"method", r.Method,
+			"uri", r.URL.RequestURI(),
+			"status", rec.StatusOrOK(),
+			"duration_ms", time.Since(start).Milliseconds(),
+			"bytes", rec.Bytes,
+			"remote", r.RemoteAddr,
+		)
 		return
 	}
 	s.route(w, r)
