@@ -64,7 +64,7 @@ const archiveSessionTTL = time.Hour
 // will stream from a remote URL to a local temp file. Archives larger than
 // this limit are rejected to prevent unbounded disk consumption.
 // 4 GiB covers the largest single-file archives seen in practice.
-const archiveMaxDownloadBytes = 4 << 30 // 4 GiB
+const archiveMaxDownloadBytes int64 = 4 << 30 // 4 GiB
 
 // archiveMaxLZEncoded is the maximum accepted byte length of a raw ?lz= query
 // value before decompression. Prevents memory blowup before decode begins.

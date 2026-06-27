@@ -14,7 +14,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/bodgit/sevenzip"
 	rardecode "github.com/nwaples/rardecode/v2"
 )
 
@@ -318,41 +317,3 @@ func (r *rarReader) Open(name string) (io.ReadCloser, error) {
 }
 
 func (r *rarReader) Close() error { return nil }
-
-// ── 7zip ─────────────────────────────────────────────────────────────────────
-
-type szReader struct {
-	rc *sevenzip.ReadCloser
-}
-
-func openSevenZip(fpath string) (Reader, error) {
-	rc, err := sevenzip.OpenReader(fpath)
-	if err != nil {
-		return nil, err
-	}
-	return &szReader{rc: rc}, nil
-}
-
-func (r *szReader) List() ([]Entry, error) {
-	out := make([]Entry, 0, len(r.rc.File))
-	for _, f := range r.rc.File {
-		fi := f.FileInfo()
-		out = append(out, Entry{
-			Name:  normName(f.Name),
-			Size:  fi.Size(),
-			IsDir: fi.IsDir(),
-		})
-	}
-	return out, nil
-}
-
-func (r *szReader) Open(name string) (io.ReadCloser, error) {
-	for _, f := range r.rc.File {
-		if normName(f.Name) == name {
-			return f.Open()
-		}
-	}
-	return nil, fmt.Errorf("archive: %q not found in 7zip archive", name)
-}
-
-func (r *szReader) Close() error { return r.rc.Close() }
