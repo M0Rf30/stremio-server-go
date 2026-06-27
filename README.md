@@ -48,6 +48,13 @@ A multi-stage `Dockerfile` (ffmpeg + yt-dlp bundled, non-root, `/data` volume)
 builds an image runnable under Podman/Docker or as a HuggingFace Space.
 See [docs/CONTAINER.md](docs/CONTAINER.md).
 
+### Browser-trusted HTTPS for the Stremio UI
+
+The Stremio web app can't talk to a plaintext local server. The
+**"HTTPS endpoint for streaming"** setting provisions a browser-trusted
+`*.stremio.rocks` cert for your LAN IP via `/get-https`. Full setup +
+troubleshooting: [docs/HTTPS.md](docs/HTTPS.md).
+
 ### Decentralized torrents (Bitmagnet)
 
 The `/bitmagnet` add-on streams from a self-hosted

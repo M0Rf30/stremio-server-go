@@ -99,6 +99,9 @@ podman run -d \
   stremio-server-go
 ```
 
+For a **browser-trusted** cert (the Stremio UI's "HTTPS endpoint for streaming"
+`*.stremio.rocks` flow) rather than self-signed, see [HTTPS.md](HTTPS.md).
+
 ### Docker equivalents
 
 Replace `podman` with `docker` in every command above; all flags are identical.
