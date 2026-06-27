@@ -262,3 +262,300 @@ func TestMemStorageConcurrentNeverWrongBytes(t *testing.T) {
 		t.Fatalf("resident bytes = %d exceed budget %d after settle", used, int64(capacity))
 	}
 }
+
+// TestMemStorageWriteAtBoundsCheck covers the two error returns in WriteAt:
+// a negative offset and an offset at-or-beyond the piece length.
+func TestMemStorageWriteAtBoundsCheck(t *testing.T) {
+	const pieceLen = 64
+	info := syntheticInfo(pieceLen, 1)
+	s := newMemStorage(pieceLen)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ti, err := s.OpenTorrent(t.Context(), info, metainfo.Hash{})
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if ti.Close != nil {
+			_ = ti.Close()
+		}
+	})
+	p := ti.Piece(info.Piece(0))
+
+	cases := []struct {
+		name string
+		off  int64
+	}{
+		{"negative", -1},
+		{"at length", pieceLen},
+		{"beyond length", pieceLen + 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n, err := p.WriteAt([]byte("x"), tc.off)
+			if err == nil {
+				t.Errorf("WriteAt(off=%d): expected error, got nil", tc.off)
+			}
+			if n != 0 {
+				t.Errorf("WriteAt(off=%d): expected 0 bytes written, got %d", tc.off, n)
+			}
+		})
+	}
+}
+
+// TestMemStorageReadAtBoundsCheck covers the negative-offset and out-of-range
+// paths in ReadAt, plus the partial-fill (short read returning io.EOF).
+func TestMemStorageReadAtBoundsCheck(t *testing.T) {
+	const pieceLen = 64
+	info := syntheticInfo(pieceLen, 1)
+	s := newMemStorage(pieceLen)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ti, err := s.OpenTorrent(t.Context(), info, metainfo.Hash{})
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if ti.Close != nil {
+			_ = ti.Close()
+		}
+	})
+	p := ti.Piece(info.Piece(0))
+
+	// Write data to make the piece resident.
+	data := fillPattern(0, pieceLen)
+	if _, err := p.WriteAt(data, 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+
+	t.Run("negative offset", func(t *testing.T) {
+		n, err := p.ReadAt(make([]byte, 1), -1)
+		if err == nil {
+			t.Error("ReadAt(-1): expected error, got nil")
+		}
+		if n != 0 {
+			t.Errorf("ReadAt(-1): expected 0 bytes, got %d", n)
+		}
+	})
+
+	t.Run("at length", func(t *testing.T) {
+		n, err := p.ReadAt(make([]byte, 1), pieceLen)
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("ReadAt(at length): expected io.EOF, got %v", err)
+		}
+		if n != 0 {
+			t.Errorf("ReadAt(at length): expected 0 bytes, got %d", n)
+		}
+	})
+
+	t.Run("beyond length", func(t *testing.T) {
+		n, err := p.ReadAt(make([]byte, 1), pieceLen+10)
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("ReadAt(beyond length): expected io.EOF, got %v", err)
+		}
+		if n != 0 {
+			t.Errorf("ReadAt(beyond length): want 0 bytes, got %d", n)
+		}
+	})
+
+	t.Run("partial fill at end", func(t *testing.T) {
+		const start = 10
+		buf := make([]byte, pieceLen) // bigger than remaining (pieceLen-start)
+		n, err := p.ReadAt(buf, start)
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("ReadAt partial: expected io.EOF, got %v", err)
+		}
+		want := pieceLen - start
+		if n != want {
+			t.Errorf("ReadAt partial: got %d bytes, want %d", n, want)
+		}
+		if !bytes.Equal(buf[:n], data[start:]) {
+			t.Error("ReadAt partial: wrong bytes returned")
+		}
+	})
+}
+
+// TestMemStorageMarkNotComplete verifies that MarkNotComplete flips the piece
+// back to incomplete while keeping the resident buffer intact (anacrolix can
+// then overwrite and re-verify without a reallocation).
+func TestMemStorageMarkNotComplete(t *testing.T) {
+	const pieceLen = 64
+	info := syntheticInfo(pieceLen, 1)
+	s := newMemStorage(pieceLen)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ti, err := s.OpenTorrent(t.Context(), info, metainfo.Hash{})
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if ti.Close != nil {
+			_ = ti.Close()
+		}
+	})
+	p := ti.Piece(info.Piece(0))
+	want := fillPattern(0, pieceLen)
+
+	if _, err := p.WriteAt(want, 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	if err := p.MarkComplete(); err != nil {
+		t.Fatalf("MarkComplete: %v", err)
+	}
+	if c := p.Completion(); !c.Complete {
+		t.Fatal("post-MarkComplete: Complete must be true")
+	}
+
+	// MarkNotComplete flips Complete back to false.
+	if err := p.MarkNotComplete(); err != nil {
+		t.Fatalf("MarkNotComplete: %v", err)
+	}
+	c := p.Completion()
+	if c.Complete {
+		t.Error("post-MarkNotComplete: Complete must be false")
+	}
+	if !c.Ok {
+		t.Error("post-MarkNotComplete: Ok must remain true")
+	}
+	// Data must still be resident so anacrolix can overwrite and re-verify.
+	got, err := readFull(p, pieceLen)
+	if err != nil {
+		t.Fatalf("ReadAt after MarkNotComplete: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("ReadAt after MarkNotComplete: buffer must retain original bytes")
+	}
+}
+
+// TestMemStorageMarkCompleteBeforeWrite covers the nil-data guard in MarkComplete:
+// calling it on an unwritten piece must return errPieceEvicted, not panic.
+func TestMemStorageMarkCompleteBeforeWrite(t *testing.T) {
+	const pieceLen = 64
+	info := syntheticInfo(pieceLen, 1)
+	s := newMemStorage(pieceLen)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ti, err := s.OpenTorrent(t.Context(), info, metainfo.Hash{})
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if ti.Close != nil {
+			_ = ti.Close()
+		}
+	})
+	p := ti.Piece(info.Piece(0))
+
+	if err := p.MarkComplete(); err == nil {
+		t.Error("MarkComplete on unwritten piece: expected error (errPieceEvicted), got nil")
+	}
+}
+
+// TestMemStorageTorrentCloseFreesMemory verifies that closing a torrent via the
+// TorrentImpl.Close callback drops all its resident pieces and decrements used
+// bytes back to zero.
+func TestMemStorageTorrentCloseFreesMemory(t *testing.T) {
+	const (
+		pieceLen  = 64
+		numPieces = 2
+	)
+	info := syntheticInfo(pieceLen, numPieces)
+	s := newMemStorage(pieceLen * numPieces)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ti, err := s.OpenTorrent(t.Context(), info, metainfo.Hash{})
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+
+	// Write and complete both pieces so they are resident.
+	for i := 0; i < numPieces; i++ {
+		p := ti.Piece(info.Piece(i))
+		if _, err := p.WriteAt(fillPattern(i, pieceLen), 0); err != nil {
+			t.Fatalf("piece %d WriteAt: %v", i, err)
+		}
+		if err := p.MarkComplete(); err != nil {
+			t.Fatalf("piece %d MarkComplete: %v", i, err)
+		}
+	}
+
+	ms := s.(*memStorage)
+	ms.mu.Lock()
+	before := ms.used
+	ms.mu.Unlock()
+	if before != pieceLen*numPieces {
+		t.Fatalf("before Close: used = %d, want %d", before, int64(pieceLen*numPieces))
+	}
+
+	if ti.Close == nil {
+		t.Fatal("TorrentImpl.Close must be set")
+	}
+	if err := ti.Close(); err != nil {
+		t.Fatalf("torrent Close: %v", err)
+	}
+
+	ms.mu.Lock()
+	after := ms.used
+	ms.mu.Unlock()
+	if after != 0 {
+		t.Errorf("after torrent Close: used = %d, want 0", after)
+	}
+}
+
+// TestMemStorageEvictLockedNoVictim covers the "no evictable victim" early
+// return in evictLocked. When all resident pieces are incomplete (in-flight),
+// eviction cannot free space and the implementation tolerates a transient
+// overage rather than dropping live data. The test writes two pieces into a
+// budget sized for one, without completing either, and asserts both remain
+// resident (used = 2×pieceLen > capacity).
+func TestMemStorageEvictLockedNoVictim(t *testing.T) {
+	const pieceLen = 64
+	info := syntheticInfo(pieceLen, 2)
+	s := newMemStorage(pieceLen) // only room for one piece
+	t.Cleanup(func() { _ = s.Close() })
+
+	ti, err := s.OpenTorrent(t.Context(), info, metainfo.Hash{})
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if ti.Close != nil {
+			_ = ti.Close()
+		}
+	})
+
+	p0 := ti.Piece(info.Piece(0))
+	p1 := ti.Piece(info.Piece(1))
+
+	// Write piece 0 without completing it — it is in-flight (incomplete).
+	if _, err := p0.WriteAt(fillPattern(0, pieceLen), 0); err != nil {
+		t.Fatalf("piece 0 WriteAt: %v", err)
+	}
+
+	// Write piece 1: evictLocked(pieceLen, p1) searches the LRU for a complete
+	// victim, finds none (p0 is incomplete), and returns without evicting.
+	// The implementation tolerates this in-flight overage.
+	if _, err := p1.WriteAt(fillPattern(1, pieceLen), 0); err != nil {
+		t.Fatalf("piece 1 WriteAt with no evictable victim: %v", err)
+	}
+
+	// Both pieces are resident: used must equal 2×pieceLen, exceeding capacity.
+	ms := s.(*memStorage)
+	ms.mu.Lock()
+	used := ms.used
+	ms.mu.Unlock()
+	if used != 2*pieceLen {
+		t.Errorf("used = %d; want %d (in-flight overage tolerated)", used, int64(2*pieceLen))
+	}
+
+	// Verify both pieces still return their correct bytes.
+	for idx, p := range []storage.PieceImpl{p0, p1} {
+		got, err := readFull(p, pieceLen)
+		if err != nil {
+			t.Fatalf("piece %d readFull: %v", idx, err)
+		}
+		if !bytes.Equal(got, fillPattern(idx, pieceLen)) {
+			t.Errorf("piece %d: wrong bytes after no-victim eviction", idx)
+		}
+	}
+}

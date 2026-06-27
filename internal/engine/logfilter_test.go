@@ -83,3 +83,47 @@ func TestReadCancelFilterPassesInfoLevel(t *testing.T) {
 		t.Errorf("Info with context.Canceled: want 1 record (only Error+ filtered), got %d", got)
 	}
 }
+
+// TestReadCancelFilterWithGroup verifies that the filter returned by WithGroup
+// still suppresses context-cancel errors and forwards real errors.
+func TestReadCancelFilterWithGroup(t *testing.T) {
+	cap := &captureHandler{}
+	grouped := newReadCancelFilter(cap).WithGroup("engine")
+
+	logger := slog.New(grouped)
+
+	// Real error must reach cap.
+	logger.Error("disk fault", "err", errors.New("i/o error"))
+	if len(cap.msgs) != 1 {
+		t.Errorf("WithGroup real error: want 1 record, got %d", len(cap.msgs))
+	}
+
+	// Cancel error must still be dropped by the outer filter.
+	logger.Error("cancel", "err", fmt.Errorf("wrapped: %w", context.Canceled))
+	if len(cap.msgs) != 1 {
+		t.Errorf("WithGroup cancel: must be filtered; got %d records", len(cap.msgs))
+	}
+}
+
+// TestReadCancelFilterWithAttrs verifies that the filter returned by WithAttrs
+// still suppresses context-cancel errors and forwards real errors.
+func TestReadCancelFilterWithAttrs(t *testing.T) {
+	cap := &captureHandler{}
+	withAttrs := newReadCancelFilter(cap).WithAttrs([]slog.Attr{
+		slog.String("component", "memstorage"),
+	})
+
+	logger := slog.New(withAttrs)
+
+	// Real error must reach cap.
+	logger.Error("piece read failed", "err", errors.New("EIO"))
+	if len(cap.msgs) != 1 {
+		t.Errorf("WithAttrs real error: want 1 record, got %d", len(cap.msgs))
+	}
+
+	// DeadlineExceeded must still be dropped.
+	logger.Error("timeout", "err", context.DeadlineExceeded)
+	if len(cap.msgs) != 1 {
+		t.Errorf("WithAttrs DeadlineExceeded: must be filtered; got %d records", len(cap.msgs))
+	}
+}
