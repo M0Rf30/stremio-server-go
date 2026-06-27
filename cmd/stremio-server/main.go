@@ -63,6 +63,21 @@ func envInt64(key string, def int64) int64 {
 	return def
 }
 
+// envBool parses a boolean env var. Unset → def. "0", "false", "no", "off"
+// (case-insensitive) → false; any other non-empty value → true.
+func envBool(key string, def bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
 // @title        stremio-server-go enginefs API
 // @version      4.21.0
 // @description  HTTP API served by stremio-server-go, a pure-Go drop-in for Stremio's streaming server (server.js). serverVersion is reported as 4.21.0 for client feature-gating; it is independent of the binary build version.
@@ -115,9 +130,16 @@ func main() {
 		BitmagnetURL:      getenv("STREMIO_BITMAGNET_URL", ""),
 		TorznabURL:        getenv("STREMIO_TORZNAB_URL", ""),
 		TorznabAPIKey:     getenv("STREMIO_TORZNAB_APIKEY", ""),
-		DisableTrackers:   os.Getenv("STREMIO_DISABLE_TRACKERS") != "",   // disable all tracker announces (DHT/PEX/webseeds still used)
-		DisableWebtorrent: os.Getenv("STREMIO_DISABLE_WEBTORRENT") != "", // disable WebRTC/WebTorrent (pion) peers; cuts ~60% of goroutines & RAM
-		PeersPerTorrent:   envInt("STREMIO_PEERS_PER_TORRENT", 0),        // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
+		DisableTrackers:   os.Getenv("STREMIO_DISABLE_TRACKERS") != "", // disable all tracker announces (DHT/PEX/webseeds still used)
+		DisableWebtorrent: envBool("STREMIO_DISABLE_WEBTORRENT", true), // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers
+		EnableDLNA:        envBool("STREMIO_ENABLE_DLNA", false),       // default disabled; set =1/true to enable /casting DLNA discovery + control
+		PeersPerTorrent:   envInt("STREMIO_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
+	}
+	if cfg.DisableWebtorrent {
+		log.Printf("engine: WebTorrent/WebRTC peers disabled (default; set STREMIO_DISABLE_WEBTORRENT=0 to enable)")
+	}
+	if !cfg.EnableDLNA {
+		log.Printf("casting: DLNA disabled (default; set STREMIO_ENABLE_DLNA=1 to enable)")
 	}
 
 	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also
@@ -230,7 +252,10 @@ func main() {
 		}()
 	}
 
-	var tlsSrv *http.Server
+	var (
+		tlsSrv   *http.Server
+		provStop = make(chan struct{})
+	)
 	if cfg.HTTPSPort > 0 {
 		// Prefer an API-issued cert (written by GET /get-https) over a self-signed one.
 		// Both use the same HTTPS listener; cert preference is transparent to clients.
@@ -246,11 +271,13 @@ func main() {
 		if certErr != nil {
 			log.Printf("https: cert init failed: %v (https disabled)", certErr)
 		} else {
+			holder := &certHolder{}
+			holder.set(cert)
 			tlsSrv = &http.Server{
 				Addr:              fmt.Sprintf(":%d", cfg.HTTPSPort),
 				Handler:           handler,
 				ReadHeaderTimeout: 10 * time.Second,
-				TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}},
+				TLSConfig:         &tls.Config{GetCertificate: holder.get},
 			}
 			go func() {
 				log.Printf("stremio-server %s HTTPS at https://127.0.0.1:%d", version, cfg.HTTPSPort)
@@ -258,6 +285,10 @@ func main() {
 					log.Printf("https server: %v", err)
 				}
 			}()
+			// Auto-provision/renew a browser-trusted cert from api.strem.io when an
+			// authKey is available (env STREMIO_CERT_AUTHKEY or cached by a prior
+			// /get-https call). Hot-swaps the live cert; no restart needed.
+			go renewCertLoop(appPath, holder, provStop)
 		}
 	}
 
@@ -265,6 +296,7 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 	log.Println("shutting down...")
+	close(provStop) // stop the cert renewer
 
 	var shutWg sync.WaitGroup
 	shutOne := func(s *http.Server, name string) {

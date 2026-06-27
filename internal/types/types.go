@@ -22,10 +22,12 @@ type Config struct {
 	TrackersMax     int    // max ranked UDP/HTTP trackers per torrent (STREMIO_TRACKERS_MAX; 0 = default)
 	// disable ALL BitTorrent tracker announces (DHT/PEX/webseeds still used); STREMIO_DISABLE_TRACKERS; default false
 	DisableTrackers bool
-	// disable WebTorrent/WebRTC peers (pion); cuts ~60% of goroutines + RAM, useful on RAM-constrained hosts; STREMIO_DISABLE_WEBTORRENT; default false
+	// disable WebTorrent/WebRTC peers (pion); cuts ~60% of goroutines + RAM; STREMIO_DISABLE_WEBTORRENT; default true (disabled)
 	DisableWebtorrent bool
 	// established peer connections per torrent (scales half-open=n/2, high-water=n*10); STREMIO_PEERS_PER_TORRENT; 0 = default 50
 	PeersPerTorrent int
+	// enable DLNA/UPnP casting discovery + control on /casting; STREMIO_ENABLE_DLNA; default false (disabled)
+	EnableDLNA bool
 
 	// Stream proxy configuration.
 	ProxyPassword    string // api_password for stream proxy; "" = no auth

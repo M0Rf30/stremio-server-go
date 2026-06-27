@@ -72,7 +72,7 @@ Then point any Stremio client's **streaming server URL** at
 | Variable | Default | Purpose |
 |---|---|---|
 | `HTTP_PORT` | `11470` | enginefs HTTP API port |
-| `HTTPS_PORT` | `12470` | self-signed / provisioned HTTPS port (`0` disables) |
+| `HTTPS_PORT` | `12470` | HTTPS port (`0` disables). Serves a persisted cert if present, else self-signed; with a Stremio authKey it auto-provisions and renews a browser-trusted Let's Encrypt cert via `/get-https`. |
 | `BT_LISTEN_PORT` | `0` | BitTorrent peer port (`0` = OS-assigned) |
 | `APP_PATH` | `~/.stremio-server` | data/cache root |
 | `STREMIO_MEMORY_CACHE_SIZE` | `0` | in-RAM piece-cache budget in bytes; `0` writes pieces to disk (default). When `>0`, stream through a bounded RAM cache and never write piece data to disk (mobile / low-disk / HuggingFace). |
@@ -91,7 +91,10 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_TORZNAB_URL` | _(unset)_ | Torznab indexer API base URL; enables the `/torznab` add-on. Unset = add-on serves the manifest but returns no streams. |
 | `STREMIO_TORZNAB_APIKEY` | _(unset)_ | API key for the Torznab indexer. Required by Prowlarr and Jackett; not needed for Bitmagnet. |
 | `STREMIO_DISABLE_TRACKERS` | _(off)_ | disable all tracker announces (DHT/PEX/webseeds only) — for private/DHT-only operation |
-| `STREMIO_DISABLE_WEBTORRENT` | _(off)_ | disable WebTorrent/WebRTC (pion) peers — cuts ~60% of goroutines & RAM; TCP/uTP/DHT peers unaffected |
+| `STREMIO_DISABLE_WEBTORRENT` | `on` | WebTorrent/WebRTC (pion) peers are **disabled by default** — cuts ~60% of goroutines & RAM; TCP/uTP/DHT peers unaffected. Set `=0`/`false` to re-enable. |
+| `STREMIO_ENABLE_DLNA` | _(off)_ | enable DLNA/UPnP casting on `/casting` (SSDP discovery + UPnP AVTransport control). **Disabled by default**; set `=1`/`true` to enable. |
+| `STREMIO_CERT_AUTHKEY` | _(unset)_ | Stremio authKey used to auto-provision/renew a trusted HTTPS cert from `api.strem.io`. If unset, a key cached from a prior `/get-https` call is reused. |
+| `STREMIO_CERT_IP` | _(primary IPv4)_ | IP encoded into the provisioned cert's domain; defaults to the first non-loopback IPv4. |
 | `STREMIO_PEERS_PER_TORRENT` | `50` | established peer connections per torrent (half-open=n/2, high-water=n*10); lower (e.g. 30) trims peer goroutines/RAM |
 | `STREMIO_MEM_LIMIT` | _(unset)_ | soft memory ceiling in bytes (runtime/debug.SetMemoryLimit; GOMEMLIMIT env also works). RSS high-water is returned to the OS every 5 min regardless |
 
