@@ -120,6 +120,85 @@ podman build --format docker -t stremio-server-go .
 
 ---
 
+## Docker Compose (TrueNAS SCALE, Portainer, plain Compose)
+
+TrueNAS SCALE (24.10 "Electric Eel" and later, including 25.x "Fangtooth")
+runs apps on Docker, so you can deploy via **Apps → Discover → Custom App →
+Install via YAML** and paste a Compose file directly. The same YAML works under
+Portainer stacks or plain `docker compose up -d`.
+
+### Minimal (LAN, desktop/mobile Stremio apps)
+
+```yaml
+services:
+  stremio-server:
+    image: ghcr.io/m0rf30/stremio-server-go:latest   # pin a tag, e.g. :v0.8.3
+    container_name: stremio-server
+    restart: unless-stopped
+    ports:
+      - "11470:11470"          # enginefs HTTP API
+    environment:
+      APP_PATH: /data
+      TZ: Europe/Rome
+    volumes:
+      - /mnt/POOL/apps/stremio:/data   # replace POOL with your pool/dataset
+```
+
+Create the dataset first (e.g. `/mnt/tank/apps/stremio`) and make it writable by
+the container user (**uid/gid 1000**): from a TrueNAS shell run
+`chown -R 1000:1000 /mnt/tank/apps/stremio`. The image runs as non-root uid 1000
+by design. Then point any Stremio client's **streaming server URL** at
+`http://HOST:11470`.
+
+### Full (dedicated peer port + HTTPS for the web app)
+
+```yaml
+services:
+  stremio-server:
+    image: ghcr.io/m0rf30/stremio-server-go:latest   # pin a tag, e.g. :v0.8.3
+    container_name: stremio-server
+    restart: unless-stopped
+    ports:
+      - "11470:11470"          # HTTP API
+      - "12470:12470"          # HTTPS (only if you use the Stremio web app)
+      - "11471:11471/tcp"      # BitTorrent peer port (inbound peering/seeding)
+      - "11471:11471/udp"
+    environment:
+      APP_PATH: /data
+      TZ: Europe/Rome
+      BT_LISTEN_PORT: "11471"
+      HTTPS_PORT: "12470"      # enable HTTPS; set 0 to disable
+      # idle-torrent reclaim (default 300s; 0 = disabled)
+      STREMIO_TORRENT_IDLE_TIMEOUT: "300"
+      # optional: stream through a bounded RAM cache instead of disk (bytes; 0 = disk)
+      # STREMIO_MEMORY_CACHE_SIZE: "536870912"   # 512 MiB
+    volumes:
+      - /mnt/POOL/apps/stremio:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:11470/heartbeat"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+```
+
+Notes:
+
+- **No `version:` key** — TrueNAS 25 ships a recent Compose; the attribute is
+  deprecated.
+- **Pin a tag** (`:v0.8.3`) instead of `:latest` for predictable redeploys; bump
+  the tag and redeploy to upgrade.
+- **Port `12470` is only needed** for the Stremio **web app** (browser HTTPS,
+  mixed-content rules). It also requires a browser-trusted certificate — see
+  [HTTPS.md](HTTPS.md) (the `*.stremio.rocks` flow, needs `STREMIO_CERT_AUTHKEY`).
+  With the **desktop/mobile** apps you can drop the `12470` line and set
+  `HTTPS_PORT: "0"`.
+- **Peer port `11471`** is optional but improves peering; if TrueNAS is behind
+  NAT, forward that port (TCP+UDP) on your router too.
+- **No authentication** — keep it on the LAN; do not expose the port to the
+  public internet.
+
+---
+
 ## Environment variables
 
 | Variable | In-container default | Purpose |
