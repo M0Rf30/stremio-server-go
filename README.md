@@ -107,6 +107,7 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_METADATA_URL` | `https://v3-cinemeta.strem.io` | Cinemeta-compatible metadata add-on base URL used by `/bitmagnet` and `/torznab` to resolve an IMDB id to a title. **Enabled by default** (official Cinemeta). Point it at a self-hosted mirror or a TMDB/aiometadata add-on's configured base (anything serving `/meta/{type}/{id}.json`); set to empty / `off` to disable the lookup (add-ons then query by raw IMDB id). |
 | `STREMIO_DISABLE_TRACKERS` | _(off)_ | disable all tracker announces (DHT/PEX/webseeds only) — for private/DHT-only operation |
 | `STREMIO_TRACKERS_URL` | _(curated list)_ | source URL for the public tracker list fetched + ranked at startup (newline-delimited). Defaults to a curated list; set to empty / `off` to skip the remote fetch entirely (embedded/cached trackers + DHT/PEX only). Drives the `trackersSourceUrl` setting. |
+| `STREMIO_TRACKERS_MAX` | `5` | max number of fastest-probed public trackers retained from the ranked list |
 | `STREMIO_DISABLE_WEBTORRENT` | `on` | WebTorrent/WebRTC (pion) peers are **disabled by default** — cuts ~60% of goroutines & RAM; TCP/uTP/DHT peers unaffected. Set `=0`/`false` to re-enable. |
 | `STREMIO_ENABLE_DLNA` | _(off)_ | enable DLNA/UPnP casting on `/casting` (SSDP discovery + UPnP AVTransport control). **Disabled by default**; set `=1`/`true` to enable. |
 | `STREMIO_CERT_AUTHKEY` | _(unset)_ | Stremio authKey used to auto-provision/renew a trusted HTTPS cert from `api.strem.io`. If unset, a key cached from a prior `/get-https` call is reused. |
@@ -117,6 +118,7 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_BT_PROXY` | _(unset)_ | Upstream proxy for BitTorrent **tracker announces, HTTP webseeds, metainfo fetch, and the tracker-list download** (`socks5://host:port` or `http(s)://host:port`). Lets you reach trackers blocked by your ISP. **Peer connections are not proxied** — use `STREMIO_BT_ENCRYPTION=require` for peer-traffic DPI evasion. |
 | `STREMIO_DHT_BOOTSTRAP` | _(defaults)_ | Comma-separated `host:port` DHT bootstrap nodes appended to the built-in defaults. Use your own reachable nodes when the default bootstrap routers are blocked. |
 | `STREMIO_BT_ANONYMOUS` | _(off)_ | `1`/`true` hides the client version/fingerprint advertised to peers (anacrolix AnonymousMode). |
+| `STREMIO_PPROF` | _(unset)_ | when set to a `host:port` (e.g. `127.0.0.1:6060`), serves `net/http/pprof` on that address for profiling |
 
 The stream proxy (HLS/DASH manifest rewriting, on-the-fly decryption, signed
 URLs) is documented in [docs/PROXY.md](docs/PROXY.md).

@@ -48,6 +48,7 @@ Settings persist to `<APP_PATH>/server-settings.json` via atomic temp+rename.
 | `internal/engine` | anacrolix client wrapper, readers, trackers, LRU cache eviction, in-RAM piece storage |
 | `internal/media` | `ffprobe`/`ffmpeg` shell-outs: probe, HLS transcode, subtitles, opensub hash |
 | `internal/streamproxy` | `/proxy` HLS/DASH rewrite, DRM decrypt, signed URLs, segment cache |
+| `internal/netguard` | SSRF guard: private/loopback/cloud-metadata IP checks + a dialer `Control` hook (DNS-rebinding-safe), shared by the proxy, `/create`, and ftpstream |
 | `internal/settings` | `server-settings.json` store (atomic persist) |
 | `internal/logging` | `slog`-based structured logger (text/json, leveled, component-tagged) |
 | `internal/archive` `internal/nzb` `internal/ftpstream` | format/protocol backends behind the matching api handlers |
