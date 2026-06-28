@@ -358,6 +358,109 @@ func TestAuthorizeTokenPresentNoSecret(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// authorize — token Params binding
+// ---------------------------------------------------------------------------
+
+func TestAuthorizeTokenParamsMatch(t *testing.T) {
+	// Token sealed with Params{"d": "https://a"} must be accepted when the
+	// live request carries ?d=https://a.
+	h := authNewHandler(Config{Secret: testSecret})
+	tok := token{
+		Endpoint: "/proxy/stream",
+		Params:   map[string]string{"d": "https://a"},
+		Exp:      time.Now().Add(time.Hour).Unix(),
+	}
+	signed, err := h.signToken(tok)
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/proxy/stream?d=https%3A%2F%2Fa&token="+signed, nil)
+	r.RemoteAddr = "203.0.113.1:1234"
+	if err := h.authorize(r); err != nil {
+		t.Errorf("matching params: got %v want nil", err)
+	}
+}
+
+func TestAuthorizeTokenParamsMismatch(t *testing.T) {
+	// Token sealed with Params{"d": "https://a"} must be rejected when the
+	// live request carries ?d=https://b.
+	h := authNewHandler(Config{Secret: testSecret})
+	tok := token{
+		Endpoint: "/proxy/stream",
+		Params:   map[string]string{"d": "https://a"},
+		Exp:      time.Now().Add(time.Hour).Unix(),
+	}
+	signed, err := h.signToken(tok)
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/proxy/stream?d=https%3A%2F%2Fb&token="+signed, nil)
+	r.RemoteAddr = "203.0.113.1:1234"
+	if err := h.authorize(r); !errors.Is(err, errUnauthorized) {
+		t.Errorf("mismatched params: got %v want errUnauthorized", err)
+	}
+}
+
+func TestAuthorizeTokenParamsMissingKey(t *testing.T) {
+	// Token sealed with Params{"d": "https://a"} must be rejected when the
+	// live request omits the ?d param entirely.
+	h := authNewHandler(Config{Secret: testSecret})
+	tok := token{
+		Endpoint: "/proxy/stream",
+		Params:   map[string]string{"d": "https://a"},
+		Exp:      time.Now().Add(time.Hour).Unix(),
+	}
+	signed, err := h.signToken(tok)
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/proxy/stream?token="+signed, nil)
+	r.RemoteAddr = "203.0.113.1:1234"
+	if err := h.authorize(r); !errors.Is(err, errUnauthorized) {
+		t.Errorf("missing sealed param: got %v want errUnauthorized", err)
+	}
+}
+
+func TestAuthorizeTokenEmptyParamsSkipsCheck(t *testing.T) {
+	// A token with an empty Params map imposes no query-parameter constraint
+	// (legacy tokens must keep working).
+	h := authNewHandler(Config{Secret: testSecret})
+	tok := token{
+		Endpoint: "/proxy/stream",
+		Params:   map[string]string{}, // empty → no constraint
+		Exp:      time.Now().Add(time.Hour).Unix(),
+	}
+	signed, err := h.signToken(tok)
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/proxy/stream?d=anything&token="+signed, nil)
+	r.RemoteAddr = "203.0.113.1:1234"
+	if err := h.authorize(r); err != nil {
+		t.Errorf("empty params: got %v want nil", err)
+	}
+}
+
+func TestAuthorizeTokenNilParamsSkipsCheck(t *testing.T) {
+	// A token with a nil Params map (JSON-omitted) also imposes no constraint.
+	h := authNewHandler(Config{Secret: testSecret})
+	tok := token{
+		Endpoint: "/proxy/stream",
+		// Params intentionally zero-value (nil map)
+		Exp: time.Now().Add(time.Hour).Unix(),
+	}
+	signed, err := h.signToken(tok)
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/proxy/stream?d=anything&token="+signed, nil)
+	r.RemoteAddr = "203.0.113.1:1234"
+	if err := h.authorize(r); err != nil {
+		t.Errorf("nil params: got %v want nil", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // clientIP
 // ---------------------------------------------------------------------------
 

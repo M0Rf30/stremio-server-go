@@ -32,6 +32,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
+	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 	"github.com/M0Rf30/stremio-server-go/internal/streamproxy"
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
@@ -56,27 +57,52 @@ var videoMimes = map[string]string{
 }
 
 type server struct {
-	em         types.EngineManager
-	ss         types.SettingsStore
-	prober     types.MediaProber
-	cfg        types.Config
-	logReq     bool
-	accessLog  *slog.Logger
-	sp         *streamproxy.Handler
-	certReload func() // hot-swap the live HTTPS cert after /get-https writes new files (wired by cmd)
+	em          types.EngineManager
+	ss          types.SettingsStore
+	prober      types.MediaProber
+	cfg         types.Config
+	logReq      bool
+	accessLog   *slog.Logger
+	sp          *streamproxy.Handler
+	certReload  func() // hot-swap the live HTTPS cert after /get-https writes new files (wired by cmd)
+	proxyClient *http.Client
+	blobClient  *http.Client
 }
 
 // New returns the HTTP handler for the streaming server.
 func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProber, cfg types.Config) http.Handler {
 	localIMDBDisabled.Store(!cfg.LocalIMDB)
+	blockPrivate := cfg.ProxyPassword != "" || cfg.ProxyIPACL != "" || cfg.ProxySecret != ""
+	pc := &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: 10 * time.Second,
+				Control: netguard.DialControl(blockPrivate),
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 15 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
+	bc := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: 10 * time.Second,
+				Control: netguard.DialControl(blockPrivate),
+			}).DialContext,
+		},
+	}
 	return &server{
-		em:        em,
-		ss:        ss,
-		prober:    prober,
-		cfg:       cfg,
-		logReq:    os.Getenv("STREMIO_HTTP_LOG") != "",
-		accessLog: logging.For("http"),
-		sp:        streamproxy.New(buildStreamProxyConfig(cfg)),
+		em:          em,
+		ss:          ss,
+		prober:      prober,
+		cfg:         cfg,
+		logReq:      os.Getenv("STREMIO_HTTP_LOG") != "",
+		accessLog:   logging.For("http"),
+		sp:          streamproxy.New(buildStreamProxyConfig(cfg, pc)),
+		proxyClient: pc,
+		blobClient:  bc,
 	}
 }
 
@@ -94,12 +120,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hdr["Access-Control-Allow-Origin"] = corsAllowOrigin
 	hdr["Access-Control-Expose-Headers"] = corsExposeHeaders
 	if r.Method == http.MethodOptions {
-		h := r.Header.Get("Access-Control-Request-Headers")
-		if h == "" {
-			h = "Range"
-		}
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", h)
+		w.Header().Set("Access-Control-Allow-Headers", "Range, Content-Type, Accept, Authorization")
 		w.Header().Set("Access-Control-Max-Age", "1728000")
 		w.WriteHeader(http.StatusOK)
 		return
@@ -568,12 +590,14 @@ func parseRange(h string, length int64) (start, end int64, ok bool, unsatisfiabl
 	}
 	end = length - 1
 	if endS != "" {
-		if e, err := strconv.ParseInt(endS, 10, 64); err == nil {
-			if e < s {
-				return 0, 0, false, true // end < start → 416
-			}
-			end = e
+		e, err := strconv.ParseInt(endS, 10, 64)
+		if err != nil {
+			return 0, 0, false, false // malformed end token → treat header as absent (RFC 7233)
 		}
+		if e < s {
+			return 0, 0, false, true // end < start → 416
+		}
+		end = e
 	}
 	if end >= length {
 		end = length - 1
@@ -670,7 +694,20 @@ func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 	case body.Blob != "":
 		raw, err = hexDecode(body.Blob)
 	case strings.HasPrefix(body.From, "http://") || strings.HasPrefix(body.From, "https://"):
-		raw, err = httpGet(body.From)
+		if verr := s.sp.ValidateDest(body.From); verr != nil {
+			http.Error(w, "forbidden target", http.StatusForbidden)
+			return
+		}
+		var blobResp *http.Response
+		blobResp, err = s.blobClient.Get(body.From)
+		if err == nil {
+			defer func() { _ = blobResp.Body.Close() }()
+			if blobResp.StatusCode != http.StatusOK {
+				err = fmt.Errorf("GET %s: status %d", body.From, blobResp.StatusCode)
+			} else {
+				raw, err = io.ReadAll(io.LimitReader(blobResp.Body, 16<<20))
+			}
+		}
 	case body.From != "":
 		http.Error(w, "from: only http/https URLs are accepted", http.StatusBadRequest)
 		return
@@ -1301,18 +1338,6 @@ func errStr(err error) any {
 	return nil
 }
 
-// proxyClient handles /proxy reverse-proxy requests (no timeout for streaming).
-var proxyClient = &http.Client{
-	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: 10 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
-	},
-}
-
 // streamBufPool holds reusable 256 KB buffers for streaming copies.
 var streamBufPool = sync.Pool{
 	New: func() any {
@@ -1325,7 +1350,7 @@ var streamBufPool = sync.Pool{
 var getClient = &http.Client{Timeout: 30 * time.Second}
 
 // buildStreamProxyConfig converts types.Config proxy fields to a streamproxy.Config.
-func buildStreamProxyConfig(cfg types.Config) streamproxy.Config {
+func buildStreamProxyConfig(cfg types.Config, client *http.Client) streamproxy.Config {
 	// Decode ProxySecret: try hex then base64url then base64std.
 	var secret []byte
 	if cfg.ProxySecret != "" {
@@ -1357,7 +1382,7 @@ func buildStreamProxyConfig(cfg types.Config) streamproxy.Config {
 		Prebuffer:     cfg.ProxyPrebuffer,
 		SegCacheTTL:   time.Duration(cfg.ProxySegCacheTTL) * time.Second,
 		PublicURL:     cfg.ProxyPublicURL,
-		Client:        proxyClient,
+		Client:        client,
 		UpstreamProxy: cfg.ProxyUpstream,
 	}
 }
@@ -1412,7 +1437,7 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 	if rng := r.Header.Get("Range"); rng != "" {
 		req.Header.Set("Range", rng)
 	}
-	resp, err := proxyClient.Do(req)
+	resp, err := s.proxyClient.Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

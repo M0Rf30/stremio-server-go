@@ -35,6 +35,12 @@ import (
 	"github.com/M0Rf30/stremio-server-go/internal/nzb"
 )
 
+// lz-string size guards — mirrors the limits used in archive.go and ftp.go.
+const (
+	nzbLzMaxEncoded = 1 << 20 // 1 MiB — max encoded ?lz= parameter length
+	nzbLzMaxDecoded = 8 << 20 // 8 MiB — max decompressed JSON length
+)
+
 // ---- session store ---------------------------------------------------------
 
 // nzbFileState tracks the assembly of a single file within a session.
@@ -166,9 +172,17 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 
 	// Accept either ?lz=<compressed> or a plain JSON body.
 	if lzParam := r.URL.Query().Get("lz"); lzParam != "" {
+		if len(lzParam) > nzbLzMaxEncoded {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "lz: encoded payload too large"})
+			return
+		}
 		jsonStr, err := lzstring.DecompressFromEncodedURIComponent(lzParam)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "lz: " + err.Error()})
+			return
+		}
+		if len(jsonStr) > nzbLzMaxDecoded {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "lz: decompressed payload too large"})
 			return
 		}
 		if err := json.Unmarshal([]byte(jsonStr), &req); err != nil {

@@ -45,7 +45,10 @@ func drmDecrypt(h *Handler, p DecryptParams, segment []byte) ([]byte, error) {
 		}
 		return drmDecryptCBC(p.Key, p.IV, segment)
 
-	case "SAMPLE-AES", "CENC", "CBCS":
+	case "SAMPLE-AES":
+		return nil, fmt.Errorf("SAMPLE-AES decryption is not supported")
+
+	case "CENC", "CBCS":
 		if len(p.Key) != 16 {
 			return nil, fmt.Errorf("%s: key must be 16 bytes, got %d", method, len(p.Key))
 		}
@@ -601,7 +604,7 @@ func drmParseSencWithIVSize(p []byte, count, ivSize int, hasSubs bool) ([]drmSen
 // drmParseBoxes parses ISO BMFF boxes from b, recursing into container boxes.
 // Returned boxes are in order; container children appear after the parent.
 func drmParseBoxes(b []byte) ([]drmBox, error) {
-	return drmParseBoxesAt(b, 0, len(b))
+	return drmParseBoxesAt(b, 0, len(b), 0)
 }
 
 // drmContainerTypes lists box types that contain child boxes.
@@ -618,7 +621,11 @@ var drmContainerTypes = map[string]bool{
 	"udta": true,
 }
 
-func drmParseBoxesAt(b []byte, startOffset, limit int) ([]drmBox, error) {
+func drmParseBoxesAt(b []byte, startOffset, limit, depth int) ([]drmBox, error) {
+	const maxBoxDepth = 32
+	if depth > maxBoxDepth {
+		return nil, fmt.Errorf("BMFF box nesting exceeds maximum depth (%d)", maxBoxDepth)
+	}
 	var boxes []drmBox
 	pos := 0
 	for pos < len(b) {
@@ -688,13 +695,11 @@ func drmParseBoxesAt(b []byte, startOffset, limit int) ([]drmBox, error) {
 
 		// Recurse into known containers.
 		if drmContainerTypes[boxType] {
-			children, err := drmParseBoxesAt(payload, startOffset+pos, len(payload))
+			children, err := drmParseBoxesAt(payload, startOffset+pos, len(payload), depth+1)
 			if err != nil {
-				// Non-fatal: container parse errors don't abort the whole walk.
-				_ = err
-			} else {
-				boxes = append(boxes, children...)
+				return boxes, fmt.Errorf("box %q at %d: child parse error: %w", boxType, box.Start, err)
 			}
+			boxes = append(boxes, children...)
 		}
 
 		pos = boxStart + boxSize

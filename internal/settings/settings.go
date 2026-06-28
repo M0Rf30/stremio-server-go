@@ -151,7 +151,7 @@ func (s *store) Save() error {
 
 	dst := filepath.Join(appPath, settingsFile)
 	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("settings: write temp: %w", err)
 	}
 	if err := os.Rename(tmp, dst); err != nil {

@@ -627,7 +627,7 @@ func (h *Handler) ValidateDest(rawurl string) error {
 	}
 
 	// The proxy is "protected" when any auth mechanism is active.
-	protected := h.cfg.Password != "" || len(h.cfg.IPACL) > 0
+	protected := h.cfg.Password != "" || len(h.cfg.IPACL) > 0 || len(h.cfg.Secret) > 0
 
 	for _, ip := range ips {
 		if isCloudMetadata(ip) {

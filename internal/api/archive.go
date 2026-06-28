@@ -74,6 +74,14 @@ const archiveMaxLZEncoded = 1 << 20 // 1 MiB
 // by lz-string decompression. Guards against decompression bombs.
 const archiveMaxLZDecoded = 8 << 20 // 8 MiB
 
+// archiveMaxEntryBytes is the maximum declared (uncompressed) size accepted
+// for a single archive entry during extraction. Entries claiming more than
+// this are rejected before any data is copied, preventing integer overflow
+// (declaredSize+1 wraps negative for values near math.MaxInt64) and unbounded
+// disk writes from malicious ZIP64/tar archives. 64 GiB is far beyond any
+// legitimate video entry seen in practice.
+const archiveMaxEntryBytes int64 = 64 << 30 // 64 GiB
+
 // archiveStartJanitor starts a background goroutine that evicts idle sessions.
 // It is started at most once, on the first incoming request.
 func archiveStartJanitor() {
@@ -89,9 +97,15 @@ func archiveStartJanitor() {
 }
 
 func archiveEvict() {
-	archiveSessionsMu.Lock()
-	defer archiveSessionsMu.Unlock()
+	type evictVictim struct {
+		tmpDir   string
+		archPath string
+		isTmp    bool
+	}
 	now := time.Now()
+	var victims []evictVictim
+
+	archiveSessionsMu.Lock()
 	for k, sess := range archiveSessions {
 		sess.mu.Lock()
 		idle := now.Sub(sess.lastAccess)
@@ -100,11 +114,18 @@ func archiveEvict() {
 		tmpDir := sess.tmpDir
 		sess.mu.Unlock()
 		if idle > archiveSessionTTL {
-			_ = os.RemoveAll(tmpDir)
-			if isTmp {
-				_ = os.Remove(archPath)
-			}
+			victims = append(victims, evictVictim{tmpDir: tmpDir, archPath: archPath, isTmp: isTmp})
 			delete(archiveSessions, k)
+		}
+	}
+	archiveSessionsMu.Unlock()
+
+	// Perform disk I/O outside the lock so concurrent archive handlers are not
+	// blocked while RemoveAll/Remove walk the filesystem.
+	for _, v := range victims {
+		_ = os.RemoveAll(v.tmpDir)
+		if v.isTmp {
+			_ = os.Remove(v.archPath)
 		}
 	}
 }
@@ -382,6 +403,11 @@ func archiveExtractEntry(sess *archiveSession, entryName string) (string, error)
 	if declaredSize < 0 {
 		return "", fmt.Errorf("entry %q not found in archive", entryName)
 	}
+	if declaredSize > archiveMaxEntryBytes {
+		// Reject before opening the entry to avoid unnecessary I/O; rc is not
+		// yet open at this point (r.Open is called below).
+		return "", fmt.Errorf("entry %q: declared size %d exceeds limit %d bytes", entryName, declaredSize, archiveMaxEntryBytes)
+	}
 
 	rc, err := r.Open(entryName)
 	if err != nil {
@@ -554,6 +580,11 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 		extracted:    make(map[string]string),
 	}
 	archiveSessionsMu.Lock()
+	if old, ok := archiveSessions[key]; ok && old.tmpDir != "" {
+		// A prior session used this key. Remove its temp dir asynchronously to
+		// avoid leaking disk space without blocking the lock.
+		go func(d string) { _ = os.RemoveAll(d) }(old.tmpDir)
+	}
 	archiveSessions[key] = sess
 	archiveSessionsMu.Unlock()
 

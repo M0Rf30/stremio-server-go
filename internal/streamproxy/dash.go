@@ -43,9 +43,13 @@ func dashServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
 	if err != nil {
 		http.Error(w, "read error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if len(body) > maxManifestBytes {
+		http.Error(w, "upstream manifest too large", http.StatusBadGateway)
 		return
 	}
 	out := dashRewrite(h, r, opts, body)

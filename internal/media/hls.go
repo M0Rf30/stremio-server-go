@@ -52,6 +52,17 @@ const (
 	// negProbeTTL is how long a failed or zero-duration ffprobe result is
 	// cached to prevent hammering a broken URL with repeated 30-second probes.
 	negProbeTTL = 5 * time.Minute
+	// maxConcurrentSessions is the hard cap on simultaneously registered HLS
+	// sessions.  Exceeding this limit returns an error to the caller so an
+	// unbounded number of goroutines and temp directories cannot be created.
+	maxConcurrentSessions = 64
+	// probeCacheMaxSize is the maximum number of entries kept in the negative
+	// probe cache.  Expired entries are swept on every insert; when the map
+	// still exceeds this limit the soonest-expiring entry is evicted.
+	probeCacheMaxSize = 512
+	// maxSegIdx is the hard upper bound on any caller-supplied segment index.
+	// 1<<18 == 262 144 segments × 4 s ≈ 12 days; far beyond any real media.
+	maxSegIdx = 1 << 18
 )
 
 // audioStream describes one audio track discovered by ffprobe.
@@ -413,6 +424,10 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
 	if !ok {
+		if len(m.sessions) >= maxConcurrentSessions {
+			m.mu.Unlock()
+			return "", fmt.Errorf("hls: too many concurrent sessions (limit %d)", maxConcurrentSessions)
+		}
 		s = &hlsSession{
 			mediaURL: mediaURL,
 			dir:      filepath.Join(m.base, id),
@@ -451,6 +466,8 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 					result:    res,
 					expiresAt: time.Now().Add(negProbeTTL),
 				}
+				// Prune expired / excess entries to bound cache size.
+				m.sweepProbeCache()
 			} else {
 				// Positive result — clear any stale negative entry for this URL.
 				delete(m.probeCache, mediaURL)
@@ -608,6 +625,7 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 	multiAudio := s.multiAudio
 	audioStreams := s.audioStreams
 	subtitleStreams := s.subtitleStreams
+	sessionDur := s.duration
 	s.mu.RUnlock()
 
 	// ── playlists ────────────────────────────────────────────────────────────
@@ -679,8 +697,13 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 
 	if strings.HasPrefix(name, "seg") && strings.HasSuffix(name, ".ts") {
 		n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, "seg"), ".ts"))
-		if err != nil {
+		if err != nil || n < 0 || n > maxSegIdx {
 			return "", "", fmt.Errorf("hls: bad segment %q", name)
+		}
+		if sessionDur > 0 {
+			if n >= int(math.Ceil(sessionDur/segDur)) {
+				return "", "", fmt.Errorf("hls: segment %d beyond media duration (%.0fs)", n, sessionDur)
+			}
 		}
 		kind := segMuxed
 		if multiAudio {
@@ -707,8 +730,13 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 			return "", "", fmt.Errorf("hls: bad audio segment %q", name)
 		}
 		n, err := strconv.Atoi(rest[segIdx+3:])
-		if err != nil {
+		if err != nil || n < 0 || n > maxSegIdx {
 			return "", "", fmt.Errorf("hls: bad audio segment number in %q", name)
+		}
+		if sessionDur > 0 {
+			if n >= int(math.Ceil(sessionDur/segDur)) {
+				return "", "", fmt.Errorf("hls: segment %d beyond media duration (%.0fs)", n, sessionDur)
+			}
 		}
 		p, err := m.transcodeSegment(ctx, s, n, segAudioOnly, k)
 		if err != nil {
@@ -1093,12 +1121,17 @@ func (m *hlsManager) CloseHLS() {
 	default:
 		close(m.stopCh)
 	}
+	var dirs []string
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, s := range m.sessions {
-		_ = os.RemoveAll(s.dir)
+		dirs = append(dirs, s.dir)
 	}
 	m.sessions = map[string]*hlsSession{}
+	m.mu.Unlock()
+	// RemoveAll outside the lock: disk I/O must not stall concurrent requests.
+	for _, dir := range dirs {
+		_ = os.RemoveAll(dir)
+	}
 }
 
 // reaper is the single background goroutine that evicts idle HLS sessions.
@@ -1120,6 +1153,7 @@ func (m *hlsManager) reaper() {
 // Deleting from a map during range is safe and defined in Go.
 func (m *hlsManager) evictIdle() {
 	cutoff := time.Now().Add(-sessionTTL)
+	var victims []string
 	m.mu.Lock()
 	for id, s := range m.sessions {
 		ts := s.lastAccess.Load()
@@ -1130,10 +1164,38 @@ func (m *hlsManager) evictIdle() {
 		}
 		if time.Unix(0, ts).Before(cutoff) {
 			delete(m.sessions, id)
-			_ = os.RemoveAll(s.dir)
+			victims = append(victims, s.dir)
 		}
 	}
 	m.mu.Unlock()
+	// RemoveAll outside the lock: disk I/O must not stall concurrent requests.
+	for _, dir := range victims {
+		_ = os.RemoveAll(dir)
+	}
+}
+
+// sweepProbeCache removes expired entries from the negative probe cache and,
+// when the size still exceeds probeCacheMaxSize after the TTL sweep, evicts
+// the entry with the smallest remaining TTL.  Must be called with m.mu held.
+func (m *hlsManager) sweepProbeCache() {
+	now := time.Now()
+	for k, e := range m.probeCache {
+		if now.After(e.expiresAt) {
+			delete(m.probeCache, k)
+		}
+	}
+	// Hard size cap: evict soonest-expiring entry until under limit.
+	for len(m.probeCache) > probeCacheMaxSize {
+		var evict string
+		var evictExp time.Time
+		for k, e := range m.probeCache {
+			if evict == "" || e.expiresAt.Before(evictExp) {
+				evict = k
+				evictExp = e.expiresAt
+			}
+		}
+		delete(m.probeCache, evict)
+	}
 }
 
 func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', 3, 64) }

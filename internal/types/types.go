@@ -152,25 +152,29 @@ type SwarmCap struct {
 // Field names and JSON tags MUST match exactly. Per-file (idx>=0) fields are
 // pointers so they are omitted at torrent level.
 type Stats struct {
-	InfoHash         string      `json:"infoHash"`
-	Name             string      `json:"name"`
-	Peers            int         `json:"peers"`
-	Unchoked         int         `json:"unchoked"`
-	Queued           int         `json:"queued"`
-	Unique           int         `json:"unique"`
-	ConnectionTries  int         `json:"connectionTries"`
-	SwarmPaused      bool        `json:"swarmPaused"`
-	SwarmConnections int         `json:"swarmConnections"`
-	SwarmSize        int         `json:"swarmSize"`
-	Selections       interface{} `json:"selections"`
-	Wires            []Wire      `json:"wires"`
-	Files            []FileInfo  `json:"files"`
-	Downloaded       int64       `json:"downloaded"`
-	Uploaded         int64       `json:"uploaded"`
-	DownloadSpeed    float64     `json:"downloadSpeed"`
-	UploadSpeed      float64     `json:"uploadSpeed"`
-	Sources          interface{} `json:"sources"`
-	Opts             interface{} `json:"opts"`
+	InfoHash         string `json:"infoHash"`
+	Name             string `json:"name"`
+	Peers            int    `json:"peers"`
+	Unchoked         int    `json:"unchoked"`
+	Queued           int    `json:"queued"`
+	Unique           int    `json:"unique"`
+	ConnectionTries  int    `json:"connectionTries"`
+	SwarmPaused      bool   `json:"swarmPaused"`
+	SwarmConnections int    `json:"swarmConnections"`
+	SwarmSize        int    `json:"swarmSize"`
+	// Selections holds piece-selection ranges (null or an array). The element
+	// shape is anacrolix-internal and never populated by the engine today, so
+	// []any preserves the null/empty-array wire semantics without constraining
+	// the unknown element type.
+	Selections    []any      `json:"selections"`
+	Wires         []Wire     `json:"wires"`
+	Files         []FileInfo `json:"files"`
+	Downloaded    int64      `json:"downloaded"`
+	Uploaded      int64      `json:"uploaded"`
+	DownloadSpeed float64    `json:"downloadSpeed"`
+	UploadSpeed   float64    `json:"uploadSpeed"`
+	Sources       []Source   `json:"sources"`
+	Opts          Options    `json:"opts"`
 	// PeerSearchRunning is REQUIRED (non-null) by stremio-core's Statistics.
 	PeerSearchRunning bool `json:"peerSearchRunning"`
 

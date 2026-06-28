@@ -316,7 +316,16 @@ func (s *server) castingStop(w http.ResponseWriter, client *av1.AVTransport1, de
 // castingSeek sends Seek(Unit=REL_TIME, Target=HH:MM:SS).
 // The "time" query/form param is seconds (int or float).
 func (s *server) castingSeek(w http.ResponseWriter, client *av1.AVTransport1, dev *CastingDevice, params url.Values) {
-	secs, _ := strconv.ParseFloat(params.Get("time"), 64)
+	rawTime := params.Get("time")
+	if rawTime == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing or invalid time parameter"})
+		return
+	}
+	secs, err := strconv.ParseFloat(rawTime, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing or invalid time parameter"})
+		return
+	}
 	target := secsToHHMMSS(secs)
 	ctx, cancel := context.WithTimeout(context.Background(), soapTimeout)
 	defer cancel()

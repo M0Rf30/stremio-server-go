@@ -6,6 +6,12 @@ import (
 	"sort"
 )
 
+// nzbDefaultMaxBytes is the write-cap applied when the NZB declares no segment
+// sizes (or their sum is non-positive). 50 GiB comfortably covers the largest
+// legitimate Usenet releases while still preventing disk exhaustion from
+// adversarial or corrupt NZB data.
+const nzbDefaultMaxBytes = 50 << 30
+
 // limitedWriter wraps an io.Writer and returns an error if the total bytes
 // written would exceed limit. A limit of 0 disables the cap.
 type limitedWriter struct {
@@ -83,11 +89,14 @@ func (sess *Session) AssembleFile(name string, dst io.Writer) error {
 		return segs[i].Number < segs[j].Number
 	})
 
-	// Wrap dst with a size cap to prevent writing beyond the declared file size.
-	w := dst
-	if target.Size > 0 {
-		w = &limitedWriter{w: dst, limit: target.Size}
+	// Always wrap dst with a size cap to prevent disk exhaustion.
+	// When the NZB omits or zeroes segment sizes (target.Size ≤ 0), fall back
+	// to nzbDefaultMaxBytes so the cap is never disabled by missing metadata.
+	capBytes := target.Size
+	if capBytes <= 0 {
+		capBytes = nzbDefaultMaxBytes
 	}
+	w := &limitedWriter{w: dst, limit: capBytes}
 
 	for _, seg := range segs {
 		if err := c.Body(seg.MessageID, w); err != nil {

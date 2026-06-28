@@ -280,11 +280,42 @@ func TestApplyDHTBootstrap(t *testing.T) {
 	})
 }
 
-// TestFetchTrackerListProxyFallback confirms that an invalid proxy URL causes
-// fetchTrackerList to fall back to a direct HTTP client and still parse the
-// response successfully. Uses httptest.Server — no external network needed.
+// TestFetchTrackerListProxyFallback verifies two things:
+//  1. newTrackerClient encapsulates the proxy-fallback logic: an invalid proxy
+//     URL ("://bad") and an empty proxy URL both yield a direct client (nil Proxy
+//     on the transport), while a valid URL sets a non-nil Proxy.
+//  2. fetchTrackerList using the fallback client still fetches and parses the
+//     tracker list from a local httptest.Server — no external network needed.
 func TestFetchTrackerListProxyFallback(t *testing.T) {
 	t.Parallel()
+
+	// --- 1. newTrackerClient proxy-fallback unit assertions ---
+
+	// Invalid proxy URL: url.Parse("://bad") errors → no proxy set.
+	hcBad := newTrackerClient("://bad")
+	if tr, ok := hcBad.Transport.(*http.Transport); !ok {
+		t.Fatal("newTrackerClient(\"://bad\"): Transport is not *http.Transport")
+	} else if tr.Proxy != nil {
+		t.Error("newTrackerClient(\"://bad\"): expected nil Proxy (direct fallback), got non-nil")
+	}
+
+	// Empty proxy URL: no proxy attempt at all → no proxy set.
+	hcEmpty := newTrackerClient("")
+	if tr, ok := hcEmpty.Transport.(*http.Transport); !ok {
+		t.Fatal("newTrackerClient(\"\"): Transport is not *http.Transport")
+	} else if tr.Proxy != nil {
+		t.Error("newTrackerClient(\"\"): expected nil Proxy, got non-nil")
+	}
+
+	// Valid proxy URL: proxy is set.
+	hcGood := newTrackerClient("http://proxy.example.com:8080")
+	if tr, ok := hcGood.Transport.(*http.Transport); !ok {
+		t.Fatal("newTrackerClient(valid): Transport is not *http.Transport")
+	} else if tr.Proxy == nil {
+		t.Error("newTrackerClient(valid): expected non-nil Proxy, got nil")
+	}
+
+	// --- 2. fetchTrackerList fetch+parse coverage ---
 
 	const trackerList = "udp://tracker.example.com:6969/announce\nudp://open.tracker.example:1337/announce\n"
 
@@ -294,9 +325,9 @@ func TestFetchTrackerListProxyFallback(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// "://bad" has an empty scheme — url.Parse returns an error in fetchTrackerList,
-	// which falls back to a plain direct transport and still fetches successfully.
-	got := fetchTrackerList(srv.URL, "://bad")
+	// Use a client built with the invalid proxy URL; it falls back to direct and
+	// must still reach the local httptest server and parse the response correctly.
+	got := fetchTrackerList(srv.URL, newTrackerClient("://bad"))
 	if len(got) == 0 {
 		t.Fatal("expected at least one tracker URL, got empty slice (proxy fallback failed?)")
 	}

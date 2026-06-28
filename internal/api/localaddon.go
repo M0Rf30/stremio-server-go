@@ -155,9 +155,15 @@ func parseFilenameToMeta(stem string) parsedFilename {
 // — IMDB resolution cache —
 
 type imdbEntry struct {
-	TTID   string // "" means lookup ran but found no match
-	Poster string // IMDB poster image URL
+	TTID       string    // "" means lookup ran but found no match
+	Poster     string    // IMDB poster image URL
+	resolvedAt time.Time // when the last lookup completed (zero for old/missing entries)
 }
+
+// imdbNegativeTTL is how long a failed IMDb lookup is cached before the resolver
+// is allowed to retry it. This prevents hammering the API every scan cycle for
+// files whose titles do not resolve.
+const imdbNegativeTTL = 24 * time.Hour
 
 var (
 	imdbCacheMu sync.RWMutex
@@ -315,9 +321,12 @@ func ensureIMDBResolved(localHex, title string, year int, ctype, absPath string)
 		return
 	}
 	imdbCacheMu.RLock()
-	_, done := imdbByLocal[localHex]
+	e, done := imdbByLocal[localHex]
 	imdbCacheMu.RUnlock()
-	if done {
+	// Treat a recently-failed lookup as done to avoid retrying every scan cycle.
+	// A successful lookup (e.TTID != "") is permanently cached; a failed one is
+	// retried after imdbNegativeTTL has elapsed.
+	if done && (e.TTID != "" || time.Since(e.resolvedAt) < imdbNegativeTTL) {
 		return
 	}
 
@@ -340,11 +349,13 @@ func ensureIMDBResolved(localHex, title string, year int, ctype, absPath string)
 
 		ttID, poster := resolveIMDB(title, year, ctype)
 
-		if ttID != "" {
-			imdbCacheMu.Lock()
-			imdbByLocal[localHex] = imdbEntry{TTID: ttID, Poster: poster}
-			imdbCacheMu.Unlock()
+		// Always record the attempt so we don't re-fire on every scan cycle.
+		// On success also register the reverse tt→path mapping.
+		imdbCacheMu.Lock()
+		imdbByLocal[localHex] = imdbEntry{TTID: ttID, Poster: poster, resolvedAt: time.Now()}
+		imdbCacheMu.Unlock()
 
+		if ttID != "" {
 			ttPathMu.Lock()
 			ttToPath[ttID] = absPath
 			ttPathMu.Unlock()

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,9 +54,37 @@ const (
 )
 
 var (
-	cineMetaMu    sync.Mutex
-	cineMetaCache = map[string]cineMetaEntry{}
+	cineMetaMu          sync.Mutex
+	cineMetaCache       = map[string]cineMetaEntry{}
+	cineMetaJanitorOnce sync.Once
 )
+
+// cineMetaEvict deletes expired entries from cineMetaCache.
+// Must be called with cineMetaMu held.
+func cineMetaEvict() {
+	now := time.Now()
+	for k, e := range cineMetaCache {
+		if now.After(e.expires) {
+			delete(cineMetaCache, k)
+		}
+	}
+}
+
+// cineMetaStartJanitor starts a background goroutine (once) that evicts
+// expired Cinemeta cache entries every cineMetaTTL period.
+func cineMetaStartJanitor() {
+	cineMetaJanitorOnce.Do(func() {
+		go func() {
+			tick := time.NewTicker(cineMetaTTL)
+			defer tick.Stop()
+			for range tick.C {
+				cineMetaMu.Lock()
+				cineMetaEvict()
+				cineMetaMu.Unlock()
+			}
+		}()
+	})
+}
 
 // ---- GraphQL request/response types (local to this file) ------------------
 
@@ -333,8 +362,8 @@ func resolveCinemeta(r *http.Request, base, contentType, imdbID string) (name st
 	}
 	cineMetaMu.Unlock()
 
-	url := strings.TrimRight(base, "/") + "/meta/" + contentType + "/" + imdbID + ".json"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	metaURL := strings.TrimRight(base, "/") + "/meta/" + url.PathEscape(contentType) + "/" + url.PathEscape(imdbID) + ".json"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, metaURL, nil)
 	if err != nil {
 		return "", 0
 	}
@@ -373,9 +402,11 @@ func resolveCinemeta(r *http.Request, base, contentType, imdbID string) (name st
 
 	if name != "" {
 		cineMetaMu.Lock()
+		cineMetaEvict() // opportunistic sweep on insert
 		cineMetaCache[cacheKey] = cineMetaEntry{name: name, year: year, expires: time.Now().Add(cineMetaTTL)}
 		cineMetaMu.Unlock()
 	}
+	cineMetaStartJanitor()
 
 	return name, year
 }

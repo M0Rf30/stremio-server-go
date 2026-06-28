@@ -173,7 +173,13 @@ func (c *Client) Body(messageID string, w io.Writer) error {
 
 	// DotReader handles dot-unstuffing of the dot-terminated article body.
 	dr := c.tp.DotReader()
-	return DecodeYenc(dr, w)
+	err := DecodeYenc(dr, w)
+	// Drain any unread bytes so the connection is left at a clean command
+	// boundary regardless of how DecodeYenc exited (early =yend return,
+	// write error, etc.). Without this, leftover body bytes would be read
+	// as the next server response, silently desyncing the protocol stream.
+	_, _ = io.Copy(io.Discard, dr)
+	return err
 }
 
 // Close sends QUIT and closes the underlying connection.

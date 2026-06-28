@@ -284,31 +284,30 @@ func (mp *memPiece) ReadAt(b []byte, off int64) (int, error) {
 	evicted := mp.data == nil
 	s.mu.Unlock()
 
-	// Any zero-byte read of a piece anacrolix may still consider present — its
-	// bytes were evicted to stay within budget, or the requested offset is at/
-	// past our piece end — would make anacrolix's reader.readAt spin-retry the
-	// read forever under a capped storage (BEP "hasStorageCap" recursion), i.e.
-	// a stack overflow, because the piece keeps reading as available. Force a
-	// real re-download (VerifyData re-hashes the piece; for evicted bytes the
-	// hash fails, which clears the piece's dirty chunks and re-requests it) and
-	// rate-limit the retry so the reader blocks for the refetch instead of
-	// recursing without bound. refetch is nil in the direct unit tests, which
-	// then observe the bare error returns below.
+	// Handle non-eviction cases immediately — no refetch or sleep needed.
+	if off < 0 {
+		return 0, errors.New("engine: memstorage: negative offset")
+	}
+	if !evicted {
+		// Resident piece, offset at/past piece end — legitimate EOF; the
+		// read is satisfied and anacrolix will not spin on this path.
+		// Returning immediately avoids a spurious VerifyData call and the
+		// 100 ms backoff that were incorrectly applied to this branch.
+		return 0, io.EOF
+	}
+	// Only the genuine evicted-piece case reaches here.  Force a
+	// re-download: VerifyData re-hashes the (now empty) piece, the hash
+	// fails, anacrolix clears the piece's dirty-chunk bitmap and
+	// re-requests it, so reader.readAt blocks on the re-fetch instead of
+	// recursing into a stack overflow.  The short sleep rate-limits the
+	// retry until the refetch lands.
 	if refetch != nil {
 		refetch(ih, idx)
 		if backoff > 0 {
 			time.Sleep(backoff)
 		}
 	}
-	switch {
-	case off < 0:
-		return 0, errors.New("engine: memstorage: negative offset")
-	case evicted:
-		return 0, errPieceEvicted
-	default:
-		// Resident, but the requested offset is at/after the piece end.
-		return 0, io.EOF
-	}
+	return 0, errPieceEvicted
 }
 
 // MarkComplete records that anacrolix verified the piece hash. The piece becomes

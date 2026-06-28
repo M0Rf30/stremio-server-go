@@ -636,12 +636,14 @@ func TestMemStorageEvictedReadTriggersRefetch(t *testing.T) {
 	}
 }
 
-// TestMemStoragePastEndReadTriggersRefetch covers the stack-overflow guard for a
-// RESIDENT, complete piece read at/after its end. anacrolix can spin-retry such
-// a zero-byte read forever under a capped storage; ReadAt must funnel it through
-// the same refetch+backoff guard (still returning io.EOF) so the retry is
-// bounded instead of recursing without limit.
-func TestMemStoragePastEndReadTriggersRefetch(t *testing.T) {
+// TestMemStoragePastEndReadNoRefetch verifies that a RESIDENT, complete piece
+// read at/after its end returns the standard (0, io.EOF) io.ReaderAt result
+// WITHOUT invoking the refetch+backoff guard. io.EOF is terminal, so anacrolix
+// does not spin on it; firing refetch (and the 100 ms backoff) on this branch
+// would add a spurious VerifyData call and latency to every legitimate
+// end-of-piece read. The refetch guard is reserved for genuinely evicted
+// pieces (covered by TestMemStorageEvictedReadTriggersRefetch).
+func TestMemStoragePastEndReadNoRefetch(t *testing.T) {
 	const pieceLen = 256
 	info := syntheticInfo(pieceLen, 2)
 	s := newMemStorage(pieceLen * 2)
@@ -681,14 +683,14 @@ func TestMemStoragePastEndReadTriggersRefetch(t *testing.T) {
 	if n, err := p.ReadAt(make([]byte, 16), 0); n != 16 || err != nil {
 		t.Fatalf("in-bounds ReadAt = (%d, %v), want (16, nil)", n, err)
 	}
-	// Read at the piece end: zero bytes, io.EOF, and the guard fires.
+	// Read at the piece end: standard zero-byte io.EOF, and NO refetch fires.
 	if n, err := p.ReadAt(make([]byte, 16), pieceLen); n != 0 || !errors.Is(err, io.EOF) {
 		t.Fatalf("past-end ReadAt = (%d, %v), want (0, io.EOF)", n, err)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(calls) != 1 || calls[0].ih != ih || calls[0].piece != 1 {
-		t.Fatalf("refetch calls = %+v, want one {%x, 1}", calls, ih)
+	if len(calls) != 0 {
+		t.Fatalf("resident past-end read must not refetch; got calls = %+v", calls)
 	}
 }

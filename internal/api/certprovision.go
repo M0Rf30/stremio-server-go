@@ -162,34 +162,84 @@ func parseCertResult(result json.RawMessage) (certPEM, keyPEM, commonName string
 	return certPEM, keyPEM, commonName, nil
 }
 
-// installCertFiles writes cert and key atomically: both are written to temp
-// files first, then renamed into place. If the key rename fails, the cert
-// rename is rolled back so certPath and keyPath are never left as a mismatched
-// or missing pair.
+// installCertFiles writes cert and key atomically with safe rollback. Any
+// existing cert/key files are renamed to .bak siblings before the new files
+// are written; on any failure the backups are restored so the
+// previously-installed cert/key remain intact. On success the backups are
+// removed. Both files are written with mode 0600.
 func installCertFiles(appPath, certPEM, keyPEM string) error {
 	certPath := filepath.Join(appPath, "https-cert.pem")
 	keyPath := filepath.Join(appPath, "https-key.pem")
+	certBak := certPath + ".bak"
+	keyBak := keyPath + ".bak"
 
+	// Track which backups exist so restore knows what to put back.
+	certBacked := false
+	keyBacked := false
+
+	// restore moves backup files back to their original paths; used on any
+	// failure after backups have been created.
+	restore := func() {
+		if certBacked {
+			_ = os.Rename(certBak, certPath)
+		}
+		if keyBacked {
+			_ = os.Rename(keyBak, keyPath)
+		}
+	}
+
+	// Back up existing cert (if any) before touching certPath.
+	if _, err := os.Lstat(certPath); err == nil {
+		if err := os.Rename(certPath, certBak); err != nil {
+			return perr(http.StatusInternalServerError, "backup https-cert.pem: %v", err)
+		}
+		certBacked = true
+	}
+
+	// Back up existing key (if any) before touching keyPath.
+	if _, err := os.Lstat(keyPath); err == nil {
+		if err := os.Rename(keyPath, keyBak); err != nil {
+			restore()
+			return perr(http.StatusInternalServerError, "backup https-key.pem: %v", err)
+		}
+		keyBacked = true
+	}
+
+	// Write new cert to a temp file (mode 0600 via writeTempPEM).
 	certTmp, err := writeTempPEM(appPath, "https-cert-*.pem", certPEM)
 	if err != nil {
+		restore()
 		return perr(http.StatusInternalServerError, "write https-cert.pem: %v", err)
 	}
+
+	// Write new key to a temp file (mode 0600 via writeTempPEM).
 	keyTmp, err := writeTempPEM(appPath, "https-key-*.pem", keyPEM)
 	if err != nil {
 		_ = os.Remove(certTmp)
+		restore()
 		return perr(http.StatusInternalServerError, "write https-key.pem: %v", err)
 	}
+
+	// Rename cert temp into place.
 	if err := os.Rename(certTmp, certPath); err != nil {
 		_ = os.Remove(certTmp)
 		_ = os.Remove(keyTmp)
+		restore()
 		return perr(http.StatusInternalServerError, "install https-cert.pem: %v", err)
 	}
+
+	// Rename key temp into place. On failure, remove the newly-installed cert
+	// so restore() can put the original cert back in its place cleanly.
 	if err := os.Rename(keyTmp, keyPath); err != nil {
-		_ = os.Rename(certPath, certTmp) // roll back cert rename: move new cert off certPath
-		_ = os.Remove(certTmp)           // clean up cert temp
-		_ = os.Remove(keyTmp)            // clean up key temp
+		_ = os.Remove(certPath)
+		_ = os.Remove(keyTmp)
+		restore()
 		return perr(http.StatusInternalServerError, "install https-key.pem: %v", err)
 	}
+
+	// Success: remove backup siblings.
+	_ = os.Remove(certBak)
+	_ = os.Remove(keyBak)
 	return nil
 }
 

@@ -184,6 +184,16 @@ func (m *manager) refetchPiece(ih metainfo.Hash, piece int) {
 	}
 	go func() {
 		defer m.refetching.Delete(rk)
+		// Guard: re-check the engine is still active before calling
+		// VerifyData. A torrent that has been Drop()ped must not be used;
+		// pointer identity avoids a false-positive when the same infohash
+		// is re-added as a new engine after a drop.
+		m.mu.RLock()
+		current := m.engines[key]
+		m.mu.RUnlock()
+		if current != e {
+			return
+		}
 		_ = e.t.Piece(piece).VerifyData()
 	}()
 }
@@ -314,8 +324,9 @@ func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.En
 	// Fast path: already exists.
 	m.mu.RLock()
 	if e, ok := m.engines[ih]; ok {
+		t := e.t // read e.t under RLock before releasing
 		m.mu.RUnlock()
-		mergeTrackers(e.t, opts, !m.cfg.DisableWebtorrent)
+		mergeTrackers(t, opts, !m.cfg.DisableWebtorrent)
 		return e, nil
 	}
 	m.mu.RUnlock()
@@ -619,9 +630,12 @@ func (m *manager) evict(budget int64) {
 		}
 		ent.e.t.Drop()
 		delete(m.engines, ih)
-		m.mu.Unlock()
-		// Remove cached data from disk outside the write lock.
+		// Remove cache dir while holding the write lock: a concurrent
+		// EnsureEngine for the same infohash cannot recreate the directory
+		// until we release, so RemoveAll cannot delete a freshly re-added
+		// engine's cache data.
 		_ = os.RemoveAll(ent.e.path)
+		m.mu.Unlock()
 		total -= ent.size
 		logging.For("engine").Info("evicted torrent", "info_hash", ih, "freed_bytes", ent.size, "budget_bytes", budget)
 	}
@@ -673,8 +687,11 @@ func (m *manager) evictIdle(idle time.Duration) {
 		}
 		e.t.Drop()
 		delete(m.engines, ih)
-		m.mu.Unlock()
+		// Same TOCTOU guard as evict: remove under the write lock so a
+		// concurrent EnsureEngine cannot have its freshly created cache
+		// directory deleted by this deferred RemoveAll.
 		_ = os.RemoveAll(e.path)
+		m.mu.Unlock()
 		logging.For("engine").Info("removed idle torrent", "info_hash", ih, "idle_for", idleFor.Round(time.Second).String())
 	}
 }

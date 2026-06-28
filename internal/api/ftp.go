@@ -26,6 +26,14 @@ import (
 	"github.com/M0Rf30/stremio-server-go/internal/ftpstream"
 )
 
+// ftpMaxLZEncoded is the maximum accepted byte length of a raw ?lz= query
+// value before decompression. Prevents memory blowup before decode begins.
+const ftpMaxLZEncoded = 1 << 20 // 1 MiB
+
+// ftpMaxLZDecoded is the maximum byte length of the JSON string produced
+// by lz-string decompression. Guards against decompression bombs.
+const ftpMaxLZDecoded = 8 << 20 // 8 MiB
+
 // ftpPayload is the JSON structure carried in the lz-encoded query parameter.
 type ftpPayload struct {
 	FtpURL string `json:"ftpUrl"`
@@ -84,11 +92,23 @@ func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string)
 		})
 		return
 	}
+	if len(lzParam) > ftpMaxLZEncoded {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": fmt.Sprintf("lz param too large (%d bytes; limit %d)", len(lzParam), ftpMaxLZEncoded),
+		})
+		return
+	}
 
 	jsonStr, err := lzstring.DecompressFromEncodedURIComponent(lzParam)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": "lz decode error: " + err.Error(),
+		})
+		return
+	}
+	if len(jsonStr) > ftpMaxLZDecoded {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": fmt.Sprintf("lz decoded payload too large (%d bytes; limit %d)", len(jsonStr), ftpMaxLZDecoded),
 		})
 		return
 	}

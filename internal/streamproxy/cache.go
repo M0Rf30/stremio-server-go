@@ -3,6 +3,7 @@ package streamproxy
 import (
 	"container/list"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/http"
@@ -112,6 +113,28 @@ func (c *segCache) getFull(key string) *cacheEntry {
 	return entry
 }
 
+// cacheKey derives a cache lookup key from the raw URL plus any credential
+// headers present in hdr. Authorization and Cookie are folded in so that
+// two requests for the same URL but different credentials never collide.
+// The result is a hex-encoded SHA-256 digest, safe to use as a map key.
+func cacheKey(rawurl string, hdr http.Header) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(rawurl))
+	// Include auth-relevant request headers to prevent cross-credential cache
+	// poisoning. Use NUL/colon separators so a crafted URL cannot produce the
+	// same hash as a URL-plus-header combination.
+	for _, name := range []string{"Authorization", "Cookie"} {
+		vs := hdr[http.CanonicalHeaderKey(name)]
+		if len(vs) > 0 {
+			_, _ = fmt.Fprintf(h, "\x00%s:", name)
+			for _, v := range vs {
+				_, _ = fmt.Fprintf(h, "%s\x01", v)
+			}
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 // cachedFetch fetches rawurl, using the segment cache when configured.
 // Returns body, response headers, HTTP status, and any error.
 func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Header, proxyURL string) ([]byte, http.Header, int, error) {
@@ -134,7 +157,7 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 	}
 
 	// Cache hit.
-	if entry := h.cache.getFull(rawurl); entry != nil {
+	if entry := h.cache.getFull(cacheKey(rawurl, hdr)); entry != nil {
 		outHdr := make(http.Header)
 		if entry.hdr != nil {
 			for k, vs := range entry.hdr {
@@ -163,7 +186,7 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 			fmt.Errorf("upstream segment too large to cache (> %d bytes)", maxSegmentBytes)
 	}
 	if resp.StatusCode == http.StatusOK {
-		h.cache.putFull(rawurl, data, resp.Header.Clone(), resp.StatusCode)
+		h.cache.putFull(cacheKey(rawurl, hdr), data, resp.Header.Clone(), resp.StatusCode)
 	}
 	return data, resp.Header, resp.StatusCode, nil
 }

@@ -11,6 +11,11 @@ import (
 // hlsURIAttrRe matches the URI="..." attribute within an HLS tag line.
 var hlsURIAttrRe = regexp.MustCompile(`URI="([^"]*)"`)
 
+// maxManifestBytes is the maximum number of bytes accepted from an upstream
+// manifest (HLS playlist or MPEG-DASH MPD). Manifests larger than this are
+// rejected to prevent OOM from attacker-controlled upstreams.
+const maxManifestBytes = 16 << 20 // 16 MiB
+
 func init() {
 	hlsHandler = hlsServe
 }
@@ -40,9 +45,13 @@ func hlsServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
 	if err != nil {
 		http.Error(w, "reading upstream response failed", http.StatusBadGateway)
+		return
+	}
+	if len(body) > maxManifestBytes {
+		http.Error(w, "upstream manifest too large", http.StatusBadGateway)
 		return
 	}
 	if h.cfg.Prebuffer > 0 {

@@ -12,13 +12,30 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jlaffaye/ftp"
+
+	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 )
+
+// httpGuardedClient is a package-level HTTP client whose dialer rejects the
+// cloud-metadata address (169.254.169.254) at connect time, matching the
+// localhost-trust posture of the proxy (private/LAN targets remain reachable so
+// a trusted local caller can stream from a NAS or LAN host). Reused to pool conns.
+var httpGuardedClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 10 * time.Second,
+			Control: netguard.DialControl(false),
+		}).DialContext,
+	},
+}
 
 // ftpParsed holds the components extracted from an ftp:// or ftps:// URL.
 type ftpParsed struct {
@@ -151,7 +168,7 @@ func openHTTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, 
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpGuardedClient.Do(req)
 	if err != nil {
 		return nil, -1, fmt.Errorf("ftpstream: GET %s: %w", rawURL, err)
 	}

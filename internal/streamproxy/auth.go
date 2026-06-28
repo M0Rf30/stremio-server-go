@@ -54,6 +54,16 @@ func (h *Handler) authorize(r *http.Request) error {
 		if t.Endpoint != "" && t.Endpoint != r.URL.Path {
 			return errUnauthorized
 		}
+		// Bind token to its sealed query parameters. An empty Params map
+		// imposes no constraint (legacy tokens), mirroring the Endpoint check.
+		if len(t.Params) > 0 {
+			q := r.URL.Query()
+			for k, v := range t.Params {
+				if q.Get(k) != v {
+					return errUnauthorized
+				}
+			}
+		}
 		return nil
 	}
 

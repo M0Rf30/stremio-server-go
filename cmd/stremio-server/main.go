@@ -167,7 +167,7 @@ func main() {
 		TorznabURL:        getenv("STREMIO_TORZNAB_URL", ""),
 		TorznabAPIKey:     getenv("STREMIO_TORZNAB_APIKEY", ""),
 		MetadataURL:       metadataURL(),                               // Cinemeta-compatible meta addon base; "" disables (STREMIO_METADATA_URL)
-		DisableTrackers:   os.Getenv("STREMIO_DISABLE_TRACKERS") != "", // disable all tracker announces (DHT/PEX/webseeds still used)
+		DisableTrackers:   envBool("STREMIO_DISABLE_TRACKERS", false),  // disable all tracker announces (DHT/PEX/webseeds still used); accepts 1/true/0/false
 		DisableWebtorrent: envBool("STREMIO_DISABLE_WEBTORRENT", true), // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers
 		EnableDLNA:        envBool("STREMIO_ENABLE_DLNA", false),       // default disabled; set =1/true to enable /casting DLNA discovery + control
 		PeersPerTorrent:   envInt("STREMIO_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
@@ -369,7 +369,7 @@ func main() {
 				Addr:              fmt.Sprintf(":%d", cfg.HTTPSPort),
 				Handler:           handler,
 				ReadHeaderTimeout: 10 * time.Second,
-				TLSConfig:         &tls.Config{GetCertificate: holder.get},
+				TLSConfig:         &tls.Config{GetCertificate: holder.get, MinVersion: tls.VersionTLS12},
 			}
 			go func() {
 				logging.For("https").Info("listening", "version", version, "addr", fmt.Sprintf("https://127.0.0.1:%d", cfg.HTTPSPort), "app_path", appPath)
