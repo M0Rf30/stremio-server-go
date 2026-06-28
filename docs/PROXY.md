@@ -10,8 +10,8 @@
   (`$Number$`/`$RepresentationID$`/`$Time$` placeholders preserved), `SegmentURL`,
   and `SegmentBase` initialization URLs are routed through the proxy.
 - **On-the-fly decryption** — HLS `AES-128` (full-segment CBC) and CENC
-  (`SAMPLE-AES`/`cenc`/`cbcs`, per-sample AES-CTR/CBC over fMP4) when key
-  material is supplied.
+  (`cenc`/`cbcs`, per-sample AES-CTR/CBC over fMP4) when key material is
+  supplied. (HLS `SAMPLE-AES` is not currently supported.)
 - **Signed, expiring URLs**, an optional **API password**, and an **IP
   allowlist** so the proxy can be exposed publicly.
 - **Segment caching + prefetch** for smoother playback.
@@ -39,7 +39,7 @@ proxied streams play in browser clients without extra configuration.
 | `h_<Name>` | Header sent to the upstream (e.g. `h_User-Agent=VLC`, `h_Referer=...`). |
 | `r_<Name>` | Header forced on the response (`Access-Control-*` is ignored). |
 | `api_password` | Required only when `STREMIO_PROXY_PASSWORD` is set. |
-| `method`, `key`, `key_id`, `iv` | Decryption parameters (hex or base64). `method` is `AES-128`, `SAMPLE-AES`, `cenc`, or `cbcs`. |
+| `method`, `key`, `key_id`, `iv` | Decryption parameters (hex or base64). `method` is `AES-128`, `cenc`, or `cbcs`. (`SAMPLE-AES` is not currently supported and returns an error.) |
 | `proxy` | Outbound upstream proxy for this request. Accepted schemes: `socks5`, `socks5h`, `http`, `https`. Example: `proxy=socks5://127.0.0.1:1080`. Ignored when the scheme is not one of the four above. |
 
 Manifest endpoints propagate `d`/`h_`/`r_`/`api_password`/`proxy` onto every rewritten
@@ -51,10 +51,12 @@ and routed through the same upstream proxy automatically.
 - **HLS AES-128**: pass `method=AES-128&key=<hex|b64>&iv=<hex|b64>` on the
   `/proxy/stream` segment URL. The whole segment is AES-128-CBC decrypted and
   PKCS7-unpadded.
-- **CENC (DASH / SAMPLE-AES)**: pass `method=cenc&key=<16-byte key>` (optionally
+- **CENC (DASH)**: pass `method=cenc&key=<16-byte key>` (optionally
   `key_id`). Encrypted sample ranges inside the fMP4 (`moof`/`traf`/`senc`/
   `trun` + `mdat`) are decrypted with AES-CTR (or AES-CBC for `cbcs`), honoring
   clear/encrypted subsample spans.
+- **SAMPLE-AES** (HLS TS NAL-level AES-128-CBC) is **not currently supported**;
+  `method=SAMPLE-AES` returns an error rather than mis-decrypting.
 
 Decryption is server-side and fully buffered per segment, so decrypted segments
 are returned as a single `200` body (no `Range`/`206`).
@@ -70,11 +72,17 @@ All three modes are optional and composable:
   returns `{"url":"...?token=<tok>","expires_at":<unix>}`. The token is an
   AES-GCM sealed blob (signed with `STREMIO_PROXY_SECRET`) carrying the params,
   expiry, and optional pinned client IP. A valid `token` bypasses the password.
+  The sealed `params` (including the destination `d`) are enforced against the
+  live request: a token only authorizes the exact param values it was minted
+  for, so it cannot be reused to proxy a different destination.
 - **IP allowlist** (`STREMIO_PROXY_IP_ACL`) — comma-separated CIDRs; non-matching
   clients get `403`. The client IP honors `X-Forwarded-For` (first hop).
 
-When nothing is configured, the proxy is open (consistent with the server's
-localhost-trust model).
+When nothing is configured, the proxy is open to any caller (consistent with the
+server's localhost-trust model), but an SSRF guard still applies: the
+cloud-metadata address (`169.254.169.254`) is **always** blocked, and when the
+proxy is "protected" (a password, IP-ACL, or secret is configured) private,
+loopback, link-local, and ULA destinations are blocked as well.
 
 ## Environment variables
 
@@ -115,5 +123,9 @@ curl -X POST http://127.0.0.1:11470/generate_url \
 As with the rest of the server, this is a **localhost-trust** service by
 default. If you expose the proxy to a network, set `STREMIO_PROXY_PASSWORD`
 (and/or `STREMIO_PROXY_IP_ACL`) and prefer signed URLs — otherwise it is an
-open relay that will fetch and decrypt arbitrary URLs on behalf of any caller.
+open relay that will fetch and decrypt arbitrary public URLs on behalf of any
+caller. An SSRF guard always blocks the cloud-metadata address
+(`169.254.169.254`); configuring any auth mechanism (password, IP-ACL, or
+secret) additionally blocks private/loopback/link-local/ULA destinations, and
+the destination IP is re-validated at connect time to defeat DNS rebinding.
 Respect copyright law and the terms of service of any host you deploy on.
