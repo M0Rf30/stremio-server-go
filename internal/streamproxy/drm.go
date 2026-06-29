@@ -7,10 +7,32 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 func init() {
 	segmentDecryptor = drmDecrypt
+}
+
+// aesBlockCache caches AES cipher.Block values keyed by the raw key bytes (as string).
+// AES cipher.Block (aes.aesCipher) is goroutine-safe for concurrent Encrypt calls, so
+// sharing one block across requests avoids repeated key-scheduling (~176 bytes of work
+// per 16-byte key) for streams that reuse the same key across many segments.
+var aesBlockCache sync.Map // string(key) → cipher.Block
+
+// cachedAESBlock returns a cached AES cipher.Block for key, creating and storing it on
+// first use.  Subsequent calls with the same key bytes skip key scheduling entirely.
+func cachedAESBlock(key []byte) (cipher.Block, error) {
+	k := string(key)
+	if v, ok := aesBlockCache.Load(k); ok {
+		return v.(cipher.Block), nil
+	}
+	b, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	actual, _ := aesBlockCache.LoadOrStore(k, b)
+	return actual.(cipher.Block), nil
 }
 
 // drmSubsample describes a single subsample unit inside a CENC-protected sample.
@@ -73,7 +95,7 @@ func drmDecryptCBC(key, iv, data []byte) ([]byte, error) {
 	if len(data)%aes.BlockSize != 0 {
 		return nil, fmt.Errorf("CBC: segment length %d is not a multiple of 16", len(data))
 	}
-	block, err := aes.NewCipher(key)
+	block, err := cachedAESBlock(key) // F2: reuse cached block; avoids key-scheduling per segment
 	if err != nil {
 		return nil, fmt.Errorf("CBC: %w", err)
 	}
@@ -506,18 +528,20 @@ func drmParseSenc(p []byte, fallbackIV []byte) ([]drmSencEntry, error) {
 	payload := p[off:]
 	boxLen := len(payload)
 
-	entries8, consumed8, err8 := drmParseSencWithIVSize(payload, int(sampleCount), 8, hasSubs)
+	// F5: use count-only probes (no entry/IV/subsample allocations) to determine which
+	// IV size exactly fits the box, then allocate once on the confirmed pass.
+	consumed8, err8 := drmParseSencConsumed(payload, int(sampleCount), 8, hasSubs)
 	ok8 := err8 == nil && consumed8 == boxLen
 
-	entries16, consumed16, err16 := drmParseSencWithIVSize(payload, int(sampleCount), 16, hasSubs)
+	consumed16, err16 := drmParseSencConsumed(payload, int(sampleCount), 16, hasSubs)
 	ok16 := err16 == nil && consumed16 == boxLen
 
-	var entries []drmSencEntry
+	var ivSize int
 	switch {
 	case ok8 && !ok16:
-		entries = entries8
+		ivSize = 8
 	case ok16 && !ok8:
-		entries = entries16
+		ivSize = 16
 	case ok8 && ok16:
 		// Both IV sizes parse cleanly and consume all bytes.  For a non-zero
 		// sample count this is structurally ambiguous (the box payload happens
@@ -527,10 +551,17 @@ func drmParseSenc(p []byte, fallbackIV []byte) ([]drmSencEntry, error) {
 		if sampleCount > 0 {
 			return nil, errors.New("senc: IV size ambiguous: both 8-byte and 16-byte layouts exactly consume the box payload")
 		}
-		entries = entries8
+		// sampleCount == 0: both probes produce equivalent empty lists; return directly.
+		return []drmSencEntry{}, nil
 	default:
 		// Neither IV size results in a parse that exactly consumes the box payload.
 		return nil, fmt.Errorf("senc: IV size ambiguous or corrupt: 8-byte: %w, 16-byte: %w", err8, err16)
+	}
+
+	// Single allocating pass with the confirmed IV size.
+	entries, _, err := drmParseSencWithIVSize(payload, int(sampleCount), ivSize, hasSubs)
+	if err != nil {
+		return nil, err
 	}
 
 	// Pad 8-byte IVs to 16 bytes: CENC uses the IV as the high 64 bits of the
@@ -599,6 +630,41 @@ func drmParseSencWithIVSize(p []byte, count, ivSize int, hasSubs bool) ([]drmSen
 		entries[i] = drmSencEntry{IV: iv, Subsamples: subs}
 	}
 	return entries, off, nil
+}
+
+// drmParseSencConsumed walks the senc payload with the given parameters and returns
+// the number of bytes that would be consumed, WITHOUT allocating any entry/IV/subsample
+// slices.  Used by drmParseSenc to probe which IV size fits the box before committing
+// to a single allocating parse pass (F5: eliminates the wrong-probe's N×allocs).
+func drmParseSencConsumed(p []byte, count, ivSize int, hasSubs bool) (consumed int, err error) {
+	minPerSample := ivSize
+	if hasSubs {
+		minPerSample += 2 // subsample_count field
+	}
+	if minPerSample > 0 && count > len(p)/minPerSample {
+		return 0, fmt.Errorf("senc: sample_count %d exceeds box bounds (%d bytes, min %d bytes/sample)",
+			count, len(p), minPerSample)
+	}
+	off := 0
+	for i := 0; i < count; i++ {
+		if len(p) < off+ivSize {
+			return off, fmt.Errorf("senc: sample %d: need %d IV bytes, have %d", i, ivSize, len(p)-off)
+		}
+		off += ivSize
+		if hasSubs {
+			if len(p) < off+2 {
+				return off, fmt.Errorf("senc: sample %d: missing subsample_count", i)
+			}
+			subCount := int(binary.BigEndian.Uint16(p[off:]))
+			off += 2
+			if subCount > (len(p)-off)/6 {
+				return off, fmt.Errorf("senc: sample %d: subsample_count %d exceeds remaining box bytes %d",
+					i, subCount, len(p)-off)
+			}
+			off += subCount * 6
+		}
+	}
+	return off, nil
 }
 
 // drmParseBoxes parses ISO BMFF boxes from b, recursing into container boxes.
@@ -733,7 +799,7 @@ func drmDecryptCTRSubsamples(key, iv []byte, data []byte, subs []drmSubsample) (
 		copy(ctr, iv)
 	}
 
-	block, err := aes.NewCipher(key)
+	block, err := cachedAESBlock(key) // F2: reuse cached block; avoids key-scheduling per segment
 	if err != nil {
 		return nil, fmt.Errorf("CTR: %w", err)
 	}
@@ -827,7 +893,7 @@ func drmDecryptCBCSubsamples(key, iv []byte, data []byte, subs []drmSubsample) e
 		}
 	}
 
-	block, err := aes.NewCipher(key)
+	block, err := cachedAESBlock(key) // F2: reuse cached block; avoids key-scheduling per segment
 	if err != nil {
 		return fmt.Errorf("CBC subsample: %w", err)
 	}
@@ -840,6 +906,10 @@ func drmDecryptCBCSubsamples(key, iv []byte, data []byte, subs []drmSubsample) e
 		return nil
 	}
 
+	// Per the CENC 'cbcs' scheme, AES-CBC is re-initialised with the constant
+	// sample IV at the START of each encrypted subsample span — the chain does
+	// NOT carry across subsamples (matches FFmpeg cbcs_scheme_decrypt). A fresh
+	// CBC decrypter is therefore created per span below.
 	off := 0
 	for _, sub := range subs {
 		off += sub.Clear

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -54,10 +55,12 @@ func hlsServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream manifest too large", http.StatusBadGateway)
 		return
 	}
+	// F9: convert body to string once; both hlsSegmentURLs and hlsRewrite share it.
+	playlist := string(body)
 	if h.cfg.Prebuffer > 0 {
-		h.prefetch(context.WithoutCancel(r.Context()), hlsSegmentURLs(opts.Dest, string(body), h.cfg.Prebuffer), opts.ReqHeaders, effProxy)
+		h.prefetch(context.WithoutCancel(r.Context()), hlsSegmentURLs(opts.Dest, playlist, h.cfg.Prebuffer), opts.ReqHeaders, effProxy)
 	}
-	rewritten := hlsRewrite(h, r, opts, string(body))
+	rewritten := hlsRewrite(h, r, opts, playlist)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(rewritten))
@@ -78,7 +81,9 @@ func hlsServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) string {
 	lines := strings.Split(playlist, "\n")
 	ext := h.externalBase(r)
-	base := opts.Dest
+
+	// F10: parse opts.Dest once; resolveURL would re-parse it on every call.
+	baseURL, baseURLErr := url.Parse(opts.Dest)
 
 	out := make([]string, 0, len(lines))
 	nextIsVariant := false // true after #EXT-X-STREAM-INF until next URI line
@@ -91,9 +96,16 @@ func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) str
 
 		if !strings.HasPrefix(line, "#") {
 			// Bare URI line.
-			abs := resolveURL(base, line)
+			// F10: inline resolution against pre-parsed baseURL.
+			abs := line
+			if baseURLErr == nil {
+				if rv, err := url.Parse(line); err == nil {
+					abs = baseURL.ResolveReference(rv).String()
+				}
+			}
 			ep := "/proxy/stream"
-			if nextIsVariant || strings.Contains(strings.ToLower(abs), ".m3u8") {
+			// F8: avoid strings.ToLower; check both cases of ".m3u8".
+			if nextIsVariant || strings.Contains(abs, ".m3u8") || strings.Contains(abs, ".M3U8") {
 				ep = "/proxy/hls/manifest.m3u8"
 			}
 			nextIsVariant = false
@@ -101,21 +113,21 @@ func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) str
 			continue
 		}
 
-		// Tag or comment line.
-		upper := strings.ToUpper(line)
+		// F8: HLS tag names are uppercase by RFC 8216; use direct HasPrefix instead
+		// of strings.ToUpper(line) to avoid a per-line allocation.
 		switch {
-		case strings.HasPrefix(upper, "#EXT-X-STREAM-INF:"):
+		case strings.HasPrefix(line, "#EXT-X-STREAM-INF:"):
 			// URI follows on the next non-comment line.
 			nextIsVariant = true
 			out = append(out, line)
 
-		case strings.HasPrefix(upper, "#EXT-X-KEY") || strings.HasPrefix(upper, "#EXT-X-MAP"):
+		case strings.HasPrefix(line, "#EXT-X-KEY") || strings.HasPrefix(line, "#EXT-X-MAP"):
 			// Encryption key or initialization segment: always /proxy/stream.
-			out = append(out, hlsRewriteURIAttr(line, base, ext, opts, h, "/proxy/stream"))
+			out = append(out, hlsRewriteURIAttr(line, baseURL, ext, opts, h, "/proxy/stream"))
 
-		case strings.HasPrefix(upper, "#EXT-X-MEDIA") || strings.HasPrefix(upper, "#EXT-X-I-FRAME-STREAM-INF"):
+		case strings.HasPrefix(line, "#EXT-X-MEDIA") || strings.HasPrefix(line, "#EXT-X-I-FRAME-STREAM-INF"):
 			// Alternate rendition or I-frame playlist: endpoint depends on URL.
-			out = append(out, hlsRewriteURIAttr(line, base, ext, opts, h, ""))
+			out = append(out, hlsRewriteURIAttr(line, baseURL, ext, opts, h, ""))
 
 		default:
 			// All other tags and comments: preserve verbatim, do not reset nextIsVariant
@@ -132,16 +144,24 @@ func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) str
 // fixedEndpoint is the proxy endpoint to use; if empty, the endpoint is chosen
 // automatically: /proxy/hls/manifest.m3u8 when the URL contains ".m3u8",
 // /proxy/stream otherwise.
-func hlsRewriteURIAttr(line, base, ext string, opts *Options, h *Handler, fixedEndpoint string) string {
+// baseURL is the pre-parsed base URL from hlsRewrite (F10); may be nil on parse error.
+func hlsRewriteURIAttr(line string, baseURL *url.URL, ext string, opts *Options, h *Handler, fixedEndpoint string) string {
 	sub := hlsURIAttrRe.FindStringSubmatch(line)
 	if sub == nil {
 		return line
 	}
 	ref := sub[1]
-	abs := resolveURL(base, ref)
+	// F10: inline resolution against pre-parsed baseURL.
+	abs := ref
+	if baseURL != nil {
+		if rv, err := url.Parse(ref); err == nil {
+			abs = baseURL.ResolveReference(rv).String()
+		}
+	}
 	ep := fixedEndpoint
 	if ep == "" {
-		if strings.Contains(strings.ToLower(abs), ".m3u8") {
+		// F8: avoid strings.ToLower; check both cases of ".m3u8".
+		if strings.Contains(abs, ".m3u8") || strings.Contains(abs, ".M3U8") {
 			ep = "/proxy/hls/manifest.m3u8"
 		} else {
 			ep = "/proxy/stream"
@@ -157,16 +177,26 @@ func hlsSegmentURLs(base, playlist string, max int) []string {
 	if max <= 0 {
 		return nil
 	}
+	// F10: pre-parse base URL once rather than re-parsing per segment line.
+	baseURL, baseURLErr := url.Parse(base)
 	var urls []string
 	for _, line := range strings.Split(playlist, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.Contains(strings.ToLower(line), ".m3u8") {
+		// F8: avoid strings.ToLower; check both cases of ".m3u8".
+		if strings.Contains(line, ".m3u8") || strings.Contains(line, ".M3U8") {
 			continue // nested playlist, not a media segment
 		}
-		urls = append(urls, resolveURL(base, line))
+		// F10: inline resolution against pre-parsed baseURL.
+		abs := line
+		if baseURLErr == nil {
+			if rv, err := url.Parse(line); err == nil {
+				abs = baseURL.ResolveReference(rv).String()
+			}
+		}
+		urls = append(urls, abs)
 		if len(urls) >= max {
 			break
 		}

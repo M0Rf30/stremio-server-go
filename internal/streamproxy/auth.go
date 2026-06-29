@@ -1,8 +1,6 @@
 package streamproxy
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -70,7 +68,7 @@ func (h *Handler) authorize(r *http.Request) error {
 	// Password check.
 	if h.cfg.Password != "" {
 		provided := r.URL.Query().Get("api_password")
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.cfg.Password)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(provided), h.passwordBytes) != 1 {
 			return errUnauthorized
 		}
 	}
@@ -88,14 +86,8 @@ func (h *Handler) signToken(t token) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	block, err := aes.NewCipher(h.cfg.Secret)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
+	// Reuse the pre-built GCM; cipher.AEAD is goroutine-safe (F7).
+	gcm := h.signingGCM
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
@@ -114,14 +106,8 @@ func (h *Handler) verifyToken(s string, client net.IP) (token, error) {
 	if err != nil {
 		return token{}, errors.New("invalid token encoding")
 	}
-	block, err := aes.NewCipher(h.cfg.Secret)
-	if err != nil {
-		return token{}, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return token{}, err
-	}
+	// Reuse the pre-built GCM; cipher.AEAD is goroutine-safe (F7).
+	gcm := h.signingGCM
 	ns := gcm.NonceSize()
 	if len(ct) < ns {
 		return token{}, errors.New("token too short")

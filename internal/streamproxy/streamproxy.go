@@ -4,6 +4,8 @@ package streamproxy
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -59,6 +61,12 @@ type Handler struct {
 	// prefetchSem is a semaphore that bounds the number of goroutines spawned
 	// by prefetch across all concurrent requests.
 	prefetchSem chan struct{}
+	// signingGCM is the pre-built AES-GCM cipher for token sign/verify (F7).
+	// nil when Secret is empty. cipher.AEAD is goroutine-safe.
+	signingGCM cipher.AEAD
+	// passwordBytes is cfg.Password pre-converted to []byte to avoid a
+	// per-request allocation in the constant-time password comparison (F11).
+	passwordBytes []byte
 }
 
 // New creates a Handler. A nil Client is replaced with http.DefaultClient.
@@ -70,12 +78,23 @@ func New(cfg Config) *Handler {
 	if cfg.SegCacheTTL > 0 {
 		c = newSegCache(cfg.SegCacheTTL, 256)
 	}
+	// Pre-build the signing GCM once; cipher.AEAD (GCM) is goroutine-safe,
+	// so it can be shared across all concurrent requests (F7).
+	var gcm cipher.AEAD
+	if len(cfg.Secret) > 0 {
+		if block, err := aes.NewCipher(cfg.Secret); err == nil {
+			gcm, _ = cipher.NewGCM(block)
+		}
+	}
 	return &Handler{
 		cfg:          cfg,
 		cache:        c,
 		proxyClients: make(map[string]*http.Client),
 		ipCache:      make(map[string]ipCacheEntry),
 		prefetchSem:  make(chan struct{}, maxConcurrentPrefetch),
+		signingGCM:   gcm,
+		// Pre-convert password bytes once to avoid per-request allocation (F11).
+		passwordBytes: []byte(cfg.Password),
 	}
 }
 
@@ -311,27 +330,41 @@ func (h *Handler) externalBase(r *http.Request) string {
 // buildProxyURL constructs a proxy URL for the given destination.
 // Format: <extBase><endpoint>?d=<base64url(dest)>[&h_/r_ headers][&api_password].
 func (h *Handler) buildProxyURL(extBase, endpoint, dest string, opts *Options) string {
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(dest))
-	u := extBase + endpoint + "?d=" + encoded
+	// Use strings.Builder to avoid O(N) reallocation ladder when appending
+	// header parameters in the loop below (F3).
+	var b strings.Builder
+	b.Grow(256)
+	b.WriteString(extBase)
+	b.WriteString(endpoint)
+	b.WriteString("?d=")
+	b.WriteString(base64.RawURLEncoding.EncodeToString([]byte(dest)))
 	if opts != nil {
 		for k, vs := range opts.ReqHeaders {
 			for _, v := range vs {
-				u += "&h_" + url.QueryEscape(k) + "=" + url.QueryEscape(v)
+				b.WriteString("&h_")
+				b.WriteString(url.QueryEscape(k))
+				b.WriteByte('=')
+				b.WriteString(url.QueryEscape(v))
 			}
 		}
 		for k, vs := range opts.RespHeaders {
 			for _, v := range vs {
-				u += "&r_" + url.QueryEscape(k) + "=" + url.QueryEscape(v)
+				b.WriteString("&r_")
+				b.WriteString(url.QueryEscape(k))
+				b.WriteByte('=')
+				b.WriteString(url.QueryEscape(v))
 			}
 		}
 		if opts.APIPassword != "" {
-			u += "&api_password=" + url.QueryEscape(opts.APIPassword)
+			b.WriteString("&api_password=")
+			b.WriteString(url.QueryEscape(opts.APIPassword))
 		}
 		if opts.Proxy != "" {
-			u += "&proxy=" + url.QueryEscape(opts.Proxy)
+			b.WriteString("&proxy=")
+			b.WriteString(url.QueryEscape(opts.Proxy))
 		}
 	}
-	return u
+	return b.String()
 }
 
 // clientIP returns the effective client IP.

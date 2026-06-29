@@ -4,7 +4,9 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"strconv"
@@ -113,12 +115,18 @@ func (c *segCache) getFull(key string) *cacheEntry {
 	return entry
 }
 
+// sha256Pool recycles hash.Hash instances to avoid per-call allocations on
+// the segment-request hot path.  Reset is called before each use.
+var sha256Pool = sync.Pool{New: func() any { return sha256.New() }}
+
 // cacheKey derives a cache lookup key from the raw URL plus any credential
 // headers present in hdr. Authorization and Cookie are folded in so that
 // two requests for the same URL but different credentials never collide.
 // The result is a hex-encoded SHA-256 digest, safe to use as a map key.
 func cacheKey(rawurl string, hdr http.Header) string {
-	h := sha256.New()
+	// F4: pool the hasher; avoids sha256.New() + fmt.Fprintf reflection on every request.
+	h := sha256Pool.Get().(hash.Hash)
+	h.Reset()
 	_, _ = h.Write([]byte(rawurl))
 	// Include auth-relevant request headers to prevent cross-credential cache
 	// poisoning. Use NUL/colon separators so a crafted URL cannot produce the
@@ -126,13 +134,19 @@ func cacheKey(rawurl string, hdr http.Header) string {
 	for _, name := range []string{"Authorization", "Cookie"} {
 		vs := hdr[http.CanonicalHeaderKey(name)]
 		if len(vs) > 0 {
-			_, _ = fmt.Fprintf(h, "\x00%s:", name)
+			_, _ = h.Write([]byte{0})
+			_, _ = h.Write([]byte(name))
+			_, _ = h.Write([]byte{':'})
 			for _, v := range vs {
-				_, _ = fmt.Fprintf(h, "%s\x01", v)
+				_, _ = h.Write([]byte(v))
+				_, _ = h.Write([]byte{1})
 			}
 		}
 	}
-	return fmt.Sprintf("%x", h.Sum(nil))
+	var buf [32]byte
+	h.Sum(buf[:0])
+	sha256Pool.Put(h)
+	return hex.EncodeToString(buf[:])
 }
 
 // cachedFetch fetches rawurl, using the segment cache when configured.
@@ -158,14 +172,14 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 
 	// Cache hit.
 	if entry := h.cache.getFull(cacheKey(rawurl, hdr)); entry != nil {
-		outHdr := make(http.Header)
 		if entry.hdr != nil {
-			for k, vs := range entry.hdr {
-				outHdr[k] = vs
-			}
-		} else {
-			outHdr.Set("Content-Length", strconv.Itoa(len(entry.val)))
+			// F6: return stored clone directly; callers (copyAllowedHeaders,
+			// applyRespHeaders) only read the map — no defensive copy needed.
+			return entry.val, entry.hdr, entry.status, nil
 		}
+		// hdr was nil at store time — synthesise a minimal Content-Length header.
+		outHdr := make(http.Header)
+		outHdr.Set("Content-Length", strconv.Itoa(len(entry.val)))
 		return entry.val, outHdr, entry.status, nil
 	}
 

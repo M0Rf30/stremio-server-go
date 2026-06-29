@@ -76,26 +76,39 @@ func dashQueryEscape(s string) string {
 // visible to the DASH client for template expansion.  Auth parameters from opts
 // are propagated exactly as buildProxyURL does.
 func dashBuildTemplateURL(h *Handler, ext, abs string, opts *Options) string {
-	u := ext + "/proxy/stream?d=" + dashQueryEscape(abs)
+	// F3: strings.Builder avoids the O(N) reallocation ladder from string += in header loops.
+	var b strings.Builder
+	b.Grow(256)
+	b.WriteString(ext)
+	b.WriteString("/proxy/stream?d=")
+	b.WriteString(dashQueryEscape(abs))
 	if opts != nil {
 		for k, vs := range opts.ReqHeaders {
 			for _, v := range vs {
-				u += "&h_" + url.QueryEscape(k) + "=" + url.QueryEscape(v)
+				b.WriteString("&h_")
+				b.WriteString(url.QueryEscape(k))
+				b.WriteByte('=')
+				b.WriteString(url.QueryEscape(v))
 			}
 		}
 		for k, vs := range opts.RespHeaders {
 			for _, v := range vs {
-				u += "&r_" + url.QueryEscape(k) + "=" + url.QueryEscape(v)
+				b.WriteString("&r_")
+				b.WriteString(url.QueryEscape(k))
+				b.WriteByte('=')
+				b.WriteString(url.QueryEscape(v))
 			}
 		}
 		if opts.APIPassword != "" {
-			u += "&api_password=" + url.QueryEscape(opts.APIPassword)
+			b.WriteString("&api_password=")
+			b.WriteString(url.QueryEscape(opts.APIPassword))
 		}
 		if opts.Proxy != "" {
-			u += "&proxy=" + url.QueryEscape(opts.Proxy)
+			b.WriteString("&proxy=")
+			b.WriteString(url.QueryEscape(opts.Proxy))
 		}
 	}
-	return u
+	return b.String()
 }
 
 // dashRewrite rewrites URL-bearing tokens in an MPEG-DASH MPD document so that
