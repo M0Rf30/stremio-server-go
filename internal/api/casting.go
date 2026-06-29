@@ -416,8 +416,9 @@ func secsToHHMMSS(secs float64) string {
 func refreshDevices() []CastingDevice {
 	devicesMu.RLock()
 	if time.Since(deviceCachAt) < deviceCacheTTL && deviceCache != nil {
-		out := make([]CastingDevice, len(deviceCache))
-		copy(out, deviceCache)
+		// Cache hit: all call sites are read-only (lines 97, 103, 147), so return
+		// the shared slice directly — avoids an alloc + copy on every hot path.
+		out := deviceCache
 		devicesMu.RUnlock()
 		return out
 	}

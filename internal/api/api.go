@@ -37,7 +37,21 @@ import (
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
 
-var infoHashRE = regexp.MustCompile(`^[a-fA-F0-9]{40}$`)
+// isInfoHash reports whether s is a valid 40-hex info hash without regexp.
+// Zero allocations: simple length + byte-range check, much faster than regex on the hot routing path.
+func isInfoHash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < 40; i++ {
+		c := s[i]
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHex {
+			return false
+		}
+	}
+	return true
+}
 
 // videoMimes augments mime.TypeByExtension for containers Go often misses.
 var videoMimes = map[string]string{
@@ -114,6 +128,17 @@ var (
 	corsExposeHeaders = []string{"Content-Range, Accept-Ranges, Content-Length, Content-Type"}
 )
 
+// Shared, immutable streaming header values — pre-canonicalized keys to avoid
+// per-request key canonicalization (mirrors CORS pattern above).
+// textproto.CanonicalMIMEHeaderKey("transferMode.dlna.org")    = "Transfermode.dlna.org"
+// textproto.CanonicalMIMEHeaderKey("contentFeatures.dlna.org") = "Contentfeatures.dlna.org"
+var (
+	streamAcceptRanges    = []string{"bytes"}
+	streamCacheControl    = []string{"max-age=0, no-cache"}
+	streamTransferMode    = []string{"Streaming"}
+	streamContentFeatures = []string{"DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"}
+)
+
 // ServeHTTP applies CORS, handles preflight, and dispatches to the router.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hdr := w.Header()
@@ -149,11 +174,27 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleLanding(w, r)
 		return
 	}
-	seg := strings.Split(path, "/")
 
-	// infoHash-scoped routes
-	if infoHashRE.MatchString(seg[0]) {
-		ih := strings.ToLower(seg[0])
+	// Derive the first path segment without allocating a slice.
+	// Full split is deferred until a route actually requires sub-segments,
+	// so single-segment hot routes (heartbeat, stats.json, settings, list…)
+	// pay no Split cost at all.
+	firstSep := strings.IndexByte(path, '/')
+	first := path
+	if firstSep >= 0 {
+		first = path[:firstSep]
+	}
+
+	// infoHash-scoped routes: always need at least seg[1].
+	// Use isInfoHash instead of regexp to avoid regex overhead on every request.
+	if isInfoHash(first) {
+		ih := strings.ToLower(first)
+		if firstSep < 0 {
+			// bare /:infoHash with no trailing segment
+			http.NotFound(w, r)
+			return
+		}
+		seg := strings.Split(path, "/")
 		switch {
 		case len(seg) == 1:
 			http.NotFound(w, r)
@@ -179,8 +220,9 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// top-level routes
-	switch seg[0] {
+	// top-level routes — single-segment paths (the hot routes) use only `first`
+	// and skip the Split entirely.
+	switch first {
 	case "create":
 		s.handleCreateBlob(w, r)
 	case "removeAll":
@@ -197,67 +239,75 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleHeartbeat(w, r)
 	case "probe":
 		s.handleProbe(w, r)
-	case "hlsv2":
-		s.handleHLS(w, r, seg)
-	case "tracks":
-		s.handleTracks(w, r, seg)
 	case "opensubHash":
 		s.handleOpenSubHash(w, r)
 	case "subtitlesTracks":
 		s.handleSubtitlesTracks(w, r)
 	case "hwaccel-profiler":
 		s.handleHwaccelProfiler(w, r)
+	case "list":
+		s.handleList(w, r)
+	case "generate_url":
+		s.sp.HandleGenerateURL(w, r)
+	case "get-https":
+		s.handleGetHTTPS(w, r)
+	case "thumb.jpg":
+		http.NotFound(w, r) // no thumbnail service; cosmetic 404
+	case "metrics":
+		s.handleMetrics(w, r)
+	// Routes that need sub-segments: split only when dispatched.
+	case "hlsv2":
+		s.handleHLS(w, r, strings.Split(path, "/"))
+	case "tracks":
+		s.handleTracks(w, r, strings.Split(path, "/"))
 	case "proxy":
+		seg := strings.Split(path, "/")
 		if s.sp.Route(w, r, seg) {
 			return
 		}
 		s.handleProxy(w, r, seg)
-	case "generate_url":
-		s.sp.HandleGenerateURL(w, r)
 	case "base64":
-		s.sp.HandleBase64(w, r, seg)
-	// /list — active infohash array
-	case "list":
-		s.handleList(w, r)
+		s.sp.HandleBase64(w, r, strings.Split(path, "/"))
+	// /list — active infohash array handled above (single-segment hot path)
 	// /stream/:infoHash/:fileIdx — alias to /:infoHash/:fileIdx
 	case "stream":
-		if len(seg) >= 3 && infoHashRE.MatchString(seg[1]) {
+		if firstSep < 0 {
+			http.NotFound(w, r)
+			return
+		}
+		seg := strings.Split(path, "/")
+		if len(seg) >= 3 && isInfoHash(seg[1]) {
 			s.handleStream(w, r, strings.ToLower(seg[1]), seg[2])
 		} else {
 			http.NotFound(w, r)
 		}
-	case "get-https":
-		s.handleGetHTTPS(w, r)
 	case "casting":
-		s.handleCasting(w, r, seg)
+		s.handleCasting(w, r, strings.Split(path, "/"))
 	case "yt":
+		seg := strings.Split(path, "/")
 		if len(seg) < 2 {
 			http.NotFound(w, r)
 			return
 		}
 		s.handleYT(w, r, seg[1])
 	case "local-addon":
-		s.handleLocalAddon(w, r, seg)
+		s.handleLocalAddon(w, r, strings.Split(path, "/"))
 	case "bitmagnet":
-		s.handleBitmagnet(w, r, seg)
+		s.handleBitmagnet(w, r, strings.Split(path, "/"))
 	case "torznab":
-		s.handleTorznab(w, r, seg)
+		s.handleTorznab(w, r, strings.Split(path, "/"))
 	case "zip", "rar", "7zip", "tar", "tgz":
-		s.handleArchive(w, r, seg, seg[0])
+		s.handleArchive(w, r, strings.Split(path, "/"), first)
 	case "nzb":
-		s.handleNZB(w, r, seg)
+		s.handleNZB(w, r, strings.Split(path, "/"))
 	case "ftp":
-		s.handleFTP(w, r, seg)
-	case "thumb.jpg":
-		http.NotFound(w, r) // no thumbnail service; cosmetic 404
-	case "metrics":
-		s.handleMetrics(w, r)
+		s.handleFTP(w, r, strings.Split(path, "/"))
 	default:
-		if strings.HasPrefix(seg[0], "subtitles.") {
-			s.handleSubtitles(w, r, strings.TrimPrefix(seg[0], "subtitles."))
+		if strings.HasPrefix(first, "subtitles.") {
+			s.handleSubtitles(w, r, strings.TrimPrefix(first, "subtitles."))
 			return
 		}
-		if strings.HasSuffix(seg[0], ".m3u8") || strings.HasSuffix(path, ".m3u8") {
+		if strings.HasSuffix(first, ".m3u8") || strings.HasSuffix(path, ".m3u8") {
 			http.Error(w, "transcoding not implemented", http.StatusNotImplemented)
 			return
 		}
@@ -407,7 +457,12 @@ func (s *server) handleRemove(w http.ResponseWriter, _ *http.Request, ih string)
 // @Failure  416
 // @Router   /{infoHash}/{fileIdx} [get]
 func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg string) {
-	q := r.URL.Query()
+	// Guard the query parse: skip url.Values map alloc on requests with no query string.
+	// url.Values.Get and nil map index are both nil-safe.
+	var q url.Values
+	if r.URL.RawQuery != "" {
+		q = r.URL.Query()
+	}
 	trackers := q["tr"]
 	mustInc := compileMustInclude(q["f"])
 
@@ -448,16 +503,19 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 	}
 	defer func() { _ = rc.Close() }()
 
-	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Content-Type", mimeByName(f.Name))
-	w.Header().Set("Cache-Control", "max-age=0, no-cache")
-	w.Header().Set("transferMode.dlna.org", "Streaming")
-	w.Header().Set("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
+	// Static DLNA/cache headers: direct canonical-key map assignment avoids
+	// per-request key canonicalization (mirrors the CORS pattern in ServeHTTP).
+	hdr := w.Header()
+	hdr["Accept-Ranges"] = streamAcceptRanges
+	hdr["Content-Type"] = []string{mimeByName(f.Name)}
+	hdr["Cache-Control"] = streamCacheControl
+	hdr["Transfermode.dlna.org"] = streamTransferMode
+	hdr["Contentfeatures.dlna.org"] = streamContentFeatures
 	if q.Get("download") != "" {
-		w.Header().Set("Content-Disposition", contentDisposition(f.Name))
+		hdr.Set("Content-Disposition", contentDisposition(f.Name))
 	}
 	if subs := q.Get("subtitles"); subs != "" {
-		w.Header().Set("CaptionInfo.sec", subs)
+		hdr.Set("CaptionInfo.sec", subs)
 	}
 
 	bufp := streamBufPool.Get().(*[]byte)
@@ -465,13 +523,25 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 
 	start, end, isRange, unsat := parseRange(r.Header.Get("Range"), length)
 	if unsat {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", length))
+		// Build Content-Range without fmt.Sprintf to avoid reflect overhead on range responses.
+		var buf [32]byte
+		b := append(buf[:0], "bytes */"...)
+		b = strconv.AppendInt(b, length, 10)
+		hdr["Content-Range"] = []string{string(b)}
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 	if isRange {
-		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, length))
+		hdr.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+		// Build "bytes start-end/length" in a stack buffer to avoid fmt.Sprintf reflect.
+		var buf [80]byte
+		b := append(buf[:0], "bytes "...)
+		b = strconv.AppendInt(b, start, 10)
+		b = append(b, '-')
+		b = strconv.AppendInt(b, end, 10)
+		b = append(b, '/')
+		b = strconv.AppendInt(b, length, 10)
+		hdr["Content-Range"] = []string{string(b)}
 		if r.Method != http.MethodHead {
 			if _, err := rc.Seek(start, io.SeekStart); err != nil {
 				http.Error(w, "seek: "+err.Error(), http.StatusInternalServerError)
@@ -486,7 +556,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 		return
 	}
 
-	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+	hdr.Set("Content-Length", strconv.FormatInt(length, 10))
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return
@@ -761,13 +831,19 @@ func (s *server) writeStats(w http.ResponseWriter, ih string, idx int) {
 // @Router   /stats.json [get]
 func (s *server) handleAllStats(w http.ResponseWriter, r *http.Request) {
 	all := s.em.AllStats()
+	// Common path: avoid url.Values map alloc by checking RawQuery directly.
+	// Pass the typed map straight to writeJSON — JSON output is identical to
+	// the original map[string]any because the encoder reflects on the values.
+	if !strings.Contains(r.URL.RawQuery, "sys=1") {
+		writeJSON(w, http.StatusOK, all)
+		return
+	}
+	// sys=1: augment with system stats.
 	out := make(map[string]any, len(all)+1)
 	for ih, st := range all {
 		out[ih] = st
 	}
-	if r.URL.Query().Get("sys") == "1" {
-		out["sys"] = map[string]any{"loadavg": loadavg(), "cpus": cpus()}
-	}
+	out["sys"] = map[string]any{"loadavg": loadavg(), "cpus": cpus()}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1161,15 +1237,18 @@ func httpGet(u string) ([]byte, error) {
 }
 
 func mimeByName(name string) string {
-	ext := strings.ToLower(name)
-	if i := strings.LastIndexByte(ext, '.'); i >= 0 {
-		ext = ext[i:]
-		if m, ok := videoMimes[ext]; ok {
-			return m
-		}
-		if m := mime.TypeByExtension(ext); m != "" {
-			return m
-		}
+	// Find the dot first on the original string, then lowercase only the
+	// extension — avoids lowercasing the entire filename path (smaller alloc).
+	i := strings.LastIndexByte(name, '.')
+	if i < 0 {
+		return "application/octet-stream"
+	}
+	ext := strings.ToLower(name[i:])
+	if m, ok := videoMimes[ext]; ok {
+		return m
+	}
+	if m := mime.TypeByExtension(ext); m != "" {
+		return m
 	}
 	return "application/octet-stream"
 }
