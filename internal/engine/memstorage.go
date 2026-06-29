@@ -57,11 +57,11 @@ package engine
 // bytes always, with at most the bounded in-flight working set as overage.
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -74,6 +74,30 @@ import (
 // (which panic on a 0, nil read) and signals anacrolix to re-fetch the piece.
 var errPieceEvicted = errors.New("engine: memstorage: piece not resident")
 
+// memBufPool maps piece length (int64) -> *sync.Pool of []byte.
+// Keyed by length because the final piece usually has a different length than
+// the rest; handing back an undersized buffer would corrupt the next writer.
+var memBufPool sync.Map
+
+// getPieceBuf returns a pooled, zero-or-reused byte slice of exactly length n.
+// No zeroing is needed: anacrolix writes every chunk before MarkComplete, and
+// ReadAt only serves data once the piece is complete.
+func getPieceBuf(n int64) []byte {
+	v, _ := memBufPool.LoadOrStore(n, &sync.Pool{New: func() any {
+		b := make([]byte, n)
+		return &b
+	}})
+	return *(v.(*sync.Pool).Get().(*[]byte))
+}
+
+// putPieceBuf returns b to the pool it was drawn from (keyed by cap).
+// The caller must not use b after this call.
+func putPieceBuf(b []byte) {
+	if v, ok := memBufPool.Load(int64(cap(b))); ok {
+		v.(*sync.Pool).Put(&b)
+	}
+}
+
 // memStorage is an opt-in storage.ClientImplCloser that keeps piece data in RAM
 // bounded by a byte budget shared across all torrents it opens. It is safe for
 // concurrent use: anacrolix calls ReadAt/WriteAt/Completion/MarkComplete on
@@ -82,9 +106,15 @@ type memStorage struct {
 	capacity int64                   // hard byte budget across all torrents
 	capFn    storage.TorrentCapacity // shared pointer handed to every torrent
 
-	mu   sync.Mutex
-	used int64      // resident bytes currently accounted (sum of resident piece lengths)
-	lru  *list.List // front = most-recently-used, back = least; values are *memPiece
+	// mu guards all mutable state below. Read-only operations (ReadAt,
+	// Completion) take RLock so concurrent reads proceed in parallel; all
+	// mutating operations take the write Lock.
+	mu   sync.RWMutex
+	used int64 // resident bytes currently accounted (sum of resident piece lengths)
+
+	// completeSet tracks only the resident, hash-verified pieces. Eviction
+	// iterates this set exclusively, avoiding in-flight pieces entirely.
+	completeSet map[*memPiece]struct{}
 
 	// refetch, when set by the manager, forces anacrolix to re-download a piece
 	// whose bytes were evicted. refetchBackoff briefly throttles the evicted-read
@@ -102,7 +132,7 @@ var _ storage.ClientImplCloser = (*memStorage)(nil)
 func newMemStorage(capacity int64) *memStorage {
 	s := &memStorage{
 		capacity:       capacity,
-		lru:            list.New(),
+		completeSet:    make(map[*memPiece]struct{}),
 		refetchBackoff: 100 * time.Millisecond,
 	}
 	// One shared Capacity function for all torrents => one global budget. The
@@ -137,45 +167,55 @@ func (s *memStorage) OpenTorrent(
 func (s *memStorage) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lru.Init()
+	// Pool complete-piece buffers on shutdown; incomplete pieces are handled by
+	// each torrent's close which anacrolix should have called before this.
+	for mp := range s.completeSet {
+		if mp.data != nil {
+			putPieceBuf(mp.data)
+			mp.data = nil
+			mp.complete = false
+		}
+	}
+	s.completeSet = make(map[*memPiece]struct{})
 	s.used = 0
 	return nil
 }
 
-// touch marks a resident piece most-recently-used. Caller holds s.mu.
-func (s *memStorage) touch(mp *memPiece) {
-	if mp.elem != nil {
-		s.lru.MoveToFront(mp.elem)
-	}
-}
-
-// dropLocked evicts a resident piece: removes it from the LRU, frees its buffer,
-// decrements the budget, and flips it to not-complete so a subsequent ReadAt
-// fails and anacrolix re-fetches it. Caller holds s.mu.
+// dropLocked frees a resident piece: returns its buffer to the pool,
+// decrements the budget, removes it from completeSet, and flips it to
+// not-complete so a subsequent ReadAt fails and anacrolix re-fetches it.
+// Caller holds s.mu (write lock).
 func (s *memStorage) dropLocked(mp *memPiece) {
-	if mp.elem != nil {
-		s.lru.Remove(mp.elem)
-		mp.elem = nil
-	}
 	if mp.data != nil {
+		// Return buffer to pool; no zeroing needed — anacrolix writes all chunks
+		// before MarkComplete and ReadAt only serves resident complete data.
+		putPieceBuf(mp.data)
 		s.used -= mp.length
 		mp.data = nil
 	}
+	delete(s.completeSet, mp)
 	mp.complete = false
 }
 
-// evictLocked frees least-recently-used COMPLETE pieces (never keep) until
-// used+need fits within capacity, or no evictable piece remains. In-flight
-// (incomplete) pieces are never dropped. Caller holds s.mu.
+// evictLocked frees COMPLETE pieces until used+need fits within capacity, or
+// no evictable piece remains. Victim selection iterates completeSet only —
+// in-flight (incomplete) pieces are never visited, eliminating the former O(n)
+// LRU scan. The piece with the smallest lastUsed (unix-nanos, updated after each
+// successful ReadAt) is the victim, preserving read-recency ordering.
+// Caller holds s.mu (write lock).
 func (s *memStorage) evictLocked(need int64, keep *memPiece) {
 	for s.used+need > s.capacity {
+		// Find the complete piece with the oldest lastUsed (least recently read).
 		var victim *memPiece
-		// Scan from the least-recently-used end for the first complete piece.
-		for el := s.lru.Back(); el != nil; el = el.Prev() {
-			cand := el.Value.(*memPiece)
-			if cand != keep && cand.complete {
+		var oldest int64
+		for cand := range s.completeSet {
+			if cand == keep {
+				continue
+			}
+			t := cand.lastUsed.Load()
+			if victim == nil || t < oldest {
 				victim = cand
-				break
+				oldest = t
 			}
 		}
 		if victim == nil {
@@ -222,22 +262,27 @@ func (mt *memTorrent) close() error {
 	return nil
 }
 
-// memPiece holds one piece's bytes in RAM. All fields are guarded by store.mu.
+// memPiece holds one piece's bytes in RAM. data and complete are guarded by
+// store.mu; lastUsed is updated lock-free via atomic after each successful read.
 type memPiece struct {
 	store  *memStorage
 	mt     *memTorrent // owning torrent (for infohash on evicted-read refetch)
 	index  int         // piece index (for evicted-read refetch)
 	length int64       // full length of this piece (bytes)
 
-	data     []byte        // nil when not resident (never written or evicted)
-	complete bool          // hash-verified by anacrolix and still resident
-	elem     *list.Element // position in store.lru while resident; nil otherwise
+	data     []byte // nil when not resident (never written or evicted)
+	complete bool   // hash-verified by anacrolix and still resident
+
+	// lastUsed records the unix-nanos timestamp of the most recent successful
+	// ReadAt on this piece, updated atomically without holding s.mu. evictLocked
+	// uses it to pick the least-recently-read complete piece as the eviction victim.
+	lastUsed atomic.Int64
 }
 
 var _ storage.PieceImpl = (*memPiece)(nil)
 
 // WriteAt stores chunk bytes at off within the piece, allocating the full piece
-// buffer (and making room in the budget) on first write.
+// buffer from the pool (and making room in the budget) on first write.
 func (mp *memPiece) WriteAt(b []byte, off int64) (int, error) {
 	s := mp.store
 	s.mu.Lock()
@@ -250,30 +295,32 @@ func (mp *memPiece) WriteAt(b []byte, off int64) (int, error) {
 	}
 	if mp.data == nil {
 		// First write: make room for this piece, then allocate it resident.
-		// mp is not yet in the LRU, so eviction cannot target it.
+		// mp is not yet in completeSet (incomplete), so eviction cannot target it.
 		s.evictLocked(mp.length, mp)
-		mp.data = make([]byte, mp.length)
+		mp.data = getPieceBuf(mp.length) // pooled; no zeroing needed (all chunks written before MarkComplete)
 		s.used += mp.length
-		mp.elem = s.lru.PushFront(mp)
-	} else {
-		s.touch(mp)
 	}
 	n := copy(mp.data[off:], b)
 	return n, nil
 }
 
-// ReadAt serves bytes from the resident buffer and marks the piece
-// most-recently-used. A non-resident piece returns errPieceEvicted so anacrolix
-// re-fetches it rather than reading stale data.
+// ReadAt serves bytes from the resident buffer. On the fast path it holds only
+// an RLock, so multiple concurrent reads run in parallel. Recency (for eviction
+// ordering) is recorded via an atomic store after releasing the RLock — no write
+// lock contention on the read hot-path. A non-resident piece returns
+// errPieceEvicted so anacrolix re-fetches it rather than reading stale data.
 func (mp *memPiece) ReadAt(b []byte, off int64) (int, error) {
 	s := mp.store
-	s.mu.Lock()
+	s.mu.RLock()
 	// Fast path: resident bytes in range. This is the ONLY way ReadAt returns a
 	// non-zero count; every other outcome is a zero-byte "miss" handled below.
 	if mp.data != nil && off >= 0 && off < mp.length {
 		n := copy(b, mp.data[off:mp.length])
-		s.touch(mp)
-		s.mu.Unlock()
+		s.mu.RUnlock()
+		// Update recency outside the lock: concurrent reads proceed in parallel
+		// and eviction uses lastUsed, not LRU MoveToFront. A tiny lag between the
+		// copy and the stamp is acceptable for eviction ordering.
+		mp.lastUsed.Store(time.Now().UnixNano())
 		if int64(n) < int64(len(b)) {
 			// Filled to the end of the piece without satisfying the whole request.
 			return n, io.EOF
@@ -282,7 +329,7 @@ func (mp *memPiece) ReadAt(b []byte, off int64) (int, error) {
 	}
 	refetch, backoff, ih, idx := s.refetch, s.refetchBackoff, mp.mt.infoHash, mp.index
 	evicted := mp.data == nil
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	// Handle non-eviction cases immediately — no refetch or sleep needed.
 	if off < 0 {
@@ -322,7 +369,10 @@ func (mp *memPiece) MarkComplete() error {
 		return errPieceEvicted
 	}
 	mp.complete = true
-	s.touch(mp)
+	// Stamp recency so this piece starts with a fair lastUsed for eviction;
+	// older pieces (with smaller timestamps) will be evicted first.
+	mp.lastUsed.Store(time.Now().UnixNano())
+	s.completeSet[mp] = struct{}{}
 	s.evictLocked(0, mp)
 	return nil
 }
@@ -336,6 +386,7 @@ func (mp *memPiece) MarkNotComplete() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mp.complete = false
+	delete(s.completeSet, mp) // no longer eligible for eviction
 	return nil
 }
 
@@ -344,8 +395,8 @@ func (mp *memPiece) MarkNotComplete() error {
 // still resident, so an evicted piece reads as not-complete and is re-fetched.
 func (mp *memPiece) Completion() storage.Completion {
 	s := mp.store
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return storage.Completion{
 		Ok:       true,
 		Complete: mp.complete && mp.data != nil,

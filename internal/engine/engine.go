@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/dht/v2"
@@ -78,10 +79,12 @@ type engine struct {
 
 	// Announce-URL cache: refreshed at most once per annoTTL to avoid acquiring
 	// the anacrolix Metainfo()/DistinctValues() locks on every Stats() call.
-	annoMu     sync.Mutex
-	annoExpiry time.Time
-	cachedURLs []string
-	cachedOpts types.Options // full Opts; rebuilt when cachedURLs are refreshed
+	annoMu        sync.Mutex
+	annoExpiry    time.Time
+	cachedURLs    []string
+	cachedOpts    types.Options    // full Opts; rebuilt when cachedURLs are refreshed
+	cachedFiles   []types.FileInfo // memoized after first hasInfo(); immutable once set
+	cachedSources []types.Source   // Sources skeleton cached alongside cachedURLs under annoMu
 }
 
 // ensureDownloading marks file idx for full background download and demotes any
@@ -730,6 +733,14 @@ func (e *engine) Files() []types.FileInfo {
 	if !e.hasInfo() {
 		return nil
 	}
+	// Fast path: file metadata is immutable once the info dict is available,
+	// so we build the slice once and reuse it on every subsequent Stats() call.
+	e.mu.Lock()
+	cached := e.cachedFiles
+	e.mu.Unlock()
+	if cached != nil {
+		return cached
+	}
 	files := e.t.Files()
 	out := make([]types.FileInfo, len(files))
 	for i, f := range files {
@@ -743,6 +754,12 @@ func (e *engine) Files() []types.FileInfo {
 			Offset: f.Offset(),
 		}
 	}
+	// Store under lock; a benign race to build produces identical immutable results.
+	e.mu.Lock()
+	if e.cachedFiles == nil {
+		e.cachedFiles = out
+	}
+	e.mu.Unlock()
 	return out
 }
 
@@ -777,13 +794,15 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	r := f.NewReader()
 	r.SetReadahead(readaheadFor(cachedSpeed))
 	now := time.Now()
-	return &pinnedReader{
-		tr:        r,
-		e:         e,
-		idx:       idx,
-		deadline:  now.Add(startupReadTimeout),
-		nextRAAdj: now.Add(readaheadAdjustInterval),
-	}, f.Length(), nil
+	pr := &pinnedReader{
+		tr:       r,
+		e:        e,
+		idx:      idx,
+		deadline: now.Add(startupReadTimeout),
+	}
+	// nextRAAdj is an atomic.Int64 (unix-nanos); must be set after construction.
+	pr.nextRAAdj.Store(now.Add(readaheadAdjustInterval).UnixNano())
+	return pr, f.Length(), nil
 }
 
 // warmMoov pre-fetches the bytes a player needs to start before they would
@@ -935,27 +954,26 @@ type pinnedReader struct {
 	idx  int
 	once sync.Once
 
-	mu        sync.Mutex
-	started   bool      // a read has returned data; later reads block normally
-	deadline  time.Time // startup read deadline
-	nextRAAdj time.Time // next readahead recompute time
+	// started and nextRAAdj are hot-path fields accessed on every Read(); using
+	// atomics eliminates the per-Read mutex round-trip on the fast path.
+	started   atomic.Bool  // set once to true after first byte; false->true exactly once
+	deadline  time.Time    // written once at construction; read-only thereafter (no lock needed)
+	nextRAAdj atomic.Int64 // unix-nanos of next readahead recompute; monotonically advancing
 }
 
 func (p *pinnedReader) Read(b []byte) (int, error) {
 	p.adjustReadahead()
-	p.mu.Lock()
-	started, dl := p.started, p.deadline
-	p.mu.Unlock()
-	if started {
+	// Fast path: once started, skip the deadline context entirely (lock-free).
+	if p.started.Load() {
 		return p.tr.Read(b)
 	}
-	ctx, cancel := context.WithDeadline(context.Background(), dl)
+	// First byte not yet received: apply the startup deadline to catch dead swarms.
+	// p.deadline is written once at construction and is read-only here.
+	ctx, cancel := context.WithDeadline(context.Background(), p.deadline)
 	defer cancel()
 	n, err := p.tr.ReadContext(ctx, b)
 	if n > 0 {
-		p.mu.Lock()
-		p.started = true
-		p.mu.Unlock()
+		p.started.Store(true) // atomic store; false->true exactly once
 	}
 	return n, err
 }
@@ -998,14 +1016,13 @@ func (p *pinnedReader) Close() error {
 // adjustReadahead recomputes the window from the latest measured speed, at most
 // once per readaheadAdjustInterval, so the buffer deepens as throughput rises.
 func (p *pinnedReader) adjustReadahead() {
-	now := time.Now()
-	p.mu.Lock()
-	if now.Before(p.nextRAAdj) {
-		p.mu.Unlock()
+	now := time.Now().UnixNano()
+	// Lock-free throttle: skip recompute if still within the current interval.
+	// A benign double-adjust on a rare CAS race is acceptable and harmless.
+	if now < p.nextRAAdj.Load() {
 		return
 	}
-	p.nextRAAdj = now.Add(readaheadAdjustInterval)
-	p.mu.Unlock()
+	p.nextRAAdj.Store(now + int64(readaheadAdjustInterval))
 	p.e.mu.Lock()
 	sp := p.e.lastDLSpeed
 	p.e.mu.Unlock()
@@ -1163,35 +1180,38 @@ func (e *engine) Stats(idx int) *types.Stats {
 			PeerSearch: types.PeerSearch{Min: 40, Max: 200, Sources: peerSrcs},
 			Tracker:    true,
 		}
+		// Build Sources skeleton with stable fields (URL, NumRequests).
+		// Per-call-varying fields (LastStarted, NumFound, NumFoundUniq) are
+		// stamped onto a shallow copy below, avoiding re-iteration every Stats().
+		skel := make([]types.Source, 0, len(urls))
+		for _, u := range urls {
+			if !strings.HasPrefix(u, "udp://") && !strings.HasPrefix(u, "http://") &&
+				!strings.HasPrefix(u, "https://") {
+				continue // skip wss:// and any non-URL forms
+			}
+			skel = append(skel, types.Source{URL: u, NumRequests: 1})
+		}
+		e.cachedSources = skel
 		e.annoExpiry = now.Add(annoTTL)
 	}
-	announceURLs := e.cachedURLs
+	sourceSkel := e.cachedSources
 	opts := e.cachedOpts
 	e.annoMu.Unlock()
 
-	// Build Sources from cached announce URLs and fresh peer counts.
-	// Only valid-URL schemes (udp://, http://, https://) are emitted — stremio-core
-	// passes the url field through url::Url::parse, so "dht:" pseudo-URIs must not
-	// appear here. Best-effort counts use totalPeers since anacrolix does not expose
-	// per-tracker peer counts.
+	// Stamp per-call-varying fields onto a shallow copy of the skeleton.
+	// Only valid-URL schemes (udp://, http://, https://) appear in the skeleton —
+	// the filter ran once at cache-build time above.
 	started := now.UTC().Format(time.RFC3339)
-	sources := make([]types.Source, 0, len(announceURLs))
-	for _, u := range announceURLs {
-		if !strings.HasPrefix(u, "udp://") && !strings.HasPrefix(u, "http://") &&
-			!strings.HasPrefix(u, "https://") {
-			continue // skip wss:// and any non-URL forms
-		}
-		numFound := totalPeers
-		if numFound < 1 {
-			numFound = 1 // non-zero best-effort
-		}
-		sources = append(sources, types.Source{
-			LastStarted:  started,
-			URL:          u,
-			NumFound:     numFound,
-			NumFoundUniq: numFound,
-			NumRequests:  1,
-		})
+	numFound := totalPeers
+	if numFound < 1 {
+		numFound = 1 // non-zero best-effort
+	}
+	sources := make([]types.Source, len(sourceSkel))
+	copy(sources, sourceSkel)
+	for i := range sources {
+		sources[i].LastStarted = started
+		sources[i].NumFound = numFound
+		sources[i].NumFoundUniq = numFound
 	}
 
 	s := &types.Stats{
