@@ -55,7 +55,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20260604005048-7023385849c0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
@@ -112,4 +111,4 @@ require (
 	zombiezen.com/go/sqlite v1.4.2 // indirect
 )
 
-replace github.com/anacrolix/torrent => github.com/M0Rf30/torrent v1.61.1-0.20260626114513-f0b788a257ae
+replace github.com/anacrolix/torrent => github.com/M0Rf30/torrent v1.61.1-0.20260629120640-ff193764e6bb
