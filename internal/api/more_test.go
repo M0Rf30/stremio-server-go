@@ -502,6 +502,22 @@ func TestCastingParams_POST(t *testing.T) {
 	}
 }
 
+func TestCastingParams_JSONBody(t *testing.T) {
+	body := strings.NewReader(`{"source":"http://x/stream","time":120}`)
+	req := httptest.NewRequest(http.MethodPost, "/casting/dev/player", body)
+	req.Header.Set("Content-Type", "application/json")
+	params := castingParams(req)
+	if got := params.Get("source"); got != "http://x/stream" {
+		t.Errorf("source = %q; want http://x/stream", got)
+	}
+	if got := params.Get("time"); got != "120" {
+		t.Errorf("time = %q; want 120 (u64 preserved verbatim)", got)
+	}
+	if cmd := castingCommand([]string{"casting", "dev", "player"}, params); cmd != "load" {
+		t.Errorf("castingCommand = %q; want load (inferred from source)", cmd)
+	}
+}
+
 func TestCastingCommand(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -29,6 +29,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -193,13 +194,41 @@ func (s *server) handlePlayerControl(w http.ResponseWriter, r *http.Request, seg
 	}
 }
 
-// castingParams returns consolidated query/form params for a casting request.
+// castingParams returns consolidated query/form/JSON params for a casting request.
+//
+// GET → query string. POST → x-www-form-urlencoded form, OR — when the request
+// carries Content-Type: application/json (as stremio-core does for
+// /casting/{id}/player with {"source","time"}) — the decoded JSON body merged
+// onto any query params. Numbers are preserved verbatim via UseNumber so a u64
+// `time` is never mangled into float/scientific notation.
 func castingParams(r *http.Request) url.Values {
-	if r.Method == http.MethodPost {
-		_ = r.ParseForm()
-		return r.Form
+	if r.Method != http.MethodPost {
+		return r.URL.Query()
 	}
-	return r.URL.Query()
+	if ct := r.Header.Get("Content-Type"); strings.Contains(strings.ToLower(ct), "application/json") {
+		params := url.Values{}
+		for k, vs := range r.URL.Query() {
+			params[k] = append(params[k], vs...)
+		}
+		var obj map[string]any
+		dec := json.NewDecoder(r.Body)
+		dec.UseNumber()
+		if err := dec.Decode(&obj); err == nil {
+			for k, v := range obj {
+				switch val := v.(type) {
+				case string:
+					params.Set(k, val)
+				case json.Number:
+					params.Set(k, val.String())
+				case bool:
+					params.Set(k, strconv.FormatBool(val))
+				}
+			}
+		}
+		return params
+	}
+	_ = r.ParseForm()
+	return r.Form
 }
 
 // castingCommand resolves the player command from the path suffix or params.

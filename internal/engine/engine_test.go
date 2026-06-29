@@ -249,6 +249,43 @@ func TestStatsBeforeMetadata(t *testing.T) {
 	}
 }
 
+// TestStatsPerFileBeforeMetadata verifies that a per-file stats request (idx>=0)
+// ALWAYS populates streamLen/streamName/streamProgress (stremio-core's strict
+// Statistics deserializer requires them present), even before metadata is
+// available, while a torrent-level request (idx<0) omits them.
+func TestStatsPerFileBeforeMetadata(t *testing.T) {
+	em, err := engine.New(newTestCfg(t))
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	defer em.Close()
+
+	e, err := em.EnsureEngine(knownHash, types.AddOptions{})
+	if err != nil {
+		t.Fatalf("EnsureEngine: %v", err)
+	}
+
+	// idx>=0 → per-file fields MUST be present (non-nil), even with no metadata.
+	s := e.Stats(0)
+	if s.StreamLen == nil || s.StreamName == nil || s.StreamProgress == nil {
+		t.Fatalf("Stats(0): per-file fields must be present (non-nil): len=%v name=%v prog=%v",
+			s.StreamLen, s.StreamName, s.StreamProgress)
+	}
+	if *s.StreamProgress < 0 || *s.StreamProgress > 1 {
+		t.Errorf("Stats(0).StreamProgress = %v; want within [0,1]", *s.StreamProgress)
+	}
+	if *s.StreamLen < 0 {
+		t.Errorf("Stats(0).StreamLen = %d; want >= 0", *s.StreamLen)
+	}
+
+	// idx<0 → per-file fields MUST be omitted (nil).
+	s = e.Stats(-1)
+	if s.StreamLen != nil || s.StreamName != nil || s.StreamProgress != nil {
+		t.Errorf("Stats(-1): per-file fields must be omitted (nil): len=%v name=%v prog=%v",
+			s.StreamLen, s.StreamName, s.StreamProgress)
+	}
+}
+
 // TestAllStats verifies the manager-level snapshot.
 func TestAllStats(t *testing.T) {
 	em, err := engine.New(newTestCfg(t))

@@ -1217,28 +1217,40 @@ func (e *engine) Stats(idx int) *types.Stats {
 		PeerSearchRunning: true,
 	}
 
-	// Per-file extras when a file index is requested.
-	if idx >= 0 && e.hasInfo() {
-		torFiles := e.t.Files()
-		if idx < len(torFiles) {
-			e.ensureDownloading(idx) // polling a file's stats also starts its download
-			f := torFiles[idx]
-			length := f.Length()
-			name := f.DisplayPath()
-			var progress float64
-			if length > 0 {
-				progress = float64(f.BytesCompleted()) / float64(length)
-				if progress > 1 {
-					progress = 1
-				}
-				if progress < 0 {
-					progress = 0
+	// Per-file extras when a file index is requested. stremio-core's Statistics
+	// deserializer is strict: streamLen/streamName/streamProgress must be present
+	// (non-null) for any per-file stats.json (idx>=0). So ALWAYS set them when
+	// idx>=0 — falling back to zero values when metadata or the index is not (yet)
+	// available — to avoid a transient deser failure during a brief
+	// metadata-not-ready / re-create window. idx<0 (torrent-level / all-stats)
+	// keeps them omitted.
+	if idx >= 0 {
+		var (
+			length   int64
+			name     string
+			progress float64
+		)
+		if e.hasInfo() {
+			torFiles := e.t.Files()
+			if idx < len(torFiles) {
+				e.ensureDownloading(idx) // polling a file's stats also starts its download
+				f := torFiles[idx]
+				length = f.Length()
+				name = f.DisplayPath()
+				if length > 0 {
+					progress = float64(f.BytesCompleted()) / float64(length)
+					if progress > 1 {
+						progress = 1
+					}
+					if progress < 0 {
+						progress = 0
+					}
 				}
 			}
-			s.StreamLen = &length
-			s.StreamName = &name
-			s.StreamProgress = &progress
 		}
+		s.StreamLen = &length
+		s.StreamName = &name
+		s.StreamProgress = &progress
 	}
 
 	return s
