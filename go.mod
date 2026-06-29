@@ -1,6 +1,6 @@
 module github.com/M0Rf30/stremio-server-go
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/anacrolix/dht/v2 v2.24.0
@@ -111,4 +111,4 @@ require (
 	zombiezen.com/go/sqlite v1.4.2 // indirect
 )
 
-replace github.com/anacrolix/torrent => github.com/M0Rf30/torrent v1.61.1-0.20260629120640-ff193764e6bb
+replace github.com/anacrolix/torrent => github.com/M0Rf30/torrent v1.61.1-0.20260629121254-78f25916422e
