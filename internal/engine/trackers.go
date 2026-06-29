@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
@@ -13,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 // The remote tracker source URL is configurable (STREMIO_TRACKERS_URL, wired via
@@ -396,15 +397,16 @@ func mergeWS(t []string) []string {
 // handshake within probeWSTimeout. Dead or non-WebSocket endpoints are filtered
 // out so the client does not waste announces on them.
 func probeTrackerWS(rawURL string) bool {
-	d := websocket.Dialer{HandshakeTimeout: probeWSTimeout}
-	c, resp, err := d.Dial(rawURL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), probeWSTimeout)
+	defer cancel()
+	c, resp, err := websocket.Dial(ctx, rawURL, nil)
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
 	if err != nil {
 		return false
 	}
-	_ = c.Close()
+	_ = c.CloseNow()
 	return true
 }
 

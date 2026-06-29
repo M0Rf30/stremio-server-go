@@ -6,8 +6,8 @@ require (
 	github.com/anacrolix/dht/v2 v2.24.0
 	github.com/anacrolix/torrent v1.61.1-0.20260622020128-fd15081f8ed1
 	github.com/bodgit/sevenzip v1.6.4
+	github.com/coder/websocket v1.8.15
 	github.com/daku10/go-lz-string v0.0.7
-	github.com/gorilla/websocket v1.5.3
 	github.com/huin/goupnp v1.3.0
 	github.com/jlaffaye/ftp v0.2.1
 	github.com/nwaples/rardecode/v2 v2.2.5
@@ -55,6 +55,7 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20260604005048-7023385849c0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
@@ -82,7 +83,7 @@ require (
 	github.com/pion/stun/v3 v3.1.6 // indirect
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pion/turn/v5 v5.0.10 // indirect
-	github.com/pion/webrtc/v4 v4.2.15 // indirect
+	github.com/pion/webrtc/v4 v4.2.16 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/protolambda/ctxlock v0.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
