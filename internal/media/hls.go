@@ -102,6 +102,10 @@ type hlsSession struct {
 	highBitDepth    bool                   // true if any video stream is 10/12-bit
 	segLocks        map[string]*sync.Mutex // keyed by segment filename
 	lastAccess      atomic.Int64           // unix nanoseconds; updated on each StartHLS/HLSFile call
+	// playlistData records which segPrefix playlists have already been rendered
+	// and written to disk; content is immutable once duration is set, so a
+	// presence marker is enough to skip the rebuild + write.  Guarded by mu.
+	playlistData map[string]struct{}
 }
 
 // hwEncoder holds the selected H.264 encoder identity plus any device path
@@ -112,8 +116,9 @@ type hwEncoder struct {
 	driDevice string // VAAPI renderD* path; empty for all non-VAAPI codecs
 }
 
-// probeCacheEntry records a cached ffprobe result for negative caching.
-// Used to short-circuit repeated 30-second probes of broken or unreachable URLs.
+// probeCacheEntry records a cached ffprobe result (positive or negative).
+// Negative (zero-duration/error) results use negProbeTTL; successful results
+// use a 10-minute TTL so duplicate sessions for the same URL skip re-probing.
 type probeCacheEntry struct {
 	result    probeMediaResult
 	expiresAt time.Time
@@ -127,7 +132,7 @@ type hlsManager struct {
 
 	mu           sync.Mutex
 	sessions     map[string]*hlsSession
-	probeCache   map[string]probeCacheEntry // negative-probe cache; keyed by mediaURL
+	probeCache   map[string]probeCacheEntry // probe cache (positive+negative); keyed by mediaURL
 	transcodeSem chan struct{}              // bounds concurrent ffmpeg transcode spawns
 	stopCh       chan struct{}              // closed by CloseHLS to stop the reaper
 }
@@ -429,9 +434,10 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 			return "", fmt.Errorf("hls: too many concurrent sessions (limit %d)", maxConcurrentSessions)
 		}
 		s = &hlsSession{
-			mediaURL: mediaURL,
-			dir:      filepath.Join(m.base, id),
-			segLocks: map[string]*sync.Mutex{},
+			mediaURL:     mediaURL,
+			dir:          filepath.Join(m.base, id),
+			segLocks:     map[string]*sync.Mutex{},
+			playlistData: map[string]struct{}{},
 		}
 		s.lastAccess.Store(time.Now().UnixNano())
 		_ = os.MkdirAll(s.dir, 0o755)
@@ -469,8 +475,14 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 				// Prune expired / excess entries to bound cache size.
 				m.sweepProbeCache()
 			} else {
-				// Positive result — clear any stale negative entry for this URL.
-				delete(m.probeCache, mediaURL)
+				// Cache positive result with a 10-minute TTL; subsequent sessions for
+				// the same URL skip the expensive 30-second ffprobe entirely.
+				// sweepProbeCache evicts expired/excess entries as usual.
+				m.probeCache[mediaURL] = probeCacheEntry{
+					result:    res,
+					expiresAt: time.Now().Add(10 * time.Minute),
+				}
+				m.sweepProbeCache()
 			}
 			m.mu.Unlock()
 		}
@@ -754,9 +766,15 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 //	segPrefix=""   → seg0.ts, seg1.ts, …  (muxed or video-only)
 //	segPrefix="a1" → a1seg0.ts, a1seg1.ts, …  (audio stream 1)
 func (s *hlsSession) writePlaylist(path, segPrefix string) error {
+	// Check cache under read-lock; playlist bytes are immutable once duration is set.
 	s.mu.RLock()
+	_, ok := s.playlistData[segPrefix]
 	dur := s.duration
 	s.mu.RUnlock()
+	if ok {
+		// Already rendered and written to disk on a prior request — skip rebuild.
+		return nil
+	}
 	n := 0
 	if dur > 0 {
 		n = int(math.Ceil(dur / segDur))
@@ -777,7 +795,19 @@ func (s *hlsSession) writePlaylist(path, segPrefix string) error {
 		fmt.Fprintf(&b, "#EXTINF:%.3f,\n%sseg%d.ts\n", d, segPrefix, i)
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	data := []byte(b.String())
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	// Store rendered bytes so future requests for the same segPrefix skip the
+	// O(n_segments) format loop and disk write entirely.
+	s.mu.Lock()
+	if s.playlistData == nil {
+		s.playlistData = make(map[string]struct{})
+	}
+	s.playlistData[segPrefix] = struct{}{}
+	s.mu.Unlock()
+	return nil
 }
 
 // writeSubPlaylist writes a single-segment VOD subtitle playlist for subtitle

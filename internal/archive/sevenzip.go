@@ -15,7 +15,8 @@ import (
 )
 
 type szReader struct {
-	rc *sevenzip.ReadCloser
+	rc    *sevenzip.ReadCloser
+	index map[string]*sevenzip.File // normName → file; built once in openSevenZip for O(1) Open
 }
 
 func openSevenZip(fpath string) (Reader, error) {
@@ -23,7 +24,16 @@ func openSevenZip(fpath string) (Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &szReader{rc: rc}, nil
+	// Build index once; first-wins matches the previous linear-scan behaviour.
+	idx := make(map[string]*sevenzip.File, len(rc.File))
+	for _, f := range rc.File {
+		if n := normName(f.Name); n != "" {
+			if _, ok := idx[n]; !ok {
+				idx[n] = f
+			}
+		}
+	}
+	return &szReader{rc: rc, index: idx}, nil
 }
 
 func (r *szReader) List() ([]Entry, error) {
@@ -40,10 +50,9 @@ func (r *szReader) List() ([]Entry, error) {
 }
 
 func (r *szReader) Open(name string) (io.ReadCloser, error) {
-	for _, f := range r.rc.File {
-		if normName(f.Name) == name {
-			return f.Open()
-		}
+	// O(1) index lookup built during openSevenZip; avoids O(N×normName) per call.
+	if f, ok := r.index[name]; ok {
+		return f.Open()
 	}
 	return nil, fmt.Errorf("archive: %q not found in 7zip archive", name)
 }

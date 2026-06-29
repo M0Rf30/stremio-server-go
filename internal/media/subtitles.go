@@ -95,8 +95,8 @@ func fetchSubBytes(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	// openSubClient: shared transport reuses TCP connection for subtitle CDN requests.
+	resp, err := openSubClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

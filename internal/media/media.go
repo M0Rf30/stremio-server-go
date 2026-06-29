@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/M0Rf30/stremio-server-go/internal/types"
@@ -21,19 +22,49 @@ import (
 
 const chunkSize = 65536 // 64 KiB — OpenSubtitles hash window
 
+// openSubClient is a shared HTTP client for OpenSubHash (HEAD + Range GETs) and
+// subtitle fetches. One transport means all requests to the same host reuse a
+// single TCP connection pool instead of allocating a fresh one per call.
+var openSubClient = &http.Client{Timeout: 15 * time.Second}
+
+// probeResultEntry holds a cached Probe() result (or error) with a wall-clock expiry.
+type probeResultEntry struct {
+	result    interface{}
+	err       error
+	expiresAt time.Time
+}
+
+// tracksCacheEntry holds a cached Tracks() result (or error) with a wall-clock expiry.
+type tracksCacheEntry struct {
+	result    interface{}
+	err       error
+	expiresAt time.Time
+}
+
 // prober is the concrete implementation of types.MediaProber.
 type prober struct {
 	// baseURLLocal is the local server URL (e.g. "http://127.0.0.1:11470"),
 	// used to prefix scheme-less stream URLs passed to Probe.
 	baseURLLocal string
 	hls          *hlsManager
+	// Probe and Tracks result caches keyed by resolved URL; short-TTL prevents
+	// repeated ffprobe spawns for the same URL across consecutive player requests.
+	probeMu     sync.Mutex
+	probeCache  map[string]probeResultEntry
+	tracksMu    sync.Mutex
+	tracksCache map[string]tracksCacheEntry
 }
 
 // New returns a MediaProber backed by system ffprobe/ffmpeg.
 // baseURLLocal should include scheme and host with no trailing slash
 // (e.g. "http://127.0.0.1:11470").
 func New(baseURLLocal string) types.MediaProber {
-	return &prober{baseURLLocal: strings.TrimRight(baseURLLocal, "/"), hls: newHLS()}
+	return &prober{
+		baseURLLocal: strings.TrimRight(baseURLLocal, "/"),
+		hls:          newHLS(),
+		probeCache:   make(map[string]probeResultEntry), // must be non-nil before first write
+		tracksCache:  make(map[string]tracksCacheEntry), // must be non-nil before first write
+	}
 }
 
 // Probe runs ffprobe on streamURL and returns the parsed JSON map.
@@ -43,6 +74,14 @@ func (p *prober) Probe(streamURL string) (interface{}, error) {
 	if !strings.Contains(streamURL, "://") {
 		streamURL = p.baseURLLocal + "/" + strings.TrimLeft(streamURL, "/")
 	}
+
+	// Serve from cache — avoids repeated ffprobe spawns for the same URL.
+	p.probeMu.Lock()
+	if e, ok := p.probeCache[streamURL]; ok && time.Now().Before(e.expiresAt) {
+		p.probeMu.Unlock()
+		return e.result, e.err
+	}
+	p.probeMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -56,15 +95,32 @@ func (p *prober) Probe(streamURL string) (interface{}, error) {
 	)
 
 	out, err := cmd.Output()
+	var result map[string]interface{}
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe: %w", err)
+		err = fmt.Errorf("ffprobe: %w", err)
+	} else if jErr := json.Unmarshal(out, &result); jErr != nil {
+		err = fmt.Errorf("ffprobe json decode: %w", jErr)
+		result = nil
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("ffprobe json decode: %w", err)
+	// Cache with TTL: 5 min on success, 30 s on error (bounds broken-URL hammering).
+	p.probeMu.Lock()
+	if len(p.probeCache) >= 512 {
+		now := time.Now()
+		for k, v := range p.probeCache {
+			if now.After(v.expiresAt) {
+				delete(p.probeCache, k)
+			}
+		}
 	}
-	return result, nil
+	ttl := 5 * time.Minute
+	if err != nil {
+		ttl = 30 * time.Second
+	}
+	p.probeCache[streamURL] = probeResultEntry{result: result, err: err, expiresAt: time.Now().Add(ttl)}
+	p.probeMu.Unlock()
+
+	return result, err
 }
 
 // Tracks returns embedded non-video stream metadata for rawURL.
@@ -85,44 +141,75 @@ func (p *prober) Tracks(rawURL string) (interface{}, error) {
 	// Rewrite loopback HTTPS to plain HTTP (ffprobe rejects self-signed certs).
 	streamURL = localize(streamURL)
 
+	// Serve from cache — avoids repeated ffprobe spawns for the same URL.
+	p.tracksMu.Lock()
+	if e, ok := p.tracksCache[streamURL]; ok && time.Now().Before(e.expiresAt) {
+		p.tracksMu.Unlock()
+		return e.result, e.err
+	}
+	p.tracksMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ffprobe",
 		"-v", "quiet", "-print_format", "json", "-show_streams", streamURL,
 	).Output()
+
+	var result interface{}
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe: %w", err)
-	}
-	var r struct {
-		Streams []struct {
-			Index     int    `json:"index"`
-			CodecType string `json:"codec_type"`
-			CodecName string `json:"codec_name"`
-			Channels  int    `json:"channels"`
-			Tags      struct {
-				Language string `json:"language"`
-				Title    string `json:"title"`
-			} `json:"tags"`
-		} `json:"streams"`
-	}
-	if err := json.Unmarshal(out, &r); err != nil {
-		return nil, fmt.Errorf("ffprobe json decode: %w", err)
-	}
-	result := make([]interface{}, 0, len(r.Streams))
-	for _, st := range r.Streams {
-		if st.CodecType == "video" {
-			continue
+		err = fmt.Errorf("ffprobe: %w", err)
+	} else {
+		var r struct {
+			Streams []struct {
+				Index     int    `json:"index"`
+				CodecType string `json:"codec_type"`
+				CodecName string `json:"codec_name"`
+				Channels  int    `json:"channels"`
+				Tags      struct {
+					Language string `json:"language"`
+					Title    string `json:"title"`
+				} `json:"tags"`
+			} `json:"streams"`
 		}
-		result = append(result, map[string]interface{}{
-			"id":       st.Index,
-			"type":     st.CodecType,
-			"codec":    st.CodecName,
-			"lang":     st.Tags.Language,
-			"label":    st.Tags.Title,
-			"channels": st.Channels,
-		})
+		if jErr := json.Unmarshal(out, &r); jErr != nil {
+			err = fmt.Errorf("ffprobe json decode: %w", jErr)
+		} else {
+			tracks := make([]interface{}, 0, len(r.Streams))
+			for _, st := range r.Streams {
+				if st.CodecType == "video" {
+					continue
+				}
+				tracks = append(tracks, map[string]interface{}{
+					"id":       st.Index,
+					"type":     st.CodecType,
+					"codec":    st.CodecName,
+					"lang":     st.Tags.Language,
+					"label":    st.Tags.Title,
+					"channels": st.Channels,
+				})
+			}
+			result = tracks
+		}
 	}
-	return result, nil
+
+	// Cache with TTL: 5 min on success, 30 s on error.
+	p.tracksMu.Lock()
+	if len(p.tracksCache) >= 512 {
+		now := time.Now()
+		for k, v := range p.tracksCache {
+			if now.After(v.expiresAt) {
+				delete(p.tracksCache, k)
+			}
+		}
+	}
+	ttl := 5 * time.Minute
+	if err != nil {
+		ttl = 30 * time.Second
+	}
+	p.tracksCache[streamURL] = tracksCacheEntry{result: result, err: err, expiresAt: time.Now().Add(ttl)}
+	p.tracksMu.Unlock()
+
+	return result, err
 }
 
 // OpenSubHash computes the OpenSubtitles 64-bit file hash for videoURL.
@@ -189,12 +276,12 @@ func toLocalPath(u string) string {
 // fetchHTTPChunks fetches the first and last 64 KiB of a remote file
 // using HTTP Range requests, returning (size, head, tail, err).
 func fetchHTTPChunks(url string) (size int64, head, tail []byte, err error) {
-	hClient := &http.Client{Timeout: 15 * time.Second}
+	// openSubClient: shared transport reuses the TCP connection for HEAD + 2× Range GETs.
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodHead, url, nil)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("HEAD %s: %w", url, err)
 	}
-	resp, err := hClient.Do(req)
+	resp, err := openSubClient.Do(req)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("HEAD %s: %w", url, err)
 	}
@@ -223,7 +310,7 @@ func fetchHTTPChunks(url string) (size int64, head, tail []byte, err error) {
 }
 
 // httpRangeGet performs a Range GET [from, to] and returns the body.
-// A 15-second timeout is applied; the body is capped at chunkSize+1 bytes so
+// A 15-second context timeout is applied; the body is capped at chunkSize+1 bytes so
 // a server that ignores the Range header and returns a 200 + full body
 // cannot cause an OOM.
 func httpRangeGet(url string, from, to int64) ([]byte, error) {
@@ -235,8 +322,8 @@ func httpRangeGet(url string, from, to int64) ([]byte, error) {
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", from, to))
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// openSubClient: shared transport; per-request timeout applied via ctx.
+	resp, err := openSubClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

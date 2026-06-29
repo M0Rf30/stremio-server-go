@@ -82,7 +82,8 @@ func normName(s string) string {
 // ── zip ──────────────────────────────────────────────────────────────────────
 
 type zipReader struct {
-	rc *zip.ReadCloser
+	rc    *zip.ReadCloser
+	index map[string]*zip.File // normName → file; built once in openZip for O(1) Open
 }
 
 func openZip(fpath string) (Reader, error) {
@@ -90,7 +91,16 @@ func openZip(fpath string) (Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &zipReader{rc: rc}, nil
+	// Build index once; first-wins matches the previous linear-scan behaviour.
+	idx := make(map[string]*zip.File, len(rc.File))
+	for _, f := range rc.File {
+		if n := normName(f.Name); n != "" {
+			if _, ok := idx[n]; !ok {
+				idx[n] = f
+			}
+		}
+	}
+	return &zipReader{rc: rc, index: idx}, nil
 }
 
 func (r *zipReader) List() ([]Entry, error) {
@@ -107,10 +117,9 @@ func (r *zipReader) List() ([]Entry, error) {
 }
 
 func (r *zipReader) Open(name string) (io.ReadCloser, error) {
-	for _, f := range r.rc.File {
-		if normName(f.Name) == name {
-			return f.Open()
-		}
+	// O(1) index lookup built during openZip; avoids O(N×normName) per call.
+	if f, ok := r.index[name]; ok {
+		return f.Open()
 	}
 	return nil, fmt.Errorf("archive: %q not found in zip", name)
 }
