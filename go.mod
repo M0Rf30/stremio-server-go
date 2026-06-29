@@ -111,4 +111,4 @@ require (
 	zombiezen.com/go/sqlite v1.4.2 // indirect
 )
 
-replace github.com/anacrolix/torrent => github.com/M0Rf30/torrent v1.61.1-0.20260629121254-78f25916422e
+replace github.com/anacrolix/torrent => github.com/M0Rf30/torrent v1.61.1-0.20260629151225-aea94402da75
