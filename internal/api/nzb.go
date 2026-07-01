@@ -6,7 +6,10 @@
 //	POST /nzb/create/{key}   body: {"servers":[{host,port,user,pass,ssl,connections}], "nzbUrl":"..."}
 //	                         or ?lz=<lz-string-encoded-json>
 //	                         → {"key":"<session-key>"}
-//	GET  /nzb/create         → 501 (POST required)
+//	GET  /nzb/create?lz=...  → creates the session like POST, then 307-redirects
+//	                         to /nzb/stream/{key} (stremio-core's Stream::convert()
+//	                         emits this GET form for NZB streams)
+//	GET  /nzb/create         → 501 (no ?lz= payload)
 //
 //	GET  /nzb/stream?key={key}
 //	GET  /nzb/stream/{key}/{file...}
@@ -136,9 +139,9 @@ func (s *server) handleNZB(w http.ResponseWriter, r *http.Request, seg []string)
 
 	switch seg[1] {
 	case "create":
-		if r.Method == http.MethodGet {
+		if r.Method == http.MethodGet && r.URL.Query().Get("lz") == "" {
 			writeJSON(w, http.StatusNotImplemented, map[string]any{
-				"error": "GET /nzb/create is not supported; use POST with {servers, nzbUrl}",
+				"error": "GET /nzb/create requires ?lz=; use POST with {servers, nzbUrl} or GET with ?lz=",
 			})
 			return
 		}
@@ -154,8 +157,11 @@ func (s *server) handleNZB(w http.ResponseWriter, r *http.Request, seg []string)
 	}
 }
 
-// nzbCreate handles POST /nzb/create[/{key}].
-// @Summary  Create an NZB/Usenet streaming session
+// nzbCreate handles POST /nzb/create[/{key}] and GET /nzb/create[/{key}]?lz=...
+//   - POST → resolve, store session, respond {"key":…}.
+//   - GET  → same, then 307-redirect to /nzb/stream/{key}.
+//
+// @Summary  Create an NZB/Usenet streaming session (POST, or GET with ?lz=)
 // @Tags     NZB
 // @Accept   json
 // @Produce  json
@@ -163,9 +169,12 @@ func (s *server) handleNZB(w http.ResponseWriter, r *http.Request, seg []string)
 // @Param    lz    query  string  false  "lz-string encoded JSON body"
 // @Param    body  body   object  false  "{servers:[\"nntps://host\"], nzbUrl} (servers also accept {host,port,...} objects)"
 // @Success  200  {object}  map[string]string  "session key"
+// @Success  307  "redirect to /nzb/stream/{key} (GET form)"
 // @Failure  400
-// @Failure  501
+// @Failure  501  "bare GET without ?lz="
+// @Router   /nzb/create [get]
 // @Router   /nzb/create [post]
+// @Router   /nzb/create/{key} [get]
 // @Router   /nzb/create/{key} [post]
 func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 	var req nzbCreateReq
@@ -288,7 +297,12 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 	nzbSessions[key] = sess
 	nzbSessionsMu.Unlock()
 
-	writeJSON(w, http.StatusOK, map[string]any{"key": key})
+	if r.Method == http.MethodPost {
+		writeJSON(w, http.StatusOK, map[string]any{"key": key})
+		return
+	}
+	// GET → redirect straight to the stream URL; nzbResolveFile picks the file.
+	http.Redirect(w, r, "/nzb/stream/"+url.PathEscape(key), http.StatusTemporaryRedirect)
 }
 
 // parseNzbServers accepts either the canonical stremio-core form — a JSON array

@@ -498,7 +498,7 @@
             }
         },
         "/nzb/create": {
-            "post": {
+            "get": {
                 "consumes": [
                     "application/json"
                 ],
@@ -508,7 +508,7 @@
                 "tags": [
                     "NZB"
                 ],
-                "summary": "Create an NZB/Usenet streaming session",
+                "summary": "Create an NZB/Usenet streaming session (POST, or GET with ?lz=)",
                 "parameters": [
                     {
                         "type": "string",
@@ -535,16 +535,17 @@
                             }
                         }
                     },
+                    "307": {
+                        "description": "redirect to /nzb/stream/{key} (GET form)"
+                    },
                     "400": {
                         "description": "Bad Request"
                     },
                     "501": {
-                        "description": "Not Implemented"
+                        "description": "bare GET without ?lz="
                     }
                 }
-            }
-        },
-        "/nzb/create/{key}": {
+            },
             "post": {
                 "consumes": [
                     "application/json"
@@ -555,7 +556,57 @@
                 "tags": [
                     "NZB"
                 ],
-                "summary": "Create an NZB/Usenet streaming session",
+                "summary": "Create an NZB/Usenet streaming session (POST, or GET with ?lz=)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded JSON body",
+                        "name": "lz",
+                        "in": "query"
+                    },
+                    {
+                        "description": "{servers:[\\",
+                        "name": "body",
+                        "in": "body",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "session key",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "307": {
+                        "description": "redirect to /nzb/stream/{key} (GET form)"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "501": {
+                        "description": "bare GET without ?lz="
+                    }
+                }
+            }
+        },
+        "/nzb/create/{key}": {
+            "get": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "NZB"
+                ],
+                "summary": "Create an NZB/Usenet streaming session (POST, or GET with ?lz=)",
                 "parameters": [
                     {
                         "type": "string",
@@ -588,11 +639,68 @@
                             }
                         }
                     },
+                    "307": {
+                        "description": "redirect to /nzb/stream/{key} (GET form)"
+                    },
                     "400": {
                         "description": "Bad Request"
                     },
                     "501": {
-                        "description": "Not Implemented"
+                        "description": "bare GET without ?lz="
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "NZB"
+                ],
+                "summary": "Create an NZB/Usenet streaming session (POST, or GET with ?lz=)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "caller-supplied session key",
+                        "name": "key",
+                        "in": "path"
+                    },
+                    {
+                        "type": "string",
+                        "description": "lz-string encoded JSON body",
+                        "name": "lz",
+                        "in": "query"
+                    },
+                    {
+                        "description": "{servers:[\\",
+                        "name": "body",
+                        "in": "body",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "session key",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "307": {
+                        "description": "redirect to /nzb/stream/{key} (GET form)"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "501": {
+                        "description": "bare GET without ?lz="
                     }
                 }
             }
@@ -1547,6 +1655,89 @@
                 }
             }
         },
+        "types.Growler": {
+            "type": "object",
+            "properties": {
+                "flood": {
+                    "type": "integer"
+                },
+                "pulse": {
+                    "type": "integer"
+                }
+            }
+        },
+        "types.Options": {
+            "type": "object",
+            "properties": {
+                "connections": {
+                    "type": "integer"
+                },
+                "dht": {
+                    "type": "boolean"
+                },
+                "growler": {
+                    "$ref": "#/definitions/types.Growler"
+                },
+                "handshakeTimeout": {
+                    "type": "integer"
+                },
+                "path": {
+                    "type": "string"
+                },
+                "peerSearch": {
+                    "$ref": "#/definitions/types.PeerSearch"
+                },
+                "swarmCap": {
+                    "$ref": "#/definitions/types.SwarmCap"
+                },
+                "timeout": {
+                    "type": "integer"
+                },
+                "tracker": {
+                    "type": "boolean"
+                },
+                "virtual": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "types.PeerSearch": {
+            "type": "object",
+            "properties": {
+                "max": {
+                    "type": "integer"
+                },
+                "min": {
+                    "type": "integer"
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "types.Source": {
+            "type": "object",
+            "properties": {
+                "lastStarted": {
+                    "type": "string"
+                },
+                "numFound": {
+                    "type": "integer"
+                },
+                "numFoundUniq": {
+                    "type": "integer"
+                },
+                "numRequests": {
+                    "type": "integer"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
         "types.Stats": {
             "type": "object",
             "properties": {
@@ -1575,7 +1766,9 @@
                 "name": {
                     "type": "string"
                 },
-                "opts": {},
+                "opts": {
+                    "$ref": "#/definitions/types.Options"
+                },
                 "peerSearchRunning": {
                     "description": "PeerSearchRunning is REQUIRED (non-null) by stremio-core's Statistics.",
                     "type": "boolean"
@@ -1586,8 +1779,17 @@
                 "queued": {
                     "type": "integer"
                 },
-                "selections": {},
-                "sources": {},
+                "selections": {
+                    "description": "Selections holds piece-selection ranges (null or an array). The element\nshape is anacrolix-internal and never populated by the engine today, so\n[]any preserves the null/empty-array wire semantics without constraining\nthe unknown element type.",
+                    "type": "array",
+                    "items": {}
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.Source"
+                    }
+                },
                 "streamLen": {
                     "description": "Per-file extras (only when a file index is requested).",
                     "type": "integer"
@@ -1624,6 +1826,17 @@
                     "items": {
                         "$ref": "#/definitions/types.Wire"
                     }
+                }
+            }
+        },
+        "types.SwarmCap": {
+            "type": "object",
+            "properties": {
+                "maxSpeed": {
+                    "type": "number"
+                },
+                "minPeers": {
+                    "type": "integer"
                 }
             }
         },

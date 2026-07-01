@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 
+	lzstring "github.com/daku10/go-lz-string"
+
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
 
@@ -190,6 +192,64 @@ func TestHandlerNZBCreate_Success(t *testing.T) {
 	m := decodeJSON(t, rec.Body.Bytes())
 	if _, ok := m["key"].(string); !ok {
 		t.Errorf("nzb create response missing key: %v", m)
+	}
+}
+
+// ─── NZB create via GET + lz (stremio-core direct-stream contract) ────────────
+//
+// stremio-core's Stream::convert() emits NZB stream URLs as
+// GET /nzb/create?lz=<lz-string(JSON{nzbUrl|nzbUrls, servers}) — the player
+// issues a bare GET and expects a redirect straight to the playable stream,
+// mirroring archive.go/ftp.go's GET+lz direct-play contract.
+
+func TestHandlerNZBCreate_GetLzRedirect(t *testing.T) {
+	nzbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-nzb")
+		_, _ = w.Write([]byte(minimalNZBXML))
+	}))
+	defer nzbSrv.Close()
+
+	payload := fmt.Sprintf(`{"nzbUrl":"%s/test.nzb","servers":["nntp://news.example.com"]}`, nzbSrv.URL)
+	compressed, err := lzstring.CompressToEncodedURIComponent(payload)
+	if err != nil {
+		t.Fatalf("lz compress failed: %v", err)
+	}
+
+	h := newHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/nzb/create?lz="+url.QueryEscape(compressed), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("GET /nzb/create?lz=... status = %d; want %d; body = %s",
+			rec.Code, http.StatusTemporaryRedirect, rec.Body.String())
+	}
+
+	const prefix = "/nzb/stream/"
+	loc := rec.Header().Get("Location")
+	if !strings.HasPrefix(loc, prefix) {
+		t.Fatalf("Location = %q; want prefix %q", loc, prefix)
+	}
+	if key := strings.TrimPrefix(loc, prefix); key == "" {
+		t.Fatalf("Location = %q; want non-empty session key after %q", loc, prefix)
+	}
+
+	// The session must already exist: GETting the redirect target must not
+	// 404. The NNTP fetch itself is offline here, so any non-404 outcome
+	// (200/206 on a lucky cache hit, or a 4xx/5xx from the failed fetch)
+	// is acceptable — only "session not found" is a contract violation.
+	streamRec := serve(t, h, http.MethodGet, loc, nil)
+	if streamRec.Code == http.StatusNotFound {
+		t.Errorf("GET %s status = 404; want session to exist after create", loc)
+	}
+}
+
+func TestHandlerNZBCreate_GetWithoutLz501(t *testing.T) {
+	h := newHandler(t)
+	rec := serve(t, h, http.MethodGet, "/nzb/create", nil)
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("GET /nzb/create status = %d; want %d; body = %s",
+			rec.Code, http.StatusNotImplemented, rec.Body.String())
 	}
 }
 
