@@ -832,8 +832,22 @@ func (h *Handler) serveIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Refresh the cache.
+	// Refresh the cache. Distinct proxy URLs are effectively unbounded (each
+	// client-supplied "proxy" query value gets its own entry), so unlike
+	// proxyClients (bounded by config cardinality) this map can grow without
+	// limit if left untended. Rather than run a dedicated janitor goroutine
+	// for a cache this small and low-churn, opportunistically sweep expired
+	// entries here, piggybacking on the lock we already hold for the insert.
+	// The size guard keeps the common single-proxy case free of the O(n) scan.
 	h.ipMu.Lock()
+	if len(h.ipCache) > 16 {
+		now := time.Now()
+		for k, e := range h.ipCache {
+			if now.After(e.expiresAt) {
+				delete(h.ipCache, k)
+			}
+		}
+	}
 	h.ipCache[effProxy] = ipCacheEntry{ip: ipStr, expiresAt: time.Now().Add(ipCacheTTL)}
 	h.ipMu.Unlock()
 
