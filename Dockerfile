@@ -34,7 +34,7 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-amd64}" go bui
 # ---------------------------------------------------------------------------
 # Runtime stage
 # ---------------------------------------------------------------------------
-FROM docker.io/library/alpine:3.20
+FROM docker.io/library/alpine:3.24
 
 LABEL org.opencontainers.image.title="stremio-server-go" \
       org.opencontainers.image.description="IPv6-capable drop-in Stremio streaming server" \
