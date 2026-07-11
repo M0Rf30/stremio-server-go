@@ -834,7 +834,7 @@ func (s *server) handleAllStats(w http.ResponseWriter, r *http.Request) {
 	// Common path: avoid url.Values map alloc by checking RawQuery directly.
 	// Pass the typed map straight to writeJSON — JSON output is identical to
 	// the original map[string]any because the encoder reflects on the values.
-	if !strings.Contains(r.URL.RawQuery, "sys=1") {
+	if r.URL.Query().Get("sys") != "1" {
 		writeJSON(w, http.StatusOK, all)
 		return
 	}
@@ -1426,7 +1426,18 @@ var streamBufPool = sync.Pool{
 }
 
 // getClient is shared across all httpGet calls so TCP connections are reused.
-var getClient = &http.Client{Timeout: 30 * time.Second}
+// DialContext blocks the cloud-metadata address (169.254.169.254) for all
+// /create-style outbound fetches (archive/nzb), matching proxyClient/
+// blobClient above and ftpstream's httpGuardedClient.
+var getClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 10 * time.Second,
+			Control: netguard.DialControl(false),
+		}).DialContext,
+	},
+}
 
 // buildStreamProxyConfig converts types.Config proxy fields to a streamproxy.Config.
 func buildStreamProxyConfig(cfg types.Config, client *http.Client) streamproxy.Config {

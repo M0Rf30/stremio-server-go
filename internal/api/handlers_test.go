@@ -45,6 +45,33 @@ func TestHandlerAllStats_SysParam(t *testing.T) {
 	}
 }
 
+func TestHandlerAllStats_SysParam_ExactMatchOnly(t *testing.T) {
+	// Regression: the gate must use an exact query-param check, not a
+	// substring match on RawQuery — "nosys=1" and "xsys=1" both contain the
+	// text "sys=1" but must NOT trigger sys augmentation.
+	cases := []struct {
+		query   string
+		wantSys bool
+	}{
+		{"sys=1", true},
+		{"nosys=1", false},
+		{"xsys=1", false},
+		{"sys=0", false},
+	}
+	for _, c := range cases {
+		h := newHandler(t, testEngine())
+		rec := serve(t, h, http.MethodGet, "/stats.json?"+c.query, nil)
+		if rec.Code != http.StatusOK {
+			t.Errorf("query %q: status = %d; want 200", c.query, rec.Code)
+		}
+		m := decodeJSON(t, rec.Body.Bytes())
+		_, hasSys := m["sys"]
+		if hasSys != c.wantSys {
+			t.Errorf("query %q: sys key present = %v; want %v (keys: %v)", c.query, hasSys, c.wantSys, m)
+		}
+	}
+}
+
 func TestHandlerAllStats_Empty(t *testing.T) {
 	h := newHandler(t)
 	rec := serve(t, h, http.MethodGet, "/stats.json", nil)

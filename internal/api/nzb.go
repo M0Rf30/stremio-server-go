@@ -460,6 +460,7 @@ func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string)
 		}
 
 		nzbSess := nzb.NewSession(sess.cfg, sess.files)
+		defer func() { _ = nzbSess.Close() }()
 		if err := nzbSess.AssembleFile(target.Name, f); err != nil {
 			_ = f.Close()
 			_ = os.Remove(tmpPath)

@@ -86,6 +86,15 @@ func New(cfg Config) *Handler {
 			gcm, _ = cipher.NewGCM(block)
 		}
 	}
+	if gcm == nil && len(cfg.Secret) > 0 {
+		// Secret was set but is not a valid AES key length (16/24/32 bytes);
+		// leaving gcm nil here would let signToken/verifyToken's cheap
+		// len(h.cfg.Secret)==0 guard pass through to a nil-interface panic.
+		// Clearing Secret makes that guard fire instead, degrading cleanly
+		// to "signing disabled" rather than crashing every token operation.
+		logging.For("streamproxy").Warn("invalid signing secret length; disabling token signing", "len", len(cfg.Secret))
+		cfg.Secret = nil
+	}
 	return &Handler{
 		cfg:          cfg,
 		cache:        c,
@@ -753,6 +762,11 @@ func buildProxyClient(proxyURL string) (*http.Client, error) {
 // ipCacheTTL is how long a resolved egress IP is cached per effective proxy.
 const ipCacheTTL = 5 * time.Minute
 
+// ipCacheMaxEntries is the hard cap on the number of distinct proxy keys
+// held in ipCache. Each client-supplied "proxy" query value gets its own
+// entry, so without a cap this map would grow unboundedly.
+const ipCacheMaxEntries = 16
+
 // ipServices is an ordered list of plain-text / JSON IP-echo endpoints.
 var ipServices = []string{
 	"https://api.ipify.org",
@@ -835,21 +849,44 @@ func (h *Handler) serveIP(w http.ResponseWriter, r *http.Request) {
 	// Refresh the cache. Distinct proxy URLs are effectively unbounded (each
 	// client-supplied "proxy" query value gets its own entry), so unlike
 	// proxyClients (bounded by config cardinality) this map can grow without
-	// limit if left untended. Rather than run a dedicated janitor goroutine
-	// for a cache this small and low-churn, opportunistically sweep expired
-	// entries here, piggybacking on the lock we already hold for the insert.
-	// The size guard keeps the common single-proxy case free of the O(n) scan.
+	// limit if left untended. Insert first, then sweep: a TTL-only pass
+	// removes expired entries, and — mirroring media.hlsManager's
+	// sweepProbeCache — a hard-cap loop evicts the soonest-expiring entry
+	// until back at ipCacheMaxEntries, so the map is always bounded
+	// regardless of how many distinct proxy values a client bursts through.
 	h.ipMu.Lock()
-	if len(h.ipCache) > 16 {
-		now := time.Now()
-		for k, e := range h.ipCache {
-			if now.After(e.expiresAt) {
-				delete(h.ipCache, k)
-			}
-		}
-	}
 	h.ipCache[effProxy] = ipCacheEntry{ip: ipStr, expiresAt: time.Now().Add(ipCacheTTL)}
+	if len(h.ipCache) > ipCacheMaxEntries {
+		h.sweepIPCache()
+	}
 	h.ipMu.Unlock()
 
 	_ = json.NewEncoder(w).Encode(map[string]string{"ip": ipStr})
+}
+
+// sweepIPCache removes expired entries from the egress-IP cache and, when
+// the size still exceeds ipCacheMaxEntries after the TTL sweep, evicts the
+// soonest-expiring entry until back under the limit. Must be called with
+// h.ipMu held.
+func (h *Handler) sweepIPCache() {
+	now := time.Now()
+	for k, e := range h.ipCache {
+		if now.After(e.expiresAt) {
+			delete(h.ipCache, k)
+		}
+	}
+	// Hard size cap: evict soonest-expiring entry until under limit.
+	for len(h.ipCache) > ipCacheMaxEntries {
+		var evict string
+		var evictExp time.Time
+		found := false
+		for k, e := range h.ipCache {
+			if !found || e.expiresAt.Before(evictExp) {
+				evict = k
+				evictExp = e.expiresAt
+				found = true
+			}
+		}
+		delete(h.ipCache, evict)
+	}
 }

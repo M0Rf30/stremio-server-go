@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	lzstring "github.com/daku10/go-lz-string"
 
@@ -291,6 +292,61 @@ func TestHandlerArchiveCreate_ZipSuccess(t *testing.T) {
 	m := decodeJSON(t, rec.Body.Bytes())
 	if _, ok := m["key"].(string); !ok {
 		t.Errorf("archive create missing key: %v", m)
+	}
+}
+
+func TestHandlerArchiveCreate_KeyCollisionRemovesOldTempArchive(t *testing.T) {
+	zipData := buildTestZip(t)
+	zipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		_, _ = w.Write(zipData)
+	}))
+	defer zipSrv.Close()
+
+	h := newHandler(t)
+	const key = "collide-key"
+	body := fmt.Sprintf(`{"url":"%s/test.zip"}`, zipSrv.URL)
+
+	req1 := httptest.NewRequest(http.MethodPost, "/zip/create/"+key, strings.NewReader(body))
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first POST /zip/create/%s status = %d; body = %s", key, rec1.Code, rec1.Body.String())
+	}
+
+	archiveSessionsMu.Lock()
+	oldSess, ok := archiveSessions[key]
+	archiveSessionsMu.Unlock()
+	if !ok {
+		t.Fatal("expected session to be registered under caller-supplied key")
+	}
+	oldArchivePath := oldSess.archivePath
+	if !oldSess.isTempArch || oldArchivePath == "" {
+		t.Fatalf("expected first session to own a temp-downloaded archive; isTempArch=%v path=%q",
+			oldSess.isTempArch, oldArchivePath)
+	}
+	if _, err := os.Stat(oldArchivePath); err != nil {
+		t.Fatalf("expected old archive to exist before overwrite: %v", err)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/zip/create/"+key, strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second POST /zip/create/%s status = %d; body = %s", key, rec2.Code, rec2.Body.String())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(oldArchivePath); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("old temp archive %q still exists after key-collision cleanup", oldArchivePath)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -575,6 +631,20 @@ func TestCastingParams_JSONBody(t *testing.T) {
 	}
 	if cmd := castingCommand([]string{"casting", "dev", "player"}, params); cmd != "load" {
 		t.Errorf("castingCommand = %q; want load (inferred from source)", cmd)
+	}
+}
+
+func TestCastingParams_JSONBody_OversizedRejected(t *testing.T) {
+	// Body exceeds the 1<<20 LimitReader cap; decode must fail (not hang or
+	// buffer the whole body), and castingParams must return cleanly with no
+	// fields extracted from the truncated JSON.
+	pad := strings.Repeat("a", (1<<20)+1024)
+	body := strings.NewReader(`{"source":"http://x/stream","pad":"` + pad + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/casting/dev/player", body)
+	req.Header.Set("Content-Type", "application/json")
+	params := castingParams(req)
+	if got := params.Get("source"); got != "" {
+		t.Errorf("source = %q; want empty (decode past 1MiB limit should fail)", got)
 	}
 }
 

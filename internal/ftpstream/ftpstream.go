@@ -109,7 +109,13 @@ func openFTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, i
 		return nil, -1, err
 	}
 
-	opts := []ftp.DialOption{ftp.DialWithContext(ctx)}
+	opts := []ftp.DialOption{
+		ftp.DialWithContext(ctx),
+		ftp.DialWithDialer(net.Dialer{
+			Timeout: 10 * time.Second,
+			Control: netguard.DialControl(false),
+		}),
+	}
 	if p.tls {
 		opts = append(opts, ftp.DialWithTLS(&tls.Config{
 			ServerName: p.host,

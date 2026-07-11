@@ -393,6 +393,57 @@ func TestToLocalPath(t *testing.T) {
 	}
 }
 
+// ── media.go: Probe/Tracks cache hard-cap eviction ───────────────────────────
+
+// newTestProber constructs a prober with initialized caches but no hlsManager
+// (Probe and Tracks never touch p.hls).
+func newTestProber() *prober {
+	return &prober{
+		probeCache:  map[string]probeResultEntry{},
+		tracksCache: map[string]tracksCacheEntry{},
+	}
+}
+
+// TestProbeCacheHardCap is the regression test for the unbounded-growth bug:
+// a burst of distinct URLs, all still within their TTL, must never push
+// p.probeCache past probeTracksCacheMaxSize.  http://127.0.0.1:1 is a
+// privileged, unused port, so ffprobe fails near-instantly on "connection
+// refused" with no real network I/O — deterministic and offline whether or
+// not the ffprobe binary is even installed (a missing binary fails just as
+// fast); only the resulting cache size is under test, not ffprobe's output.
+func TestProbeCacheHardCap(t *testing.T) {
+	p := newTestProber()
+	notExpired := time.Now().Add(time.Hour)
+	for i := range probeTracksCacheMaxSize {
+		p.probeCache[fmt.Sprintf("http://127.0.0.1:1/pre%d", i)] = probeResultEntry{expiresAt: notExpired}
+	}
+
+	if _, err := p.Probe("http://127.0.0.1:1/new"); err == nil {
+		t.Fatal("Probe against a refused port unexpectedly succeeded")
+	}
+
+	if got := len(p.probeCache); got > probeTracksCacheMaxSize {
+		t.Errorf("len(probeCache) = %d, want <= %d (hard cap not enforced)", got, probeTracksCacheMaxSize)
+	}
+}
+
+// TestTracksCacheHardCap mirrors TestProbeCacheHardCap for p.tracksCache.
+func TestTracksCacheHardCap(t *testing.T) {
+	p := newTestProber()
+	notExpired := time.Now().Add(time.Hour)
+	for i := range probeTracksCacheMaxSize {
+		p.tracksCache[fmt.Sprintf("http://127.0.0.1:1/pre%d", i)] = tracksCacheEntry{expiresAt: notExpired}
+	}
+
+	if _, err := p.Tracks("http://127.0.0.1:1/new"); err == nil {
+		t.Fatal("Tracks against a refused port unexpectedly succeeded")
+	}
+
+	if got := len(p.tracksCache); got > probeTracksCacheMaxSize {
+		t.Errorf("len(tracksCache) = %d, want <= %d (hard cap not enforced)", got, probeTracksCacheMaxSize)
+	}
+}
+
 // ── media.go: computeOpenSubHash ─────────────────────────────────────────────
 
 func TestComputeOpenSubHash(t *testing.T) {

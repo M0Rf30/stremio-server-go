@@ -664,6 +664,41 @@ func TestClient_Close(t *testing.T) {
 	}
 }
 
+// TestSession_Close_ReleasesConnectionAndIsIdempotent guards the call-site
+// pattern in internal/api/nzb.go where a per-request Session is created for a
+// single AssembleFile call and then deferred-Closed: the underlying NNTP
+// connection must actually be torn down (QUIT sent, conn closed, client
+// cleared), and Close must remain safe to call again afterward — per
+// Session.Close's doc comment ("safe to call Close concurrently with or
+// after AssembleFile").
+func TestSession_Close_ReleasesConnectionAndIsIdempotent(t *testing.T) {
+	c, srv := makeClient(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tp := textproto.NewConn(srv)
+		tp.ReadLine()                           //nolint:errcheck // QUIT
+		tp.PrintfLine("205 Closing connection") //nolint:errcheck
+		srv.Close()
+	}()
+
+	sess := &Session{cfg: ServerConfig{Host: "localhost"}, client: c}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("first Close error: %v", err)
+	}
+	<-done
+	if sess.client != nil {
+		t.Error("Close() did not clear the persistent client reference")
+	}
+	// The deferred Close in the api/nzb.go call site may race with, or be
+	// followed by, another Close on the same Session; it must never error
+	// or panic once the connection is already released.
+	if err := sess.Close(); err != nil {
+		t.Errorf("second Close error: %v", err)
+	}
+}
+
 // ===== Session tests =========================================================
 
 func TestSession_Files(t *testing.T) {

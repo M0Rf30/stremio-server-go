@@ -18,21 +18,45 @@ func init() {
 // AES cipher.Block (aes.aesCipher) is goroutine-safe for concurrent Encrypt calls, so
 // sharing one block across requests avoids repeated key-scheduling (~176 bytes of work
 // per 16-byte key) for streams that reuse the same key across many segments.
-var aesBlockCache sync.Map // string(key) → cipher.Block
+//
+// aesBlockMaxEntries bounds aesBlockCache; a client sending many distinct
+// DRM keys must not grow server memory without limit. There is no natural
+// TTL for a key→cipher.Block mapping, so once the cap is hit the whole
+// cache is cleared rather than tracking per-entry recency for a cache this
+// small and low-value — the next lookup simply re-derives the block.
+const aesBlockMaxEntries = 256
+
+var (
+	aesBlockMu    sync.Mutex
+	aesBlockCache = make(map[string]cipher.Block)
+)
 
 // cachedAESBlock returns a cached AES cipher.Block for key, creating and storing it on
 // first use.  Subsequent calls with the same key bytes skip key scheduling entirely.
 func cachedAESBlock(key []byte) (cipher.Block, error) {
 	k := string(key)
-	if v, ok := aesBlockCache.Load(k); ok {
-		return v.(cipher.Block), nil
+	aesBlockMu.Lock()
+	if b, ok := aesBlockCache[k]; ok {
+		aesBlockMu.Unlock()
+		return b, nil
 	}
+	aesBlockMu.Unlock()
+
 	b, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	actual, _ := aesBlockCache.LoadOrStore(k, b)
-	return actual.(cipher.Block), nil
+
+	aesBlockMu.Lock()
+	defer aesBlockMu.Unlock()
+	if existing, ok := aesBlockCache[k]; ok {
+		return existing, nil // another goroutine won the race
+	}
+	if len(aesBlockCache) >= aesBlockMaxEntries {
+		aesBlockCache = make(map[string]cipher.Block)
+	}
+	aesBlockCache[k] = b
+	return b, nil
 }
 
 // drmSubsample describes a single subsample unit inside a CENC-protected sample.

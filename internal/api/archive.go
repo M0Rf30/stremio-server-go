@@ -581,9 +581,17 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 	}
 	archiveSessionsMu.Lock()
 	if old, ok := archiveSessions[key]; ok && old.tmpDir != "" {
-		// A prior session used this key. Remove its temp dir asynchronously to
-		// avoid leaking disk space without blocking the lock.
-		go func(d string) { _ = os.RemoveAll(d) }(old.tmpDir)
+		// A prior session used this key. Remove its temp dir (and, if the
+		// archive itself was a downloaded temp file, the archive too)
+		// asynchronously to avoid leaking disk space without blocking the lock.
+		oldIsTempArch := old.isTempArch
+		oldArchivePath := old.archivePath
+		go func(d, archPath string, isTmp bool) {
+			_ = os.RemoveAll(d)
+			if isTmp {
+				_ = os.Remove(archPath)
+			}
+		}(old.tmpDir, oldArchivePath, oldIsTempArch)
 	}
 	archiveSessions[key] = sess
 	archiveSessionsMu.Unlock()

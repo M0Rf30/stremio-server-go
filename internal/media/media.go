@@ -22,6 +22,12 @@ import (
 
 const chunkSize = 65536 // 64 KiB — OpenSubtitles hash window
 
+// probeTracksCacheMaxSize is the maximum number of entries kept in each of
+// prober's probeCache and tracksCache.  Expired entries are swept on every
+// insert; when the map still exceeds this limit after the TTL sweep, the
+// soonest-expiring entry is evicted until it's back under the cap.
+const probeTracksCacheMaxSize = 512
+
 // openSubClient is a shared HTTP client for OpenSubHash (HEAD + Range GETs) and
 // subtitle fetches. One transport means all requests to the same host reuse a
 // single TCP connection pool instead of allocating a fresh one per call.
@@ -105,13 +111,25 @@ func (p *prober) Probe(streamURL string) (interface{}, error) {
 
 	// Cache with TTL: 5 min on success, 30 s on error (bounds broken-URL hammering).
 	p.probeMu.Lock()
-	if len(p.probeCache) >= 512 {
+	if len(p.probeCache) >= probeTracksCacheMaxSize {
 		now := time.Now()
 		for k, v := range p.probeCache {
 			if now.After(v.expiresAt) {
 				delete(p.probeCache, k)
 			}
 		}
+	}
+	// Hard size cap: evict soonest-expiring entry until under limit.
+	for len(p.probeCache) >= probeTracksCacheMaxSize {
+		var evict string
+		var evictExp time.Time
+		for k, v := range p.probeCache {
+			if evict == "" || v.expiresAt.Before(evictExp) {
+				evict = k
+				evictExp = v.expiresAt
+			}
+		}
+		delete(p.probeCache, evict)
 	}
 	ttl := 5 * time.Minute
 	if err != nil {
@@ -194,13 +212,25 @@ func (p *prober) Tracks(rawURL string) (interface{}, error) {
 
 	// Cache with TTL: 5 min on success, 30 s on error.
 	p.tracksMu.Lock()
-	if len(p.tracksCache) >= 512 {
+	if len(p.tracksCache) >= probeTracksCacheMaxSize {
 		now := time.Now()
 		for k, v := range p.tracksCache {
 			if now.After(v.expiresAt) {
 				delete(p.tracksCache, k)
 			}
 		}
+	}
+	// Hard size cap: evict soonest-expiring entry until under limit.
+	for len(p.tracksCache) >= probeTracksCacheMaxSize {
+		var evict string
+		var evictExp time.Time
+		for k, v := range p.tracksCache {
+			if evict == "" || v.expiresAt.Before(evictExp) {
+				evict = k
+				evictExp = v.expiresAt
+			}
+		}
+		delete(p.tracksCache, evict)
 	}
 	ttl := 5 * time.Minute
 	if err != nil {

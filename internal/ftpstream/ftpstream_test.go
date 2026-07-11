@@ -575,3 +575,33 @@ func TestParseFTPURLRejectedSchemes(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenFTPBlocksCloudMetadata verifies that openFTP's dialer rejects the
+// cloud-metadata address (169.254.169.254) at connect time via
+// netguard.DialControl, mirroring the guarantee httpGuardedClient already
+// gives openHTTP. No real network I/O occurs: the Control hook aborts the
+// dial before any connect(2) syscall, so this is deterministic offline.
+func TestOpenFTPBlocksCloudMetadata(t *testing.T) {
+	_, _, err := openFTP(t.Context(), "ftp://169.254.169.254:21/secret", 0)
+	if err == nil {
+		t.Fatal("expected error dialing cloud-metadata address, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked cloud-metadata address") {
+		t.Errorf("error %q does not indicate the netguard cloud-metadata block", err.Error())
+	}
+}
+
+// TestOpenHTTPBlocksCloudMetadata verifies that openHTTP's httpGuardedClient
+// rejects the cloud-metadata address (169.254.169.254) at connect time via
+// netguard.DialControl. No existing test covered this guard directly; added
+// alongside the openFTP guard test above for parity. Deterministic offline:
+// the Control hook aborts before any connect(2) syscall.
+func TestOpenHTTPBlocksCloudMetadata(t *testing.T) {
+	_, _, err := openHTTP(t.Context(), "http://169.254.169.254/latest/meta-data/", 0)
+	if err == nil {
+		t.Fatal("expected error fetching cloud-metadata address, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked cloud-metadata address") {
+		t.Errorf("error %q does not indicate the netguard cloud-metadata block", err.Error())
+	}
+}

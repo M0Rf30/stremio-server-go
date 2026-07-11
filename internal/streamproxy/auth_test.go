@@ -2,6 +2,7 @@ package streamproxy
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http/httptest"
 	"testing"
@@ -509,5 +510,52 @@ func TestClientIPNoPort(t *testing.T) {
 	ip := clientIP(r)
 	if ip == nil || ip.String() != "203.0.113.7" {
 		t.Errorf("no-port RemoteAddr: got %v want 203.0.113.7", ip)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// New — invalid signing secret length
+// ---------------------------------------------------------------------------
+
+// An invalid-length Secret (not 16/24/32 bytes) must not leave signingGCM nil
+// while cfg.Secret stays non-empty: that combination previously bypassed
+// signToken/verifyToken's len(h.cfg.Secret)==0 guard and panicked on
+// gcm.NonceSize() against a nil cipher.AEAD. New must clear Secret so the
+// existing guard degrades cleanly instead.
+func TestNewInvalidSecretLengthDisablesSigning(t *testing.T) {
+	h := authNewHandler(Config{Secret: []byte("too-short")})
+	if h.signingGCM != nil {
+		t.Fatalf("expected nil signingGCM for invalid key length, got non-nil")
+	}
+	if _, err := h.signToken(token{Exp: time.Now().Add(time.Hour).Unix()}); err == nil {
+		t.Fatal("signToken: expected clean error for invalid secret length, got nil")
+	}
+	if _, err := h.verifyToken("anytoken", nil); err == nil {
+		t.Fatal("verifyToken: expected clean error for invalid secret length, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ipCache — hard size cap
+// ---------------------------------------------------------------------------
+
+// sweepIPCache must never let ipCache grow past ipCacheMaxEntries, even when
+// every entry is still within its TTL (so a TTL-only pass alone would not
+// prune anything) and each insert uses a distinct client-supplied proxy key.
+func TestSweepIPCacheHardCap(t *testing.T) {
+	h := authNewHandler(Config{})
+	now := time.Now()
+	for i := 0; i < ipCacheMaxEntries+10; i++ {
+		key := fmt.Sprintf("proxy-%d", i)
+		h.ipCache[key] = ipCacheEntry{
+			ip:        "203.0.113.1",
+			expiresAt: now.Add(time.Duration(i)*time.Second + ipCacheTTL),
+		}
+		if len(h.ipCache) > ipCacheMaxEntries {
+			h.sweepIPCache()
+		}
+		if len(h.ipCache) > ipCacheMaxEntries {
+			t.Fatalf("after inserting %q: ipCache has %d entries, want <= %d", key, len(h.ipCache), ipCacheMaxEntries)
+		}
 	}
 }

@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -211,7 +212,7 @@ func castingParams(r *http.Request) url.Values {
 			params[k] = append(params[k], vs...)
 		}
 		var obj map[string]any
-		dec := json.NewDecoder(r.Body)
+		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 		dec.UseNumber()
 		if err := dec.Decode(&obj); err == nil {
 			for k, v := range obj {

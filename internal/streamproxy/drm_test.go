@@ -381,3 +381,50 @@ func TestDrmDecryptCENC_fMP4Integration(t *testing.T) {
 		t.Errorf("decrypted mdat body mismatch:\n  got  %x\n  want %x", got, plaintext)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// aesBlockCache cap tests
+// ---------------------------------------------------------------------------
+
+// TestCachedAESBlock_capEnforced feeds cachedAESBlock more distinct 16-byte
+// keys than aesBlockMaxEntries and asserts the backing map never grows past
+// the cap, then verifies a key cached before the clear-and-repopulate still
+// round-trips correctly through the freshly derived cipher.Block.
+func TestCachedAESBlock_capEnforced(t *testing.T) {
+	firstKey := make([]byte, 16)
+	binary.BigEndian.PutUint64(firstKey[8:], 0)
+	firstBlock, err := cachedAESBlock(firstKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext := []byte("0123456789ABCDEF")
+	ciphertext := make([]byte, 16)
+	firstBlock.Encrypt(ciphertext, plaintext)
+
+	for i := 1; i <= aesBlockMaxEntries+50; i++ {
+		key := make([]byte, 16)
+		binary.BigEndian.PutUint64(key[8:], uint64(i))
+		if _, err := cachedAESBlock(key); err != nil {
+			t.Fatalf("cachedAESBlock(%d): %v", i, err)
+		}
+
+		aesBlockMu.Lock()
+		n := len(aesBlockCache)
+		aesBlockMu.Unlock()
+		if n > aesBlockMaxEntries {
+			t.Fatalf("aesBlockCache grew to %d entries, want <= %d", n, aesBlockMaxEntries)
+		}
+	}
+
+	// firstKey was very likely evicted by the clear(s) above; re-deriving its
+	// block must still produce a cipher that round-trips the earlier ciphertext.
+	block, err := cachedAESBlock(firstKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 16)
+	block.Decrypt(got, ciphertext)
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("round-trip after cache clear mismatch:\n  got  %x\n  want %x", got, plaintext)
+	}
+}
