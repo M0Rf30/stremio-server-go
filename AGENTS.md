@@ -64,13 +64,17 @@ make fmt          # gofmt -s -w .
 make fmt-check    # fail if not gofmt -s clean
 make lint         # golangci-lint run ./... (if installed)
 make swagger      # regenerate docs/swagger.{yaml,json} from // @… annotations (needs swaggo/swag)
-make build-all    # cross-compile all 8 release targets → dist/
+make build-all    # cross-compile all 9 release targets → dist/ (android/armv7 needs ANDROID_ARM_CC)
 make smoke        # ./scripts/smoke.sh end-to-end API test (needs a running build)
 ```
 
-Cross-compile targets (all `CGO_ENABLED=0`): `linux/{amd64,arm64,armv7}`,
-`darwin/{amd64,arm64}`, `windows/{amd64,arm64}`, `android/arm64` (needs
-`-ldflags=-checklinkname=0`). Benchmarks: `go test -bench . -benchmem ./internal/api/`.
+Cross-compile targets: `linux/{amd64,arm64,armv7}`, `darwin/{amd64,arm64}`,
+`windows/{amd64,arm64}`, `android/arm64` — all `CGO_ENABLED=0`, with
+`android/arm64` needing `-ldflags=-checklinkname=0`. `android/armv7` is the
+lone exception: the Go toolchain hard-requires external linking for it, so it
+needs `CGO_ENABLED=1` plus an NDK clang via `ANDROID_ARM_CC`/`ANDROID_ARM_CXX`
+(which also pulls in the C++ `go-libutp` instead of the pure-Go uTP fallback).
+Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 
 ## Code Conventions & Common Patterns
 
