@@ -13,7 +13,15 @@ LDFLAGS     := -s -w -checklinkname=0 \
 GOFLAGS     := -trimpath -ldflags "$(LDFLAGS)"
 
 # CGO is not required; disabling it makes every target cross-compile as pure Go.
+# The single exception is android/arm -- see ANDROID_ARM_CC in build-all.
 export CGO_ENABLED := 0
+
+# android/arm is the one published target the Go toolchain refuses to build
+# without external linking, so it needs an NDK clang. Point ANDROID_ARM_CC at
+# one (or put the NDK toolchain bin dir on PATH) and build-all includes it;
+# otherwise that single target is skipped with a notice.
+ANDROID_ARM_CC  ?= armv7a-linux-androideabi21-clang
+ANDROID_ARM_CXX ?= armv7a-linux-androideabi21-clang++
 
 .PHONY: all build run test race vet fmt fmt-check lint tidy clean smoke build-all swagger help
 
@@ -52,7 +60,8 @@ smoke: build ## Run the end-to-end API smoke test
 clean: ## Remove build artifacts
 	rm -rf $(BINARY) $(DIST)
 
-# Cross-compile every published target (pure Go, CGO disabled).
+# Cross-compile every published target (pure Go, CGO disabled -- except
+# android/arm, which cannot be built that way).
 # android/arm64 needs -checklinkname=0 (already in LDFLAGS) for github.com/wlynxg/anet on Go 1.23+.
 build-all: ## Cross-build all release targets into dist/
 	@mkdir -p $(DIST)
@@ -64,6 +73,13 @@ build-all: ## Cross-build all release targets into dist/
 	GOOS=windows GOARCH=amd64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_windows_amd64.exe  $(MAIN)
 	GOOS=windows GOARCH=arm64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_windows_arm64.exe  $(MAIN)
 	GOOS=android GOARCH=arm64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_android_arm64      $(MAIN)
+	@if command -v $(ANDROID_ARM_CC) >/dev/null 2>&1; then \
+		CGO_ENABLED=1 CC=$(ANDROID_ARM_CC) CXX=$(ANDROID_ARM_CXX) \
+		GOOS=android GOARCH=arm GOARM=7 \
+		go build $(GOFLAGS) -o $(DIST)/$(BINARY)_android_armv7 $(MAIN); \
+	else \
+		echo "skipping android/armv7: $(ANDROID_ARM_CC) not found (set ANDROID_ARM_CC to an NDK clang)"; \
+	fi
 	@echo "built -> $(DIST)/"
 
 help: ## Show targets
