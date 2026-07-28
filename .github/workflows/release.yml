@@ -48,19 +48,23 @@ jobs:
           cache: true
       - name: Install UPX
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
-      - name: Set up Android NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          local-cache: true
-      - name: Export the android/arm cross-compiler
+      - name: Locate the android/arm cross-compiler
         # android/arm is the one target the Go toolchain refuses to build
         # without external linking, so it needs a real NDK clang. See the
         # stremio-server-android-arm build in .goreleaser.yml.
+        #
+        # Use the NDK preinstalled on the runner image rather than fetching
+        # one: a cached third-party NDK restored with its clang binary missing
+        # while the wrapper scripts survived, so the presence check passed and
+        # the build only failed minutes later inside goreleaser. Hence also
+        # checking the tools the wrappers actually exec, not just the wrappers.
         run: |
-          bin="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          test -x "$bin/armv7a-linux-androideabi21-clang"
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in clang clang++ \
+                      armv7a-linux-androideabi21-clang \
+                      armv7a-linux-androideabi21-clang++; do
+            test -x "$bin/$tool" || { echo "missing NDK tool: $bin/$tool"; exit 1; }
+          done
           echo "ANDROID_ARM_CC=$bin/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
           echo "ANDROID_ARM_CXX=$bin/armv7a-linux-androideabi21-clang++" >> "$GITHUB_ENV"
       - uses: goreleaser/goreleaser-action@v7

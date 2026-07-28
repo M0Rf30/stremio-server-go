@@ -87,18 +87,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Set up Android NDK
+      - name: Locate the android/arm cross-compiler
         if: matrix.ndk
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          local-cache: true
-      - name: Export the android/arm cross-compiler
-        if: matrix.ndk
+        # Uses the NDK preinstalled on the runner image; see the same step in
+        # release.yml for why a fetched-and-cached NDK is not trustworthy here.
         run: |
-          bin="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          test -x "$bin/armv7a-linux-androideabi21-clang"
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in clang clang++ \
+                      armv7a-linux-androideabi21-clang \
+                      armv7a-linux-androideabi21-clang++; do
+            test -x "$bin/$tool" || { echo "missing NDK tool: $bin/$tool"; exit 1; }
+          done
           echo "CC=$bin/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
           echo "CXX=$bin/armv7a-linux-androideabi21-clang++" >> "$GITHUB_ENV"
       - name: Build
