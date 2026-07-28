@@ -78,15 +78,32 @@ jobs:
           - { goos: windows, goarch: amd64, ext: ".exe" }
           - { goos: windows, goarch: arm64, ext: ".exe" }
           - { goos: android, goarch: arm64, ldextra: "-checklinkname=0" }
+          # android/arm is the one target the Go toolchain refuses to build
+          # without external linking, so it needs an NDK clang and cgo.
+          - { goos: android, goarch: arm, goarm: "7", ldextra: "-checklinkname=0", cgo: "1", ndk: true }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
+      - name: Set up Android NDK
+        if: matrix.ndk
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          local-cache: true
+      - name: Export the android/arm cross-compiler
+        if: matrix.ndk
+        run: |
+          bin="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$bin/armv7a-linux-androideabi21-clang"
+          echo "CC=$bin/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
+          echo "CXX=$bin/armv7a-linux-androideabi21-clang++" >> "$GITHUB_ENV"
       - name: Build
         env:
-          CGO_ENABLED: "0"
+          CGO_ENABLED: ${{ matrix.cgo || '0' }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
