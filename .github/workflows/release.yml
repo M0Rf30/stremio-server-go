@@ -48,6 +48,21 @@ jobs:
           cache: true
       - name: Install UPX
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          local-cache: true
+      - name: Export the android/arm cross-compiler
+        # android/arm is the one target the Go toolchain refuses to build
+        # without external linking, so it needs a real NDK clang. See the
+        # stremio-server-android-arm build in .goreleaser.yml.
+        run: |
+          bin="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$bin/armv7a-linux-androideabi21-clang"
+          echo "ANDROID_ARM_CC=$bin/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
+          echo "ANDROID_ARM_CXX=$bin/armv7a-linux-androideabi21-clang++" >> "$GITHUB_ENV"
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser

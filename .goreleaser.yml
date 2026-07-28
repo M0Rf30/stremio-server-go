@@ -2,6 +2,12 @@ version: 2
 
 project_name: stremio-server
 
+# Defaults so a local `goreleaser build` works when the NDK toolchain bin dir
+# is on PATH; the release workflow overrides these with absolute paths.
+env:
+  - ANDROID_ARM_CC={{ if index .Env "ANDROID_ARM_CC" }}{{ .Env.ANDROID_ARM_CC }}{{ else }}armv7a-linux-androideabi21-clang{{ end }}
+  - ANDROID_ARM_CXX={{ if index .Env "ANDROID_ARM_CXX" }}{{ .Env.ANDROID_ARM_CXX }}{{ else }}armv7a-linux-androideabi21-clang++{{ end }}
+
 before:
   hooks:
     - go mod tidy
@@ -54,9 +60,44 @@ builds:
     goarch:
       - arm64
 
+  # Android (32-bit armv7) — the ABI shipped by most Android TV / Google TV
+  # devices (Chromecast with Google TV included): an ARMv8 kernel with a
+  # 32-bit userspace, where only armeabi-v7a binaries load.
+  #
+  # Unlike every other target this one CANNOT be built CGO-free: the Go
+  # toolchain hard-requires external linking for android/arm
+  # ("android/arm requires external (cgo) linking"), so it needs an NDK
+  # cross-compiler. CC/CXX come from ANDROID_ARM_CC/ANDROID_ARM_CXX (set by
+  # the release workflow via setup-ndk, defaulting to the plain NDK tool
+  # names so a local build works with the NDK toolchain bin dir on PATH).
+  #
+  # Enabling cgo also pulls in the C++ github.com/anacrolix/go-libutp
+  # implementation instead of the pure-Go uTP fallback the other targets
+  # use, hence CXX is required too.
+  - id: stremio-server-android-arm
+    main: ./cmd/stremio-server
+    binary: stremio-server
+    env:
+      - CGO_ENABLED=1
+      - CC={{ .Env.ANDROID_ARM_CC }}
+      - CXX={{ .Env.ANDROID_ARM_CXX }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -checklinkname=0
+      - -X main.buildVersion={{ .Version }}
+      - -X main.buildCommit={{ .ShortCommit }}
+      - -X main.buildDate={{ .Date }}
+    goos:
+      - android
+    goarch:
+      - arm
+    goarm:
+      - "7"
+
 upx:
   # Linux only: macOS Gatekeeper rejects upx-packed Mach-O, and upx on
-  # android/arm64 can break the loader.
+  # android can break the loader.
   - enabled: true
     compress: best
     lzma: true
@@ -68,6 +109,7 @@ archives:
     ids:
       - stremio-server
       - stremio-server-android
+      - stremio-server-android-arm
     formats: tar.gz
     format_overrides:
       - goos: windows
