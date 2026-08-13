@@ -23,7 +23,7 @@ export CGO_ENABLED := 0
 ANDROID_ARM_CC  ?= armv7a-linux-androideabi21-clang
 ANDROID_ARM_CXX ?= armv7a-linux-androideabi21-clang++
 
-.PHONY: all build run test race vet fmt fmt-check lint tidy clean smoke build-all swagger help
+.PHONY: all build run test vet fmt fmt-check lint tidy clean smoke build-all swagger help
 
 all: fmt-check vet lint test build
 
@@ -33,6 +33,9 @@ build: ## Build the binary for the host platform
 run: build ## Build and run
 	./$(BINARY)
 
+# The race detector requires cgo, so this is the one target that overrides the
+# global CGO_ENABLED := 0 above. Builds stay pure Go.
+test: export CGO_ENABLED := 1
 test: ## Run tests (race detector, serial)
 	go test -p 1 -race ./...
 
