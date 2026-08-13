@@ -201,6 +201,14 @@ func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string)
 // Only explicit start ranges ("bytes=N-" or "bytes=N-M") are supported.
 // Suffix ranges ("bytes=-N") return ok=false because the absolute start byte
 // cannot be determined without the total size.
+//
+// The end token, if present, must also parse as a valid integer. parseRange
+// treats a malformed end token (e.g. "bytes=100-xyz") as if the Range header
+// were absent entirely (RFC 7233), which yields a 200 response covering the
+// full resource; if this function reported ok=true for such a header, the
+// reader would already be seeked past byte 0 while the response claimed the
+// full Content-Length, truncating the body. Rejecting a malformed end token
+// here keeps the two interpretations in agreement.
 func ftpExtractRangeStart(h string) (start int64, ok bool) {
 	if !strings.HasPrefix(h, "bytes=") {
 		return 0, false
@@ -218,6 +226,11 @@ func ftpExtractRangeStart(h string) (start int64, ok bool) {
 	s, err := strconv.ParseInt(spec[:dash], 10, 64)
 	if err != nil || s < 0 {
 		return 0, false
+	}
+	if end := spec[dash+1:]; end != "" {
+		if _, err := strconv.ParseInt(end, 10, 64); err != nil {
+			return 0, false
+		}
 	}
 	return s, true
 }
