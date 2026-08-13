@@ -152,3 +152,70 @@ func TestAtomicSave(t *testing.T) {
 		t.Fatalf("saved file is not valid JSON: %v", err)
 	}
 }
+
+func TestSaveFailureCleansUpTemp(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-denied writes are not enforced")
+	}
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string) // arranges the failure condition
+	}{
+		{
+			name: "read-only directory blocks temp file creation",
+			setup: func(t *testing.T, dir string) {
+				if err := os.Chmod(dir, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+			},
+		},
+		{
+			name: "destination path occupied by a directory blocks rename",
+			setup: func(t *testing.T, dir string) {
+				if err := os.Mkdir(filepath.Join(dir, "server-settings.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c := cfg(dir)
+			ss, err := settings.New(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			dst := filepath.Join(dir, "server-settings.json")
+			tc.setup(t, dir)
+
+			// Snapshot the destination after inducing failure but before Save().
+			before, beforeErr := os.Stat(dst)
+
+			ss.Extend(map[string]interface{}{"btMaxConnections": float64(123)})
+			if err := ss.Save(); err == nil {
+				t.Fatal("expected Save to fail")
+			}
+
+			// No .tmp file left behind.
+			if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
+				t.Errorf(".tmp file left behind after failed save (err=%v)", err)
+			}
+
+			// Destination unchanged: same existence/kind as before the failure.
+			after, afterErr := os.Stat(dst)
+			if os.IsNotExist(beforeErr) != os.IsNotExist(afterErr) {
+				t.Fatalf("destination existence changed: before err=%v after err=%v", beforeErr, afterErr)
+			}
+			if beforeErr == nil {
+				if before.IsDir() != after.IsDir() || before.Mode() != after.Mode() {
+					t.Errorf("destination changed: before=%v after=%v", before, after)
+				}
+			}
+		})
+	}
+}
