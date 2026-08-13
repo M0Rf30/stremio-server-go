@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
 
 // The remote tracker source URL is configurable (STREMIO_TRACKERS_URL, wired via
@@ -167,7 +169,7 @@ func initTrackers(cacheDir string, maxTrackers int, srcURL string, proxyURL stri
 	}
 	go func() {
 		hc := newTrackerClient(proxyURL)
-		doRefreshTrackers(cache, maxTrackers, srcURL, hc)
+		doRefreshTrackers(cache, maxTrackers, srcURL, hc, proxyURL)
 		ticker := time.NewTicker(trackerRefreshIntv)
 		defer ticker.Stop()
 		for {
@@ -175,7 +177,7 @@ func initTrackers(cacheDir string, maxTrackers int, srcURL string, proxyURL stri
 			case <-done:
 				return
 			case <-ticker.C:
-				doRefreshTrackers(cache, maxTrackers, srcURL, hc)
+				doRefreshTrackers(cache, maxTrackers, srcURL, hc, proxyURL)
 			}
 		}
 	}()
@@ -186,7 +188,7 @@ func initTrackers(cacheDir string, maxTrackers int, srcURL string, proxyURL stri
 // the fastest maxTrackers, merges all wss trackers (fetched + embedded) back in,
 // updates the in-memory list, and persists the ranked UDP/HTTP list for a fast
 // next startup.
-func doRefreshTrackers(cache string, maxTrackers int, srcURL string, hc *http.Client) {
+func doRefreshTrackers(cache string, maxTrackers int, srcURL string, hc *http.Client, proxyURL string) {
 	if maxTrackers <= 0 {
 		maxTrackers = defaultTrackerTopN
 	}
@@ -206,7 +208,7 @@ func doRefreshTrackers(cache string, maxTrackers int, srcURL string, hc *http.Cl
 	}
 
 	// Probe and keep the fastest topN UDP/HTTP trackers.
-	ranked := rankAndKeep(probeable, maxTrackers)
+	ranked := rankAndKeep(probeable, maxTrackers, proxyURL)
 
 	// Persist only the ranked UDP/HTTP list; wss are merged at runtime via mergeWS.
 	_ = os.WriteFile(cache, []byte(strings.Join(ranked, "\n")+"\n"), 0o644)
@@ -244,10 +246,31 @@ func fetchTrackerList(rawURL string, hc *http.Client) []string {
 // rankAndKeep probes all candidates in parallel, sorts by RTT ascending
 // (failed probes get probeMaxRTT so they sink to the bottom), and returns
 // the top topN entries.
-func rankAndKeep(candidates []string, topN int) []string {
+//
+// When proxyURL is set, UDP candidates are never probed: a UDP tracker
+// connect handshake dials the tracker directly and cannot be routed through
+// an HTTP/SOCKS proxy without UDP ASSOCIATE support, which this client does
+// not implement. Skipped UDP URLs keep their input order and are appended
+// after the ranked HTTP results rather than being sorted by a fabricated RTT.
+func rankAndKeep(candidates []string, topN int, proxyURL string) []string {
 	type result struct {
 		url string
 		rtt time.Duration
+	}
+
+	toProbe := candidates
+	var skippedUDP []string
+	if proxyURL != "" {
+		toProbe = nil
+		for _, u := range candidates {
+			if strings.HasPrefix(u, "udp://") {
+				skippedUDP = append(skippedUDP, u)
+			} else {
+				toProbe = append(toProbe, u)
+			}
+		}
+		logging.For("trackers").Info("skipping udp rtt probes because bt proxy is configured",
+			"skipped_count", len(skippedUDP))
 	}
 
 	// Bound concurrency: at most 32 probe goroutines in flight at once.
@@ -255,18 +278,18 @@ func rankAndKeep(candidates []string, topN int) []string {
 	const maxConcurrent = 32
 	sem := make(chan struct{}, maxConcurrent)
 
-	ch := make(chan result, len(candidates))
-	for _, u := range candidates {
+	ch := make(chan result, len(toProbe))
+	for _, u := range toProbe {
 		u := u
 		sem <- struct{}{} // acquire slot; blocks when 32 probes are in flight
 		go func() {
 			defer func() { <-sem }() // release slot when done
-			ch <- result{u, probeTracker(u)}
+			ch <- result{u, probeTracker(u, proxyURL)}
 		}()
 	}
 
-	results := make([]result, 0, len(candidates))
-	for range candidates {
+	results := make([]result, 0, len(toProbe))
+	for range toProbe {
 		results = append(results, <-ch)
 	}
 
@@ -274,31 +297,39 @@ func rankAndKeep(candidates []string, topN int) []string {
 		return results[i].rtt < results[j].rtt
 	})
 
-	n := min(topN, len(results))
-	out := make([]string, n)
-	for i := range n {
-		out[i] = results[i].url
+	ranked := make([]string, 0, len(results)+len(skippedUDP))
+	for _, r := range results {
+		ranked = append(ranked, r.url)
 	}
-	return out
+	ranked = append(ranked, skippedUDP...)
+
+	n := min(topN, len(ranked))
+	return ranked[:n]
 }
 
 // probeTracker dispatches to the appropriate protocol prober.
-// Returns probeMaxRTT for unknown schemes (wss, etc.).
-func probeTracker(rawURL string) time.Duration {
+// Returns probeMaxRTT for unknown schemes (wss, etc.). proxyURL is forwarded
+// to the HTTP prober so it never bypasses a configured BT proxy; callers must
+// not invoke this for udp:// URLs when a proxy is configured (see rankAndKeep).
+func probeTracker(rawURL string, proxyURL string) time.Duration {
 	switch {
 	case strings.HasPrefix(rawURL, "udp://"):
 		return probeTrackerUDP(rawURL)
 	case strings.HasPrefix(rawURL, "http://"), strings.HasPrefix(rawURL, "https://"):
-		return probeTrackerHTTP(rawURL)
+		return probeTrackerHTTP(rawURL, proxyURL)
 	default:
 		return probeMaxRTT
 	}
 }
 
-// probeTrackerHTTP sends an HTTP HEAD request with a 2-second timeout.
-// Falls back to GET if HEAD is refused. Matches reference tracker_prober.rs.
-func probeTrackerHTTP(rawURL string) time.Duration {
-	hc := &http.Client{Timeout: probeHTTPTimeout}
+// probeTrackerHTTP sends an HTTP HEAD request with a 2-second timeout,
+// routed through proxyURL when set (via the same construction path as
+// newTrackerClient, so tracker fetches and RTT probes never disagree on
+// proxy config). Falls back to GET if HEAD is refused. Matches reference
+// tracker_prober.rs.
+func probeTrackerHTTP(rawURL string, proxyURL string) time.Duration {
+	hc := newTrackerClient(proxyURL)
+	hc.Timeout = probeHTTPTimeout
 	start := time.Now()
 	resp, err := hc.Head(rawURL)
 	if err == nil {
