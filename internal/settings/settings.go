@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
 
@@ -134,7 +135,10 @@ func (s *store) Extend(patch map[string]interface{}) {
 }
 
 // Save atomically writes the current values as pretty-printed JSON to
-// <appPath>/server-settings.json (write to .tmp then os.Rename).
+// <appPath>/server-settings.json: write to .tmp, fsync the temp file,
+// rename onto the destination, then fsync the containing directory so the
+// rename itself survives a crash. Any failure removes the .tmp file so no
+// partial temp file is ever left behind.
 func (s *store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -144,19 +148,51 @@ func (s *store) Save() error {
 		return fmt.Errorf("settings: marshal: %w", err)
 	}
 
+	// appPath is created once at process startup (see cmd/stremio-server)
+	// and is immutable for the process lifetime, so it is not recreated on
+	// every save.
 	appPath := s.appPath
-	if err := os.MkdirAll(appPath, 0o755); err != nil {
-		return fmt.Errorf("settings: mkdir %s: %w", appPath, err)
-	}
-
 	dst := filepath.Join(appPath, settingsFile)
 	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("settings: create temp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("settings: write temp: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("settings: sync temp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("settings: close temp: %w", err)
+	}
+
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp) // best-effort cleanup
 		return fmt.Errorf("settings: rename to %s: %w", dst, err)
+	}
+
+	// Fsync the parent directory so the rename is durable. Not every
+	// filesystem supports directory fsync (e.g. some FAT/network mounts
+	// return an error); the file itself is already fsynced and renamed, so
+	// treat that as best-effort rather than failing the save.
+	dir, err := os.Open(appPath)
+	if err != nil {
+		logging.For("settings").Warn("open settings dir for fsync failed", "path", appPath, "err", err)
+		return nil
+	}
+	if err := dir.Sync(); err != nil {
+		logging.For("settings").Warn("settings dir fsync failed", "path", appPath, "err", err)
+	}
+	if err := dir.Close(); err != nil {
+		logging.For("settings").Warn("close settings dir after fsync failed", "path", appPath, "err", err)
 	}
 	return nil
 }
