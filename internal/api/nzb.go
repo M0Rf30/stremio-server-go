@@ -65,6 +65,7 @@ type nzbSession struct {
 	tmpDir     string
 	created    time.Time
 	lastAccess time.Time
+	refCount   int // in-flight requests; >0 blocks eviction (guarded by nzbSessionsMu)
 
 	mu         sync.Mutex
 	fileStates map[string]*nzbFileState // file Name → assembly state
@@ -89,11 +90,14 @@ func nzbStartJanitor() {
 }
 
 // nzbEvictIdle removes sessions that have not been accessed in the last hour
-// and deletes their temporary directories.
+// and have no in-flight requests, and deletes their temporary directories.
 func nzbEvictIdle() {
 	nzbSessionsMu.Lock()
 	var evict []*nzbSession
 	for key, sess := range nzbSessions {
+		if sess.refCount > 0 {
+			continue
+		}
 		if time.Since(sess.lastAccess) > time.Hour {
 			evict = append(evict, sess)
 			delete(nzbSessions, key)
@@ -395,6 +399,7 @@ func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string)
 	sess, ok := nzbSessions[key]
 	if ok {
 		sess.lastAccess = time.Now()
+		sess.refCount++
 	}
 	nzbSessionsMu.Unlock()
 
@@ -402,6 +407,11 @@ func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string)
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
 		return
 	}
+	defer func() {
+		nzbSessionsMu.Lock()
+		sess.refCount--
+		nzbSessionsMu.Unlock()
+	}()
 
 	files := sess.files
 	if len(files) == 0 {
