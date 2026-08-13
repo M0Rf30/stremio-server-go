@@ -43,6 +43,13 @@ type ipCacheEntry struct {
 	expiresAt time.Time
 }
 
+// proxyClientEntry holds a cached upstream proxy client with an expiry
+// timestamp, mirroring ipCacheEntry's TTL bookkeeping.
+type proxyClientEntry struct {
+	client    *http.Client
+	expiresAt time.Time
+}
+
 // prefetchTimeout is the wall-clock deadline for each prefetch goroutine.
 const prefetchTimeout = 30 * time.Second
 
@@ -55,7 +62,7 @@ type Handler struct {
 	cfg          Config
 	cache        *segCache
 	proxyMu      sync.Mutex
-	proxyClients map[string]*http.Client
+	proxyClients map[string]proxyClientEntry
 	ipMu         sync.Mutex
 	ipCache      map[string]ipCacheEntry
 	// prefetchSem is a semaphore that bounds the number of goroutines spawned
@@ -98,7 +105,7 @@ func New(cfg Config) *Handler {
 	return &Handler{
 		cfg:          cfg,
 		cache:        c,
-		proxyClients: make(map[string]*http.Client),
+		proxyClients: make(map[string]proxyClientEntry),
 		ipCache:      make(map[string]ipCacheEntry),
 		prefetchSem:  make(chan struct{}, maxConcurrentPrefetch),
 		signingGCM:   gcm,
@@ -707,16 +714,63 @@ func (h *Handler) clientFor(proxyURL string) *http.Client {
 	}
 	h.proxyMu.Lock()
 	defer h.proxyMu.Unlock()
-	if c, ok := h.proxyClients[proxyURL]; ok {
-		return c
+	if e, ok := h.proxyClients[proxyURL]; ok {
+		if time.Now().Before(e.expiresAt) {
+			return e.client
+		}
+		e.client.CloseIdleConnections()
+		delete(h.proxyClients, proxyURL)
 	}
 	c, err := buildProxyClient(proxyURL)
 	if err != nil {
 		logging.For("streamproxy").Warn("cannot build proxy client; using default", "proxy_url", proxyURL, "err", err)
 		return base
 	}
-	h.proxyClients[proxyURL] = c
+	h.proxyClients[proxyURL] = proxyClientEntry{client: c, expiresAt: time.Now().Add(proxyClientTTL)}
+	if len(h.proxyClients) > proxyClientMaxEntries {
+		h.sweepProxyClients()
+	}
 	return c
+}
+
+// proxyClientTTL is how long a built upstream proxy client is cached per
+// proxy URL before it is rebuilt.
+const proxyClientTTL = 5 * time.Minute
+
+// proxyClientMaxEntries is the hard cap on the number of distinct proxy URL
+// keys held in proxyClients. Each client-supplied "proxy" query value gets
+// its own entry, so without a cap this map (and its transports' connection
+// pools) would grow unboundedly.
+const proxyClientMaxEntries = 16
+
+// sweepProxyClients removes expired entries from proxyClients and, when the
+// size still exceeds proxyClientMaxEntries after the TTL sweep, evicts the
+// soonest-expiring entry until back under the limit. Evicted clients have
+// their transport's idle connections closed so the pool is actually
+// released, not just unreferenced. Must be called with h.proxyMu held.
+func (h *Handler) sweepProxyClients() {
+	now := time.Now()
+	for k, e := range h.proxyClients {
+		if now.After(e.expiresAt) {
+			e.client.CloseIdleConnections()
+			delete(h.proxyClients, k)
+		}
+	}
+	// Hard size cap: evict soonest-expiring entry until under limit.
+	for len(h.proxyClients) > proxyClientMaxEntries {
+		var evict string
+		var evictEntry proxyClientEntry
+		found := false
+		for k, e := range h.proxyClients {
+			if !found || e.expiresAt.Before(evictEntry.expiresAt) {
+				evict = k
+				evictEntry = e
+				found = true
+			}
+		}
+		evictEntry.client.CloseIdleConnections()
+		delete(h.proxyClients, evict)
+	}
 }
 
 // buildProxyClient constructs an *http.Client whose transport routes through
@@ -847,13 +901,13 @@ func (h *Handler) serveIP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Refresh the cache. Distinct proxy URLs are effectively unbounded (each
-	// client-supplied "proxy" query value gets its own entry), so unlike
-	// proxyClients (bounded by config cardinality) this map can grow without
-	// limit if left untended. Insert first, then sweep: a TTL-only pass
-	// removes expired entries, and — mirroring media.hlsManager's
-	// sweepProbeCache — a hard-cap loop evicts the soonest-expiring entry
-	// until back at ipCacheMaxEntries, so the map is always bounded
-	// regardless of how many distinct proxy values a client bursts through.
+	// client-supplied "proxy" query value gets its own entry), so this map
+	// can grow without limit if left untended (same rationale as
+	// proxyClients above). Insert first, then sweep: a TTL-only pass removes
+	// expired entries, and — mirroring media.hlsManager's sweepProbeCache —
+	// a hard-cap loop evicts the soonest-expiring entry until back at
+	// ipCacheMaxEntries, so the map is always bounded regardless of how many
+	// distinct proxy values a client bursts through.
 	h.ipMu.Lock()
 	h.ipCache[effProxy] = ipCacheEntry{ip: ipStr, expiresAt: time.Now().Add(ipCacheTTL)}
 	if len(h.ipCache) > ipCacheMaxEntries {
