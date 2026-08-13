@@ -168,6 +168,27 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.route(w, r)
 }
 
+// splitEncodedPath splits the request path into segments like
+// strings.Split(path, "/"), except seg[1] is taken from the still
+// percent-encoded wire path (r.URL.EscapedPath()) instead of the already
+// unescaped r.URL.Path. stremio-core embeds a percent-encoded opts string as
+// one path segment (proxy/<opts>/<path>, e.g. "d=http%3A%2F%2Fhost"); by the
+// time routing sees r.URL.Path, net/url has already decoded it, so a raw
+// "%2F" inside opts becomes a literal "/" and strings.Split shatters that
+// segment. seg[1]'s consumers (url.ParseQuery, base64 decoding) do their own
+// decoding, so it must arrive exactly as sent. The trailing segments
+// (seg[2:], the upstream path) are decoded per-segment, matching the prior
+// (correct) behavior for that part.
+func splitEncodedPath(r *http.Request) []string {
+	seg := strings.Split(strings.Trim(r.URL.EscapedPath(), "/"), "/")
+	for i := 2; i < len(seg); i++ {
+		if dec, err := url.PathUnescape(seg[i]); err == nil {
+			seg[i] = dec
+		}
+	}
+	return seg
+}
+
 func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(r.URL.Path, "/")
 	if path == "" {
@@ -261,13 +282,13 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	case "tracks":
 		s.handleTracks(w, r, strings.Split(path, "/"))
 	case "proxy":
-		seg := strings.Split(path, "/")
+		seg := splitEncodedPath(r)
 		if s.sp.Route(w, r, seg) {
 			return
 		}
 		s.handleProxy(w, r, seg)
 	case "base64":
-		s.sp.HandleBase64(w, r, strings.Split(path, "/"))
+		s.sp.HandleBase64(w, r, splitEncodedPath(r))
 	// /list — active infohash array handled above (single-segment hot path)
 	// /stream/:infoHash/:fileIdx — alias to /:infoHash/:fileIdx
 	case "stream":
