@@ -46,7 +46,11 @@ fmt-check: ## Fail if not gofmt -s clean
 	@test -z "$$(gofmt -s -l .)" || (echo "run 'make fmt'"; gofmt -s -l .; exit 1)
 
 lint: ## golangci-lint (if installed)
-	@command -v golangci-lint >/dev/null && golangci-lint run ./... || echo "golangci-lint not installed; skipping"
+	@if command -v golangci-lint >/dev/null; then \
+		golangci-lint run ./...; \
+	else \
+		echo "golangci-lint not installed; skipping"; \
+	fi
 
 tidy: ## go mod tidy
 	go mod tidy
