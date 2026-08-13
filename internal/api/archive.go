@@ -49,6 +49,7 @@ type archiveSession struct {
 	selectedFile string // default entry selected at create time
 	created      time.Time
 	lastAccess   time.Time
+	refCount     int               // in-flight requests; >0 blocks eviction (guarded by mu)
 	extracted    map[string]string // entry name → extracted temp file path (cache)
 }
 
@@ -109,11 +110,12 @@ func archiveEvict() {
 	for k, sess := range archiveSessions {
 		sess.mu.Lock()
 		idle := now.Sub(sess.lastAccess)
+		inUse := sess.refCount > 0
 		isTmp := sess.isTempArch
 		archPath := sess.archivePath
 		tmpDir := sess.tmpDir
 		sess.mu.Unlock()
-		if idle > archiveSessionTTL {
+		if !inUse && idle > archiveSessionTTL {
 			victims = append(victims, evictVictim{tmpDir: tmpDir, archPath: archPath, isTmp: isTmp})
 			delete(archiveSessions, k)
 		}
@@ -654,6 +656,16 @@ func (s *server) archiveHandleStream(w http.ResponseWriter, r *http.Request, seg
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
+
+	sess.mu.Lock()
+	sess.lastAccess = time.Now()
+	sess.refCount++
+	sess.mu.Unlock()
+	defer func() {
+		sess.mu.Lock()
+		sess.refCount--
+		sess.mu.Unlock()
+	}()
 
 	// /{ext}/stream/{key} → redirect to selected file.
 	if len(seg) == 3 {
