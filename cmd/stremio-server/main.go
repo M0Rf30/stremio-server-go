@@ -10,8 +10,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
-	_ "net/http/pprof" //nolint:gosec // G108: pprof is served only on the loopback STREMIO_PPROF listener, never the main handler
+	_ "net/http/pprof" //nolint:gosec // G108: pprof is opt-in via STREMIO_PPROF, on its own listener, never the main handler
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -321,10 +322,15 @@ func main() {
 
 	// Optional pprof endpoint for diagnostics; disabled unless STREMIO_PPROF is
 	// set (e.g. STREMIO_PPROF=127.0.0.1:6060). Handlers come from net/http/pprof.
+	// The address is operator-supplied and NOT forced to loopback, so warn when
+	// it would expose heap/goroutine dumps beyond the local host.
 	// ppSrv is declared here so it can join the graceful-shutdown WaitGroup below.
 	var ppSrv *http.Server
 	if addr := os.Getenv("STREMIO_PPROF"); addr != "" {
 		ppSrv = &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
+		if !isLoopbackAddr(addr) {
+			logging.For("pprof").Warn("pprof bound to a non-loopback address; heap and goroutine dumps are exposed", "addr", addr)
+		}
 		go func() {
 			logging.For("pprof").Info("listening", "addr", addr)
 			if err := ppSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -417,6 +423,36 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// isLoopbackAddr reports whether a host:port listen address binds only the
+// local host. An empty or wildcard host (":6060", "0.0.0.0:6060", "[::]:6060")
+// is treated as non-loopback, as is any hostname that does not resolve to a
+// loopback IP.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
 }
 
 // proxySecret returns the proxy signing secret.
