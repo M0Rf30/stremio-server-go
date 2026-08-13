@@ -8,9 +8,11 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,6 +38,25 @@ func newTestHLSManager(t *testing.T) *hlsManager {
 		transcodeSem: make(chan struct{}, 1),
 		stopCh:       make(chan struct{}),
 	}
+}
+
+// stubOpenSubClientTransport redirects the package's openSubClient at ts for
+// the duration of the test (restored via t.Cleanup) and returns a
+// syntactically public base URL that passes validateRemoteURL's IP check
+// while every request actually lands on ts. httptest can only bind to
+// loopback addresses, which validateRemoteURL must reject in production, so
+// this lets tests exercise SubtitlesTracks/WriteSubtitles/OpenSubHash's full
+// public API — including the SSRF pre-flight — against a real local server.
+func stubOpenSubClientTransport(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	orig := openSubClient.Transport
+	openSubClient.Transport = &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, ts.Listener.Addr().String())
+		},
+	}
+	t.Cleanup(func() { openSubClient.Transport = orig })
+	return "http://93.184.216.34"
 }
 
 // ── hls.go: sanitizeM3U8Attr ──────────────────────────────────────────────────
@@ -228,9 +249,15 @@ func TestHLSManagerIdGuard(t *testing.T) {
 		"/etc/passwd", // absolute
 	}
 
+	// A public IP literal: passes validateRemoteURL's format/IP checks with no
+	// DNS lookup, so these cases exercise the id guard itself rather than
+	// short-circuiting on URL rejection. No connection is ever attempted since
+	// every id here is rejected before StartHLS reaches probing.
+	const validMediaURL = "http://93.184.216.34/dummy.mkv"
+
 	for _, id := range badIDs {
 		t.Run(fmt.Sprintf("id=%q", id), func(t *testing.T) {
-			_, err := m.StartHLS(id, "http://127.0.0.1:1/dummy.mkv")
+			_, err := m.StartHLS(id, validMediaURL)
 			if err == nil {
 				t.Errorf("StartHLS(%q) should have returned an error", id)
 			}
@@ -243,8 +270,11 @@ func TestHLSManagerIdGuard(t *testing.T) {
 	}
 }
 
-func TestHLSManagerValidIdCreatesDir(t *testing.T) {
-	// Serve garbage so ffprobe fails fast (no valid media format detected).
+// TestHLSManagerRejectsPrivateMediaURL is the regression test for the SSRF fix:
+// a mediaURL resolving to a private/loopback address must be rejected before
+// the session directory is created or any ffprobe/ffmpeg subprocess spawned,
+// even though a real, responsive server sits at that address.
+func TestHLSManagerRejectsPrivateMediaURL(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("not a media file"))
 	}))
@@ -252,17 +282,39 @@ func TestHLSManagerValidIdCreatesDir(t *testing.T) {
 
 	m := newTestHLSManager(t)
 
-	// A valid id must not be rejected and the session dir must be created.
-	// StartHLS will call ffprobe on ts.URL which fails quickly; the dir is
-	// created before probing so the assertion is valid regardless of probe outcome.
 	_, err := m.StartHLS("sess-abc", ts.URL+"/dummy.mkv")
-	if err != nil {
-		t.Fatalf("StartHLS with valid id should not return error (probe failure is silent), got: %v", err)
+	if err == nil {
+		t.Fatal("StartHLS with a loopback mediaURL should have been rejected")
 	}
 
 	sessDir := filepath.Join(m.base, "sess-abc")
-	if _, statErr := os.Stat(sessDir); os.IsNotExist(statErr) {
-		t.Error("session dir was not created for valid id")
+	if _, statErr := os.Stat(sessDir); !os.IsNotExist(statErr) {
+		t.Error("session dir was created for a rejected mediaURL")
+	}
+}
+
+// TestHLSManagerAcceptsSelfMediaURL guards the self-reference carve-out: the
+// https UI on :12470 routinely asks the server to transcode a stream this same
+// server is serving on :11470, so a mediaURL matching selfBase must pass the
+// SSRF gate even though it is loopback. A blanket loopback rejection would
+// break HLS transcoding of torrent streams entirely.
+func TestHLSManagerAcceptsSelfMediaURL(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("not a media file"))
+	}))
+	defer ts.Close()
+
+	m := newTestHLSManager(t)
+	m.selfBase = ts.URL
+
+	// probeMedia will fail on this non-media body, but the failure must come
+	// from probing, not from the SSRF pre-flight rejecting the URL.
+	_, err := m.StartHLS("sess-self", ts.URL+"/ih/0")
+	if err != nil && strings.Contains(err.Error(), "only http/https allowed") {
+		t.Fatalf("self-origin mediaURL rejected by the SSRF gate: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("self-origin mediaURL rejected as a private address: %v", err)
 	}
 }
 
@@ -353,43 +405,45 @@ func TestHLSManagerBaseDirSurvivesCloseHLS(t *testing.T) {
 	}
 }
 
-// ── media.go: isHTTP / toLocalPath ───────────────────────────────────────────
+// ── media.go: validateRemoteURL (SSRF / local-file-read guard) ──────────────
 
-func TestIsHTTP(t *testing.T) {
+func TestValidateRemoteURL(t *testing.T) {
+	const self = "http://127.0.0.1:11470"
 	cases := []struct {
-		u    string
-		want bool
+		name     string
+		url      string
+		selfBase string
+		wantErr  bool
 	}{
-		{"http://example.com/video.mp4", true},
-		{"https://example.com/video.mp4", true},
-		{"file:///tmp/video.mp4", false},
-		{"/tmp/video.mp4", false},
-		{"ftp://example.com/video.mp4", false},
-		{"", false},
+		{"file scheme rejected", "file:///etc/passwd", "", true},
+		{"bare absolute path rejected", "/etc/passwd", "", true},
+		{"pipe scheme rejected", "pipe:0", "", true},
+		{"concat scheme rejected", "concat:/etc/passwd|/etc/shadow", "", true},
+		{"data scheme rejected", "data:text/plain,hello", "", true},
+		{"cloud metadata address rejected", "http://169.254.169.254/latest/meta-data/", "", true},
+		{"loopback address rejected", "http://127.0.0.1/dummy.mkv", "", true},
+		{"private RFC1918 address rejected", "http://192.168.1.5/dummy.mkv", "", true},
+		{"link-local address rejected", "http://169.254.1.1/dummy.mkv", "", true},
+		{"public http URL accepted", "http://93.184.216.34/dummy.mkv", "", false},
+		{"public https URL accepted", "https://93.184.216.34/dummy.mkv", "", false},
+		// selfBase carve-out: the https UI on :12470 asking this server to
+		// transcode a stream it serves on :11470 must keep working.
+		{"own origin accepted", "http://127.0.0.1:11470/ih/0", self, false},
+		{"own origin via self-signed https twin accepted", "https://127.0.0.1:12470/ih/0", self, false},
+		{"own origin bare accepted", "http://127.0.0.1:11470", self, false},
+		{"file scheme still rejected with selfBase", "file:///etc/passwd", self, true},
+		{"other loopback port still rejected", "http://127.0.0.1:22/dummy.mkv", self, true},
+		{"metadata still rejected with selfBase", "http://169.254.169.254/latest/meta-data/", self, true},
+		{"prefix-confusion host rejected", "http://127.0.0.1:11470.evil.com/x", self, true},
+		{"self host with different scheme rejected", "https://127.0.0.1:11470/ih/0", self, true},
 	}
 	for _, tc := range cases {
-		got := isHTTP(tc.u)
-		if got != tc.want {
-			t.Errorf("isHTTP(%q) = %v, want %v", tc.u, got, tc.want)
-		}
-	}
-}
-
-func TestToLocalPath(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"file:///tmp/video.mp4", "/tmp/video.mp4"},
-		{"/tmp/video.mp4", "/tmp/video.mp4"},
-		{"file://video.mp4", "video.mp4"},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		got := toLocalPath(tc.in)
-		if got != tc.want {
-			t.Errorf("toLocalPath(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRemoteURL(tc.url, tc.selfBase)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateRemoteURL(%q, %q) error = %v, wantErr %v", tc.url, tc.selfBase, err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -497,83 +551,25 @@ func TestComputeOpenSubHash(t *testing.T) {
 	_ = computeOpenSubHash(math.MaxInt64, maxBuf, maxBuf)
 }
 
-// ── media.go: OpenSubHash (local file path) ───────────────────────────────────
+// ── media.go: OpenSubHash rejects non-http(s) input ──────────────────────────
 
-func TestOpenSubHashLocalFile(t *testing.T) {
-	const fileSize = 200_000 // larger than 2 × chunkSize (2×65536=131072)
-	data := make([]byte, fileSize)
-	for i := range data {
-		data[i] = byte(i % 251) // prime modulus gives non-trivial pattern
-	}
-
+// TestOpenSubHashRejectsLocalPath is the regression test for the local-file-read
+// fix: OpenSubHash must never open a bare filesystem path or file:// URI —
+// only http/https are supported, and that support was directly reachable from
+// the unauthenticated /opensubHash?videoUrl= query parameter.
+func TestOpenSubHashRejectsLocalPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "video.bin")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	p := &prober{} // hls not needed for OpenSubHash
-	result, err := p.OpenSubHash(path)
-	if err != nil {
-		t.Fatalf("OpenSubHash: %v", err)
-	}
-
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		t.Fatalf("result type = %T, want map[string]interface{}", result)
-	}
-
-	hash, _ := m["hash"].(string)
-	size, _ := m["size"].(int64)
-
-	if len(hash) != 16 {
-		t.Errorf("hash len = %d, want 16", len(hash))
-	}
-	if size != fileSize {
-		t.Errorf("size = %d, want %d", size, fileSize)
-	}
-
-	// Must be stable (same file → same hash).
-	result2, err := p.OpenSubHash(path)
-	if err != nil {
-		t.Fatalf("OpenSubHash second call: %v", err)
-	}
-	m2 := result2.(map[string]interface{})
-	if m2["hash"] != hash {
-		t.Error("hash is not stable across calls")
-	}
-
-	// Verify against reference computation.
-	wantHash := fmt.Sprintf("%016x", computeOpenSubHash(
-		int64(fileSize),
-		data[:chunkSize],
-		data[fileSize-chunkSize:],
-	))
-	if hash != wantHash {
-		t.Errorf("hash = %q, want %q", hash, wantHash)
-	}
-}
-
-func TestOpenSubHashLocalFileSmall(t *testing.T) {
-	// File smaller than chunkSize: head==tail in readLocalChunks.
-	data := []byte("small file content")
-	dir := t.TempDir()
-	path := filepath.Join(dir, "small.bin")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	p := &prober{}
-	result, err := p.OpenSubHash(path)
-	if err != nil {
-		t.Fatalf("OpenSubHash: %v", err)
-	}
-	m := result.(map[string]interface{})
-	if m["size"].(int64) != int64(len(data)) {
-		t.Errorf("size = %d, want %d", m["size"], len(data))
-	}
-	if len(m["hash"].(string)) != 16 {
-		t.Error("hash must be 16 hex chars")
+	cases := []string{path, "file://" + path}
+	for _, videoURL := range cases {
+		if _, err := p.OpenSubHash(videoURL); err == nil {
+			t.Errorf("OpenSubHash(%q) accepted a local path; want rejection", videoURL)
+		}
 	}
 }
 
@@ -591,9 +587,10 @@ func TestOpenSubHashHTTP(t *testing.T) {
 		http.ServeContent(w, r, "video.bin", time.Time{}, bytes.NewReader(content))
 	}))
 	defer ts.Close()
+	base := stubOpenSubClientTransport(t, ts)
 
 	p := &prober{}
-	result, err := p.OpenSubHash(ts.URL + "/video.bin")
+	result, err := p.OpenSubHash(base + "/video.bin")
 	if err != nil {
 		t.Fatalf("OpenSubHash HTTP: %v", err)
 	}
@@ -617,61 +614,6 @@ func TestOpenSubHashHTTP(t *testing.T) {
 	))
 	if hash != wantHash {
 		t.Errorf("HTTP hash = %q, want %q (from local computation)", hash, wantHash)
-	}
-}
-
-// ── media.go: readLocalChunks ────────────────────────────────────────────────
-
-func TestReadLocalChunksLargeFile(t *testing.T) {
-	const size = 3 * chunkSize // head and tail are distinct regions
-	data := make([]byte, size)
-	for i := range data {
-		data[i] = byte(i)
-	}
-	path := filepath.Join(t.TempDir(), "big.bin")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	gotSize, head, tail, err := readLocalChunks(path)
-	if err != nil {
-		t.Fatalf("readLocalChunks: %v", err)
-	}
-	if gotSize != size {
-		t.Errorf("size = %d, want %d", gotSize, size)
-	}
-	if len(head) != chunkSize {
-		t.Errorf("head len = %d, want %d", len(head), chunkSize)
-	}
-	if len(tail) != chunkSize {
-		t.Errorf("tail len = %d, want %d", len(tail), chunkSize)
-	}
-	// head must be the first 64 KiB.
-	if !bytes.Equal(head, data[:chunkSize]) {
-		t.Error("head does not match first chunkSize bytes")
-	}
-	// tail must be the last 64 KiB.
-	if !bytes.Equal(tail, data[size-chunkSize:]) {
-		t.Error("tail does not match last chunkSize bytes")
-	}
-}
-
-func TestReadLocalChunksSmallFile(t *testing.T) {
-	data := []byte("tiny")
-	path := filepath.Join(t.TempDir(), "tiny.bin")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gotSize, head, tail, err := readLocalChunks(path)
-	if err != nil {
-		t.Fatalf("readLocalChunks: %v", err)
-	}
-	if gotSize != int64(len(data)) {
-		t.Errorf("size = %d, want %d", gotSize, len(data))
-	}
-	// Both head and tail should be the same slice content (same small data).
-	if !bytes.Equal(head, data) || !bytes.Equal(tail, data) {
-		t.Error("head or tail does not match small file data")
 	}
 }
 
@@ -962,11 +904,11 @@ func TestParseSubtitlesASS(t *testing.T) {
 // ── subtitles.go: fetchSubBytes and friends (via httptest) ───────────────────
 
 func TestFetchSubBytesRejectsNonHTTP(t *testing.T) {
-	_, err := fetchSubBytes("/local/path.srt")
+	_, err := fetchSubBytes("/local/path.srt", "")
 	if err == nil {
 		t.Error("fetchSubBytes should reject non-http paths")
 	}
-	_, err = fetchSubBytes("file:///tmp/test.srt")
+	_, err = fetchSubBytes("file:///tmp/test.srt", "")
 	if err == nil {
 		t.Error("fetchSubBytes should reject file:// scheme")
 	}
@@ -978,9 +920,10 @@ func TestSubtitlesTracks(t *testing.T) {
 		_, _ = fmt.Fprint(w, srt)
 	}))
 	defer ts.Close()
+	base := stubOpenSubClientTransport(t, ts)
 
 	p := &prober{}
-	result, err := p.SubtitlesTracks(ts.URL + "/sub.srt")
+	result, err := p.SubtitlesTracks(base + "/sub.srt")
 	if err != nil {
 		t.Fatalf("SubtitlesTracks: %v", err)
 	}
@@ -1010,10 +953,11 @@ func TestWriteSubtitlesSRT(t *testing.T) {
 		_, _ = fmt.Fprint(w, srt)
 	}))
 	defer ts.Close()
+	base := stubOpenSubClientTransport(t, ts)
 
 	p := &prober{}
 	var buf strings.Builder
-	if err := p.WriteSubtitles(&buf, ts.URL+"/sub.srt", "srt", 0); err != nil {
+	if err := p.WriteSubtitles(&buf, base+"/sub.srt", "srt", 0); err != nil {
 		t.Fatalf("WriteSubtitles: %v", err)
 	}
 
@@ -1033,10 +977,11 @@ func TestWriteSubtitlesVTT(t *testing.T) {
 		_, _ = fmt.Fprint(w, srt)
 	}))
 	defer ts.Close()
+	base := stubOpenSubClientTransport(t, ts)
 
 	p := &prober{}
 	var buf strings.Builder
-	if err := p.WriteSubtitles(&buf, ts.URL+"/sub.srt", "vtt", 0); err != nil {
+	if err := p.WriteSubtitles(&buf, base+"/sub.srt", "vtt", 0); err != nil {
 		t.Fatalf("WriteSubtitles VTT: %v", err)
 	}
 
@@ -1057,10 +1002,11 @@ func TestWriteSubtitlesOffset(t *testing.T) {
 		_, _ = fmt.Fprint(w, srt)
 	}))
 	defer ts.Close()
+	base := stubOpenSubClientTransport(t, ts)
 
 	p := &prober{}
 	var buf strings.Builder
-	if err := p.WriteSubtitles(&buf, ts.URL+"/sub.srt", "srt", 500); err != nil {
+	if err := p.WriteSubtitles(&buf, base+"/sub.srt", "srt", 500); err != nil {
 		t.Fatalf("WriteSubtitles offset: %v", err)
 	}
 
@@ -1078,10 +1024,11 @@ func TestWriteSubtitlesNegativeOffset(t *testing.T) {
 		_, _ = fmt.Fprint(w, srt)
 	}))
 	defer ts.Close()
+	base := stubOpenSubClientTransport(t, ts)
 
 	p := &prober{}
 	var buf strings.Builder
-	if err := p.WriteSubtitles(&buf, ts.URL+"/sub.srt", "srt", -1000); err != nil {
+	if err := p.WriteSubtitles(&buf, base+"/sub.srt", "srt", -1000); err != nil {
 		t.Fatalf("WriteSubtitles negative offset: %v", err)
 	}
 

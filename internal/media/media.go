@@ -7,16 +7,17 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"os"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
 
@@ -30,8 +31,18 @@ const probeTracksCacheMaxSize = 512
 
 // openSubClient is a shared HTTP client for OpenSubHash (HEAD + Range GETs) and
 // subtitle fetches. One transport means all requests to the same host reuse a
-// single TCP connection pool instead of allocating a fresh one per call.
-var openSubClient = &http.Client{Timeout: 15 * time.Second}
+// single TCP connection pool instead of allocating a fresh one per call. The
+// dialer's Control hook re-validates the resolved IP at connect time, closing
+// the DNS-rebinding TOCTOU gap left by the validateRemoteURL pre-flight check.
+var openSubClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 10 * time.Second,
+			Control: netguard.DialControl(true),
+		}).DialContext,
+	},
+}
 
 // probeResultEntry holds a cached Probe() result (or error) with a wall-clock expiry.
 type probeResultEntry struct {
@@ -65,9 +76,10 @@ type prober struct {
 // baseURLLocal should include scheme and host with no trailing slash
 // (e.g. "http://127.0.0.1:11470").
 func New(baseURLLocal string) types.MediaProber {
+	base := strings.TrimRight(baseURLLocal, "/")
 	return &prober{
-		baseURLLocal: strings.TrimRight(baseURLLocal, "/"),
-		hls:          newHLS(),
+		baseURLLocal: base,
+		hls:          newHLS(base),
 		probeCache:   make(map[string]probeResultEntry), // must be non-nil before first write
 		tracksCache:  make(map[string]tracksCacheEntry), // must be non-nil before first write
 	}
@@ -77,7 +89,11 @@ func New(baseURLLocal string) types.MediaProber {
 // If streamURL has no scheme it is prefixed with p.baseURLLocal.
 // A 30-second context timeout is applied to the child process.
 func (p *prober) Probe(streamURL string) (interface{}, error) {
-	if !strings.Contains(streamURL, "://") {
+	if strings.Contains(streamURL, "://") {
+		if err := validateRemoteURL(streamURL, p.baseURLLocal); err != nil {
+			return nil, err
+		}
+	} else {
 		streamURL = p.baseURLLocal + "/" + strings.TrimLeft(streamURL, "/")
 	}
 
@@ -253,21 +269,16 @@ func (p *prober) Tracks(rawURL string) (interface{}, error) {
 // The result is formatted as a 16-character lower-case hex string.
 // Returns map[string]interface{}{"hash": <hex>, "size": <int64>}.
 //
-// Supported URL schemes:
-//   - http / https — resolved via Range requests (HEAD for size, then GET).
-//   - file:// or a bare path — resolved via os.Open.
+// Only http/https URLs on a public host are accepted (validateRemoteURL);
+// videoURL never reaches the filesystem, closing the arbitrary local-file-read
+// this endpoint was directly exposed to via the unauthenticated
+// /opensubHash?videoUrl= query parameter.
 func (p *prober) OpenSubHash(videoURL string) (interface{}, error) {
-	var (
-		size       int64
-		head, tail []byte
-		err        error
-	)
-
-	if isHTTP(videoURL) {
-		size, head, tail, err = fetchHTTPChunks(videoURL)
-	} else {
-		size, head, tail, err = readLocalChunks(toLocalPath(videoURL))
+	if err := validateRemoteURL(videoURL, p.baseURLLocal); err != nil {
+		return nil, err
 	}
+
+	size, head, tail, err := fetchHTTPChunks(videoURL)
 	if err != nil {
 		return nil, err
 	}
@@ -293,14 +304,53 @@ func computeOpenSubHash(size int64, head, tail []byte) uint64 {
 	return h
 }
 
-// isHTTP reports whether u starts with http:// or https://.
-func isHTTP(u string) bool {
-	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
-}
-
-// toLocalPath strips a file:// prefix, returning a bare filesystem path.
-func toLocalPath(u string) string {
-	return strings.TrimPrefix(u, "file://")
+// validateRemoteURL is the single SSRF/local-file-read choke point for every
+// externally-supplied media URL that reaches an ffprobe/ffmpeg subprocess or
+// an outbound HTTP client (Probe, StartHLS, OpenSubHash, fetchSubBytes). Only
+// http/https schemes are accepted — file://, pipe:, concat:, data:, bare
+// paths, and every other ffmpeg-supported protocol are rejected outright —
+// and the resolved host must not be a private, loopback, link-local, or
+// cloud-metadata address (checked via netguard.ValidateIP). IP-literal hosts
+// are checked directly with no DNS lookup; hostnames are resolved and every
+// returned address is checked, so a DNS answer mixing public and private
+// addresses is still rejected.
+//
+// selfBase (this server's own local base URL, e.g. "http://127.0.0.1:11470")
+// is exempted from the IP check: when the HTTPS UI on :12470 asks the server
+// to transcode or probe a stream the server itself is serving on :11470, the
+// media URL legitimately points at loopback. Only that exact origin is
+// allowed — every other loopback or private target is still rejected — and
+// localize() is applied first so the self-signed https://…:12470 form maps
+// onto the same origin. Pass "" to disallow self-references entirely.
+func validateRemoteURL(raw, selfBase string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme %q (only http/https allowed)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL %q has no host", raw)
+	}
+	if selfBase != "" {
+		if l := localize(raw); l == selfBase || strings.HasPrefix(l, selfBase+"/") {
+			return nil
+		}
+	}
+	ips := []net.IP{net.ParseIP(host)}
+	if ips[0] == nil {
+		if ips, err = net.LookupIP(host); err != nil {
+			return fmt.Errorf("resolving host %q: %w", host, err)
+		}
+	}
+	for _, ip := range ips {
+		if err := netguard.ValidateIP(ip, true); err != nil {
+			return fmt.Errorf("URL %q: %w", raw, err)
+		}
+	}
+	return nil
 }
 
 // fetchHTTPChunks fetches the first and last 64 KiB of a remote file
@@ -363,50 +413,4 @@ func httpRangeGet(url string, from, to int64) ([]byte, error) {
 		return nil, fmt.Errorf("range GET %s: unexpected status %d", url, resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, chunkSize+1))
-}
-
-// readLocalChunks reads the first and last 64 KiB from a local file path.
-// If the file is smaller than 64 KiB, the same bytes are returned for
-// both head and tail (consistent with the OpenSubtitles reference impl).
-func readLocalChunks(path string) (size int64, head, tail []byte, err error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	size = fi.Size()
-
-	head = make([]byte, chunkSize)
-	n, rerr := io.ReadFull(f, head)
-	if errors.Is(rerr, io.ErrUnexpectedEOF) || errors.Is(rerr, io.EOF) {
-		// File fits entirely within one chunk.
-		head = head[:n]
-		return size, head, head, nil
-	}
-	if rerr != nil {
-		return 0, nil, nil, rerr
-	}
-
-	tailStart := size - chunkSize
-	if tailStart < 0 {
-		tailStart = 0
-	}
-	if _, err = f.Seek(tailStart, io.SeekStart); err != nil {
-		return 0, nil, nil, err
-	}
-
-	tail = make([]byte, chunkSize)
-	n, rerr = io.ReadFull(f, tail)
-	if errors.Is(rerr, io.ErrUnexpectedEOF) || errors.Is(rerr, io.EOF) {
-		tail = tail[:n]
-	} else if rerr != nil {
-		return 0, nil, nil, rerr
-	}
-
-	return size, head, tail, nil
 }

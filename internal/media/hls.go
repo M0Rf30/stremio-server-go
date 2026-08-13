@@ -128,7 +128,10 @@ type probeCacheEntry struct {
 // enc is set once in newHLS() and is read-only thereafter.
 type hlsManager struct {
 	base string
-	enc  hwEncoder
+	// selfBase is this server's own local base URL; media URLs pointing at it
+	// are exempt from the private-address SSRF check (see validateRemoteURL).
+	selfBase string
+	enc      hwEncoder
 
 	mu           sync.Mutex
 	sessions     map[string]*hlsSession
@@ -265,7 +268,7 @@ func selectEncoder() hwEncoder {
 	return sw // no working hardware encoder found
 }
 
-func newHLS() *hlsManager {
+func newHLS(selfBase string) *hlsManager {
 	base := filepath.Join(os.TempDir(), "stremio-hls")
 	_ = os.MkdirAll(base, 0o755)
 	n := runtime.NumCPU()
@@ -280,6 +283,7 @@ func newHLS() *hlsManager {
 	}
 	m := &hlsManager{
 		base:         base,
+		selfBase:     selfBase,
 		enc:          enc,
 		sessions:     map[string]*hlsSession{},
 		probeCache:   map[string]probeCacheEntry{},
@@ -421,6 +425,14 @@ func probeMedia(ctx context.Context, mediaURL string) probeMediaResult {
 func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 	if mediaURL == "" {
 		return "", fmt.Errorf("hls: missing mediaURL")
+	}
+	// Validated once here, before mediaURL is ever stored on the session, so
+	// every later ffprobe/ffmpeg call on s.mediaURL (probeMedia, extractSubtitle,
+	// transcodeSegment) is guaranteed to already be an http(s) URL on a
+	// non-private, non-metadata host — or this server's own origin, which is how
+	// the https UI on :12470 asks for a stream this server serves on :11470.
+	if err := validateRemoteURL(mediaURL, m.selfBase); err != nil {
+		return "", fmt.Errorf("hls: %w", err)
 	}
 	// Reject ids that could escape the base directory via path traversal.
 	if id == "" || id == "." || id == ".." || id != filepath.Base(id) || strings.Contains(id, "..") {
