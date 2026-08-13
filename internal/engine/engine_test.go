@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -317,6 +319,55 @@ func TestRemoveAll(t *testing.T) {
 	em.RemoveAll()
 	if n := len(em.ListEngines()); n != 0 {
 		t.Errorf("ListEngines after RemoveAll: want 0, got %d", n)
+	}
+}
+
+// TestRemoveDeletesCacheDir verifies RemoveEngine and RemoveAll both delete
+// the on-disk per-infohash cache directory, not just the map entry.
+// Regression test: previously the torrent was dropped and the map entry
+// removed, but the cache directory (and its bytes) survived on disk forever,
+// invisible to the LRU budget walk in evict() — every /remove and /removeAll
+// leaked that torrent's bytes permanently.
+func TestRemoveDeletesCacheDir(t *testing.T) {
+	cases := []struct {
+		name   string
+		remove func(em types.EngineManager)
+	}{
+		{"RemoveEngine", func(em types.EngineManager) { _ = em.RemoveEngine(knownHash) }},
+		{"RemoveAll", func(em types.EngineManager) { em.RemoveAll() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newTestCfg(t)
+			em, err := engine.New(cfg)
+			if err != nil {
+				t.Fatalf("engine.New: %v", err)
+			}
+			defer em.Close()
+
+			if _, err = em.EnsureEngine(knownHash, types.AddOptions{}); err != nil {
+				t.Fatalf("EnsureEngine: %v", err)
+			}
+
+			// This offline test never receives real peer/metadata traffic, so
+			// anacrolix's FileByInfoHash storage never allocates the
+			// per-infohash directory itself. Write into it directly, at the
+			// documented path (CacheRoot/lower-cased-infohash), to simulate
+			// piece data having accumulated on disk.
+			dir := filepath.Join(cfg.CacheRoot, strings.ToLower(knownHash))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "piece.dat"), []byte("data"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			tc.remove(em)
+
+			if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+				t.Fatalf("cache dir %s still exists after %s: err=%v", dir, tc.name, statErr)
+			}
+		})
 	}
 }
 

@@ -396,6 +396,20 @@ func (m *manager) GetEngine(infoHash string) (types.Engine, bool) {
 	return nil, false
 }
 
+// dropAndPurge drops the torrent and removes its on-disk cache directory,
+// then deletes the map entry. Mirrors evict/evictIdle: RemoveAll runs while
+// still holding the caller's write lock so a concurrent EnsureEngine for the
+// same infohash cannot recreate the directory before this delete lands, and
+// the freed bytes never survive as an orphaned, unbudgeted directory. In-RAM
+// storage mode (Config.MemoryCacheSize > 0) never creates e.path on disk, so
+// removing a nonexistent directory is a harmless no-op. Callers must hold
+// m.mu for writing.
+func (m *manager) dropAndPurge(ih string, e *engine) {
+	e.t.Drop()
+	delete(m.engines, ih)
+	_ = os.RemoveAll(e.path)
+}
+
 // RemoveEngine stops and removes the torrent identified by infoHash.
 func (m *manager) RemoveEngine(infoHash string) error {
 	ih := strings.ToLower(infoHash)
@@ -405,8 +419,7 @@ func (m *manager) RemoveEngine(infoHash string) error {
 	if !ok {
 		return nil // idempotent
 	}
-	e.t.Drop()
-	delete(m.engines, ih)
+	m.dropAndPurge(ih, e)
 	return nil
 }
 
@@ -415,8 +428,7 @@ func (m *manager) RemoveAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for ih, e := range m.engines {
-		e.t.Drop()
-		delete(m.engines, ih)
+		m.dropAndPurge(ih, e)
 	}
 }
 
@@ -631,13 +643,7 @@ func (m *manager) evict(budget int64) {
 			m.mu.Unlock()
 			continue
 		}
-		ent.e.t.Drop()
-		delete(m.engines, ih)
-		// Remove cache dir while holding the write lock: a concurrent
-		// EnsureEngine for the same infohash cannot recreate the directory
-		// until we release, so RemoveAll cannot delete a freshly re-added
-		// engine's cache data.
-		_ = os.RemoveAll(ent.e.path)
+		m.dropAndPurge(ih, ent.e)
 		m.mu.Unlock()
 		total -= ent.size
 		logging.For("engine").Info("evicted torrent", "info_hash", ih, "freed_bytes", ent.size, "budget_bytes", budget)
@@ -688,12 +694,7 @@ func (m *manager) evictIdle(idle time.Duration) {
 			m.mu.Unlock()
 			continue
 		}
-		e.t.Drop()
-		delete(m.engines, ih)
-		// Same TOCTOU guard as evict: remove under the write lock so a
-		// concurrent EnsureEngine cannot have its freshly created cache
-		// directory deleted by this deferred RemoveAll.
-		_ = os.RemoveAll(e.path)
+		m.dropAndPurge(ih, e)
 		m.mu.Unlock()
 		logging.For("engine").Info("removed idle torrent", "info_hash", ih, "idle_for", idleFor.Round(time.Second).String())
 	}
