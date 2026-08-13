@@ -9,6 +9,7 @@ import (
 	"hash"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -119,25 +120,42 @@ func (c *segCache) getFull(key string) *cacheEntry {
 // the segment-request hot path.  Reset is called before each use.
 var sha256Pool = sync.Pool{New: func() any { return sha256.New() }}
 
-// cacheKey derives a cache lookup key from the raw URL plus any credential
-// headers present in hdr. Authorization and Cookie are folded in so that
-// two requests for the same URL but different credentials never collide.
-// The result is a hex-encoded SHA-256 digest, safe to use as a map key.
+// cacheKey derives a cache lookup key from the raw URL plus every forwarded
+// request header in hdr (the full h_-forwarded set, not just Authorization/
+// Cookie), so two requests for the same URL but different credentials —
+// however those credentials are carried — never collide. Header names are
+// canonicalised (net/http case folding) and sorted before hashing so the
+// key is independent of header order and name case. The result is a
+// hex-encoded SHA-256 digest, safe to use as a map key.
 func cacheKey(rawurl string, hdr http.Header) string {
 	// F4: pool the hasher; avoids sha256.New() + fmt.Fprintf reflection on every request.
 	h := sha256Pool.Get().(hash.Hash)
 	h.Reset()
 	_, _ = h.Write([]byte(rawurl))
-	// Include auth-relevant request headers to prevent cross-credential cache
-	// poisoning. Use NUL/colon separators so a crafted URL cannot produce the
-	// same hash as a URL-plus-header combination.
-	for _, name := range []string{"Authorization", "Cookie"} {
-		vs := hdr[http.CanonicalHeaderKey(name)]
-		if len(vs) > 0 {
+	// Fold in every forwarded header (canonical name, sorted) so a crafted
+	// URL or reordered/differently-cased header set cannot collide with a
+	// distinct credential set. NUL/colon/SOH separators bound each field:
+	// header names can contain neither NUL nor ':', so the boundary between
+	// one header's trailing SOH-terminated values and the next header's NUL
+	// prefix is always unambiguous.
+	if len(hdr) > 0 {
+		type namedValues struct {
+			name string
+			vals []string
+		}
+		pairs := make([]namedValues, 0, len(hdr))
+		for name, vs := range hdr {
+			if len(vs) == 0 {
+				continue
+			}
+			pairs = append(pairs, namedValues{name: http.CanonicalHeaderKey(name), vals: vs})
+		}
+		sort.Slice(pairs, func(i, j int) bool { return pairs[i].name < pairs[j].name })
+		for _, p := range pairs {
 			_, _ = h.Write([]byte{0})
-			_, _ = h.Write([]byte(name))
+			_, _ = h.Write([]byte(p.name))
 			_, _ = h.Write([]byte{':'})
-			for _, v := range vs {
+			for _, v := range p.vals {
 				_, _ = h.Write([]byte(v))
 				_, _ = h.Write([]byte{1})
 			}

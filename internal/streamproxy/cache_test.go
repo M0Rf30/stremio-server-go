@@ -148,6 +148,80 @@ func TestSegCacheTotalBytesOnEvict(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// cacheKey — forwarded-header handling
+// ---------------------------------------------------------------------------
+
+func TestCacheKeyHeaderVariants(t *testing.T) {
+	const rawurl = "http://example.com/seg.ts"
+	tests := []struct {
+		name     string
+		a, b     func() http.Header
+		wantSame bool
+	}{
+		{
+			name: "differing custom header value produces different keys",
+			a: func() http.Header {
+				h := http.Header{}
+				h.Add("X-Api-Key", "secret-a")
+				return h
+			},
+			b: func() http.Header {
+				h := http.Header{}
+				h.Add("X-Api-Key", "secret-b")
+				return h
+			},
+			wantSame: false,
+		},
+		{
+			name: "reordered headers produce the same key",
+			a: func() http.Header {
+				h := http.Header{}
+				h.Add("Authorization", "tok")
+				h.Add("X-Api-Key", "key")
+				return h
+			},
+			b: func() http.Header {
+				h := http.Header{}
+				h.Add("X-Api-Key", "key")
+				h.Add("Authorization", "tok")
+				return h
+			},
+			wantSame: true,
+		},
+		{
+			name:     "differing header name case produces the same key",
+			a:        func() http.Header { return http.Header{"x-api-key": {"secret"}} },
+			b:        func() http.Header { return http.Header{"X-Api-Key": {"secret"}} },
+			wantSame: true,
+		},
+		{
+			name: "identical headers produce the same key",
+			a: func() http.Header {
+				h := http.Header{}
+				h.Add("X-Api-Key", "secret")
+				h.Add("Authorization", "tok")
+				return h
+			},
+			b: func() http.Header {
+				h := http.Header{}
+				h.Add("X-Api-Key", "secret")
+				h.Add("Authorization", "tok")
+				return h
+			},
+			wantSame: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ka, kb := cacheKey(rawurl, tt.a()), cacheKey(rawurl, tt.b())
+			if same := ka == kb; same != tt.wantSame {
+				t.Errorf("cacheKey same=%v, want %v (a=%s, b=%s)", same, tt.wantSame, ka, kb)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // CacheStats
 // ---------------------------------------------------------------------------
 
