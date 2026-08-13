@@ -164,12 +164,18 @@ func (p *prober) Probe(streamURL string) (interface{}, error) {
 //	{ "id":<stream_index>, "type":"audio"|"subtitle", "codec":<codec_name>,
 //	  "lang":<tags.language>, "label":<tags.title>, "channels":<channels> }
 //
-// Scheme-less URLs are prefixed with p.baseURLLocal.
+// Scheme-less URLs are prefixed with p.baseURLLocal; URLs that carry their own
+// scheme are validated (http/https only, non-private host) before reaching
+// ffprobe, exactly as in Probe.
 // The loopback HTTPS→HTTP rewrite (localize) is applied so ffprobe can read
 // self-signed TLS streams.
 func (p *prober) Tracks(rawURL string) (interface{}, error) {
 	streamURL := rawURL
-	if !strings.Contains(streamURL, "://") {
+	if strings.Contains(streamURL, "://") {
+		if err := validateRemoteURL(streamURL, p.baseURLLocal); err != nil {
+			return nil, err
+		}
+	} else {
 		streamURL = p.baseURLLocal + "/" + strings.TrimLeft(streamURL, "/")
 	}
 	// Rewrite loopback HTTPS to plain HTTP (ffprobe rejects self-signed certs).
