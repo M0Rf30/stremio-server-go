@@ -1411,22 +1411,6 @@ func (e *engine) primeBoundary(idx int) {
 	logging.For("engine").Debug("boundary-prioritized pieces", "info_hash", e.infoHash, "file_idx", idx, "begin", begin, "end", end, "head", min(boundaryPieces, end-begin), "tail", min(boundaryPieces, end-tailStart))
 }
 
-// min/max helpers for int and int64 (pre-Go 1.21 generics workaround; these
-// are used locally and do not conflict with the builtins added in 1.21+).
-func min[T int | int64 | float64](a, b T) T {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max[T int | int64 | float64](a, b T) T {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // peerBudget derives the anacrolix per-torrent connection budget from a single
 // knob. n<=0 uses the default 50. half-open = n/2, high-water = n*10 — the same
 // ratios as the historical 50/25/500 defaults (peerBudget(0) == 50,25,500).
