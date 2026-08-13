@@ -16,7 +16,8 @@ import (
 //
 // Supports SRT, WEBVTT, and ASS/SSA formats. Robust to BOM and CRLF line endings.
 // Image-based subs (PGS/DVDSUB) are detected as binary and return empty tracks.
-// Fetch supports http/https URLs and local paths / file:// URIs.
+// Fetch supports only http/https URLs; file://, bare paths, and every other
+// scheme are rejected by validateRemoteURL before any request is made.
 func (p *prober) SubtitlesTracks(subsURL string) (interface{}, error) {
 	tracks, err := p.fetchParsedSubs(subsURL)
 	if err != nil {
@@ -75,19 +76,22 @@ func (p *prober) WriteSubtitles(w io.Writer, from, ext string, offsetMs int) err
 
 // fetchParsedSubs is the shared helper used by SubtitlesTracks and WriteSubtitles.
 func (p *prober) fetchParsedSubs(url string) ([]map[string]interface{}, error) {
-	data, err := fetchSubBytes(url)
+	data, err := fetchSubBytes(url, p.baseURLLocal)
 	if err != nil {
 		return nil, err
 	}
 	return parseSubtitles(data), nil
 }
 
-// fetchSubBytes retrieves subtitle file bytes from an http/https URL.
-// Any other scheme (file://, bare path, etc.) is rejected to prevent
-// arbitrary local-file reads.
-func fetchSubBytes(url string) ([]byte, error) {
-	if !isHTTP(url) {
-		return nil, fmt.Errorf("fetchSubBytes: unsupported scheme for URL %q (only http/https allowed)", url)
+// fetchSubBytes retrieves subtitle file bytes from a validated http/https URL.
+// validateRemoteURL rejects any other scheme (file://, bare path, etc.) and
+// any private/loopback/link-local/cloud-metadata host, preventing both
+// arbitrary local-file reads and SSRF via the subtitle-fetch path. selfBase
+// exempts this server's own origin, whose endpoints the caller can already
+// reach directly.
+func fetchSubBytes(url, selfBase string) ([]byte, error) {
+	if err := validateRemoteURL(url, selfBase); err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
