@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAnnounceableTrackers guards the fix for the panic that anacrolix raises
@@ -172,7 +173,7 @@ func TestProbeTrackerUnknownScheme(t *testing.T) {
 	}
 	for _, u := range unknown {
 		t.Run(u, func(t *testing.T) {
-			rtt := probeTracker(u)
+			rtt := probeTracker(u, "")
 			if rtt != probeMaxRTT {
 				t.Errorf("probeTracker(%q) = %v; want probeMaxRTT (%v)", u, rtt, probeMaxRTT)
 			}
@@ -259,13 +260,13 @@ func TestProbeTrackerHTTPHeadSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rtt := probeTrackerHTTP(srv.URL)
+	rtt := probeTrackerHTTP(srv.URL, "")
 	if rtt == probeMaxRTT {
 		t.Errorf("probeTrackerHTTP HEAD success: got probeMaxRTT, want a short RTT")
 	}
 
 	// probeTracker dispatches http:// to probeTrackerHTTP.
-	rtt2 := probeTracker(srv.URL)
+	rtt2 := probeTracker(srv.URL, "")
 	if rtt2 == probeMaxRTT {
 		t.Errorf("probeTracker(http://...): got probeMaxRTT, want a short RTT")
 	}
@@ -280,7 +281,7 @@ func TestProbeTrackerHTTPBothFail(t *testing.T) {
 	url := srv.URL
 	srv.Close() // port is now closed → connection refused on both HEAD and GET
 
-	rtt := probeTrackerHTTP(url)
+	rtt := probeTrackerHTTP(url, "")
 	if rtt != probeMaxRTT {
 		t.Errorf("probeTrackerHTTP unreachable host: got %v, want probeMaxRTT", rtt)
 	}
@@ -297,7 +298,7 @@ func TestProbeTrackerUDPEmptyHost(t *testing.T) {
 	}
 
 	// probeTracker dispatches udp:// to probeTrackerUDP.
-	rtt2 := probeTracker("udp:///announce")
+	rtt2 := probeTracker("udp:///announce", "")
 	if rtt2 != probeMaxRTT {
 		t.Errorf("probeTracker(udp:///announce): got %v, want probeMaxRTT", rtt2)
 	}
@@ -313,5 +314,56 @@ func TestProbeTrackerUDPDialError(t *testing.T) {
 	rtt := probeTrackerUDP("udp://no-port-in-this-host/announce")
 	if rtt != probeMaxRTT {
 		t.Errorf("probeTrackerUDP dial error: got %v, want probeMaxRTT", rtt)
+	}
+}
+
+// TestRankAndKeepSkipsUDPWhenProxied verifies the BT-proxy IP leak fix: when a
+// proxy is configured, rankAndKeep must never dial a UDP tracker (UDP RTT
+// probes cannot traverse an HTTP/SOCKS proxy without UDP ASSOCIATE support).
+// This is asserted without touching the network: a real probe would block for
+// up to probeUDPTimeout per candidate, so a near-instant return proves the
+// dial never happened, and the output order must equal the input order
+// unchanged (skipped candidates are appended, not RTT-sorted).
+func TestRankAndKeepSkipsUDPWhenProxied(t *testing.T) {
+	candidates := []string{
+		"udp://tracker-a.invalid:6969/announce",
+		"udp://tracker-b.invalid:6969/announce",
+		"udp://tracker-c.invalid:6969/announce",
+	}
+
+	start := time.Now()
+	got := rankAndKeep(candidates, 10, "http://127.0.0.1:1/proxy")
+	elapsed := time.Since(start)
+
+	if elapsed >= probeUDPTimeout {
+		t.Errorf("rankAndKeep with proxy took %v; want well under probeUDPTimeout (%v) — UDP appears to have been dialed directly", elapsed, probeUDPTimeout)
+	}
+	if !reflect.DeepEqual(got, candidates) {
+		t.Errorf("rankAndKeep with proxy: got %v, want input order preserved unchanged %v", got, candidates)
+	}
+}
+
+// TestProbeTrackerHTTPUsesProxy verifies that probeTrackerHTTP routes its
+// request through proxyURL instead of dialing the tracker host directly: the
+// tracker host below is unresolvable, but with a local httptest server
+// configured as the proxy the request must still succeed because the proxy
+// transport dials the proxy's address, never the tracker's.
+func TestProbeTrackerHTTPUsesProxy(t *testing.T) {
+	const trackerURL = "http://tracker.invalid.test/announce"
+	var gotProxied bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.String() == trackerURL {
+			gotProxied = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
+
+	rtt := probeTrackerHTTP(trackerURL, proxy.URL)
+	if rtt == probeMaxRTT {
+		t.Fatalf("probeTrackerHTTP through proxy: got probeMaxRTT, want success via proxy")
+	}
+	if !gotProxied {
+		t.Error("probeTrackerHTTP: request never reached the configured proxy — tracker RTT probe bypassed the proxy")
 	}
 }
