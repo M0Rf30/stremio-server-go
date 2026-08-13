@@ -458,6 +458,32 @@ func newTestProber() *prober {
 	}
 }
 
+// TestProbeAndTracksRejectLocalURLs is the regression test for the
+// unauthenticated ffprobe SSRF/local-file-read surface: /probe and /tracks
+// both hand their url query parameter to an ffprobe subprocess, which speaks
+// file://, concat: and friends, so validation must happen before the spawn.
+func TestProbeAndTracksRejectLocalURLs(t *testing.T) {
+	bad := []string{
+		"file:///etc/passwd",
+		"concat:/etc/passwd|/etc/shadow",
+		"data:text/plain,hello",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://127.0.0.1:22/dummy.mkv",
+		"http://192.168.1.5/dummy.mkv",
+	}
+	for _, raw := range bad {
+		t.Run(raw, func(t *testing.T) {
+			p := newTestProber()
+			if _, err := p.Probe(raw); err == nil {
+				t.Errorf("Probe(%q) should have been rejected", raw)
+			}
+			if _, err := p.Tracks(raw); err == nil {
+				t.Errorf("Tracks(%q) should have been rejected", raw)
+			}
+		})
+	}
+}
+
 // TestProbeCacheHardCap is the regression test for the unbounded-growth bug:
 // a burst of distinct URLs, all still within their TTL, must never push
 // p.probeCache past probeTracksCacheMaxSize.  http://127.0.0.1:1 is a
