@@ -30,8 +30,8 @@ Not affiliated with or endorsed by Stremio.
 
 ## Install
 
-Prebuilt binaries for **Linux, macOS, Windows, and Android (arm64)** are attached
-to each [release](https://github.com/M0Rf30/stremio-server-go/releases).
+Prebuilt binaries for **Linux, macOS, Windows, and Android (arm64/armv7)** are
+attached to each [release](https://github.com/M0Rf30/stremio-server-go/releases).
 
 From source (Go 1.26+; CGO is not required):
 
@@ -159,11 +159,14 @@ tracker-level blocking and DPI-based fingerprinting of peer handshakes.
 
 ## Platforms
 
-`CGO_ENABLED=0` everywhere, so all targets are pure-Go cross-compiles:
-`linux/{amd64,arm64,arm}`, `darwin/{amd64,arm64}`, `windows/{amd64,arm64}`,
-`android/arm64`. Android additionally builds with `-ldflags=-checklinkname=0`
-(for `github.com/wlynxg/anet` on Go 1.23+); it also runs as a plain
-`linux/arm64` binary under Termux.
+`linux/{amd64,arm64,arm}`, `darwin/{amd64,arm64}`, `windows/{amd64,arm64}` all
+build `CGO_ENABLED=0` as pure-Go cross-compiles. `android/{arm64,armv7}` are
+the exception: Android ships no `/etc/resolv.conf`, so a pure-Go binary's
+resolver falls back to `127.0.0.1:53` (nothing listens there) and every DNS
+lookup fails, so both build `CGO_ENABLED=1` against an NDK clang, linking
+against bionic's real resolver instead (`-ldflags=-checklinkname=0` is also
+needed for `github.com/wlynxg/anet` on Go 1.23+). `android/arm64` also runs
+as a plain `linux/arm64` binary under Termux.
 
 ## Layout
 

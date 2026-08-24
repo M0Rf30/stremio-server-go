@@ -48,10 +48,14 @@ jobs:
           cache: true
       - name: Install UPX
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
-      - name: Locate the android/arm cross-compiler
-        # android/arm is the one target the Go toolchain refuses to build
-        # without external linking, so it needs a real NDK clang. See the
-        # stremio-server-android-arm build in .goreleaser.yml.
+      - name: Locate the Android NDK cross-compilers
+        # android/arm and android/arm64 are both cgo builds: Android ships no
+        # /etc/resolv.conf, so a pure-Go binary's resolver falls back to
+        # 127.0.0.1:53 (nothing listens there) and every DNS lookup fails --
+        # only cgo linking against bionic's real resolver works. android/arm
+        # also can't build any other way: the Go toolchain refuses it without
+        # external linking. See the stremio-server-android and
+        # stremio-server-android-arm builds in .goreleaser.yml.
         #
         # Use the NDK preinstalled on the runner image rather than fetching
         # one: a cached third-party NDK restored with its clang binary missing
@@ -62,11 +66,15 @@ jobs:
           bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           for tool in clang clang++ \
                       armv7a-linux-androideabi21-clang \
-                      armv7a-linux-androideabi21-clang++; do
+                      armv7a-linux-androideabi21-clang++ \
+                      aarch64-linux-android21-clang \
+                      aarch64-linux-android21-clang++; do
             test -x "$bin/$tool" || { echo "missing NDK tool: $bin/$tool"; exit 1; }
           done
           echo "ANDROID_ARM_CC=$bin/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
           echo "ANDROID_ARM_CXX=$bin/armv7a-linux-androideabi21-clang++" >> "$GITHUB_ENV"
+          echo "ANDROID_ARM64_CC=$bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+          echo "ANDROID_ARM64_CXX=$bin/aarch64-linux-android21-clang++" >> "$GITHUB_ENV"
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser

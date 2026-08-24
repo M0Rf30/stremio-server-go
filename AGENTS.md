@@ -64,16 +64,20 @@ make fmt          # gofmt -s -w .
 make fmt-check    # fail if not gofmt -s clean
 make lint         # golangci-lint run ./... (if installed)
 make swagger      # regenerate docs/swagger.{yaml,json} from // @… annotations (needs swaggo/swag)
-make build-all    # cross-compile all 9 release targets → dist/ (android/armv7 needs ANDROID_ARM_CC)
+make build-all    # cross-compile all 9 release targets → dist/ (android/{arm,arm64} need ANDROID_ARM_CC / ANDROID_ARM64_CC)
 make smoke        # ./scripts/smoke.sh end-to-end API test (needs a running build)
 ```
 
 Cross-compile targets: `linux/{amd64,arm64,armv7}`, `darwin/{amd64,arm64}`,
-`windows/{amd64,arm64}`, `android/arm64` — all `CGO_ENABLED=0`, with
-`android/arm64` needing `-ldflags=-checklinkname=0`. `android/armv7` is the
-lone exception: the Go toolchain hard-requires external linking for it, so it
-needs `CGO_ENABLED=1` plus an NDK clang via `ANDROID_ARM_CC`/`ANDROID_ARM_CXX`
-(which also pulls in the C++ `go-libutp` instead of the pure-Go uTP fallback).
+`windows/{amd64,arm64}` — all `CGO_ENABLED=0`. `android/{armv7,arm64}` are the
+exception: Android ships no `/etc/resolv.conf`, so a pure-Go binary's resolver
+falls back to `127.0.0.1:53` (nothing listens there) and every DNS lookup
+fails, and the Go toolchain hard-requires external linking for `android/arm`
+regardless. Both need `CGO_ENABLED=1` plus an NDK clang via
+`ANDROID_ARM_CC`/`ANDROID_ARM_CXX` and `ANDROID_ARM64_CC`/`ANDROID_ARM64_CXX`
+(which also pulls in the C++ `go-libutp` instead of the pure-Go uTP fallback),
+plus `-ldflags=-checklinkname=0` (needed anyway for `github.com/wlynxg/anet`
+on Go 1.23+).
 Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 
 ## Code Conventions & Common Patterns

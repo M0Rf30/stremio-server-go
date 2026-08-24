@@ -12,16 +12,27 @@ LDFLAGS     := -s -w -checklinkname=0 \
 	-X main.buildDate=$(DATE)
 GOFLAGS     := -trimpath -ldflags "$(LDFLAGS)"
 
-# CGO is not required; disabling it makes every target cross-compile as pure Go.
-# The single exception is android/arm -- see ANDROID_ARM_CC in build-all.
+# CGO is not required for most targets; disabling it makes them cross-compile
+# as pure Go. The two exceptions are android/arm and android/arm64: Android
+# ships no /etc/resolv.conf, so a pure-Go binary's resolver falls back to
+# 127.0.0.1:53 (nothing listens there) and every DNS lookup fails -- only cgo
+# linking against bionic's real resolver works. See ANDROID_ARM_CC /
+# ANDROID_ARM64_CC in build-all.
 export CGO_ENABLED := 0
 
-# android/arm is the one published target the Go toolchain refuses to build
-# without external linking, so it needs an NDK clang. Point ANDROID_ARM_CC at
-# one (or put the NDK toolchain bin dir on PATH) and build-all includes it;
-# otherwise that single target is skipped with a notice.
-ANDROID_ARM_CC  ?= armv7a-linux-androideabi21-clang
-ANDROID_ARM_CXX ?= armv7a-linux-androideabi21-clang++
+# android/arm and android/arm64 both need an NDK clang cross-compiler (see
+# above). Point ANDROID_ARM_CC / ANDROID_ARM64_CC at one each (or put the NDK
+# toolchain bin dir on PATH) and build-all includes them; otherwise each
+# missing one is skipped with a notice. ANDROID_LDFLAGS forces external
+# linking + PIE (mirroring elgatito/elementum's Makefile:91-103) and statically
+# links libstdc++ so the binary doesn't NEED libc++_shared.so -- an NDK
+# redistributable apps normally bundle inside their APK that a standalone
+# Kodi-addon-dropped binary has no APK to ship.
+ANDROID_ARM_CC     ?= armv7a-linux-androideabi21-clang
+ANDROID_ARM_CXX    ?= armv7a-linux-androideabi21-clang++
+ANDROID_ARM64_CC   ?= aarch64-linux-android21-clang
+ANDROID_ARM64_CXX  ?= aarch64-linux-android21-clang++
+ANDROID_LDFLAGS    := -linkmode=external -extldflags "-pie -lm -static-libstdc++"
 
 .PHONY: all build run test vet fmt fmt-check lint tidy clean smoke build-all swagger help
 
@@ -68,7 +79,7 @@ clean: ## Remove build artifacts
 	rm -rf $(BINARY) $(DIST)
 
 # Cross-compile every published target (pure Go, CGO disabled -- except
-# android/arm, which cannot be built that way).
+# android/arm and android/arm64, which need cgo + an NDK clang; see above).
 # android/arm64 needs -checklinkname=0 (already in LDFLAGS) for github.com/wlynxg/anet on Go 1.23+.
 build-all: ## Cross-build all release targets into dist/
 	@mkdir -p $(DIST)
@@ -79,11 +90,17 @@ build-all: ## Cross-build all release targets into dist/
 	GOOS=darwin  GOARCH=arm64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_darwin_arm64       $(MAIN)
 	GOOS=windows GOARCH=amd64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_windows_amd64.exe  $(MAIN)
 	GOOS=windows GOARCH=arm64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_windows_arm64.exe  $(MAIN)
-	GOOS=android GOARCH=arm64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_android_arm64      $(MAIN)
+	@if command -v $(ANDROID_ARM64_CC) >/dev/null 2>&1; then \
+		CGO_ENABLED=1 CC=$(ANDROID_ARM64_CC) CXX=$(ANDROID_ARM64_CXX) \
+		GOOS=android GOARCH=arm64 \
+		go build -trimpath -ldflags '$(LDFLAGS) $(ANDROID_LDFLAGS)' -o $(DIST)/$(BINARY)_android_arm64 $(MAIN); \
+	else \
+		echo "skipping android/arm64: $(ANDROID_ARM64_CC) not found (set ANDROID_ARM64_CC to an NDK clang)"; \
+	fi
 	@if command -v $(ANDROID_ARM_CC) >/dev/null 2>&1; then \
 		CGO_ENABLED=1 CC=$(ANDROID_ARM_CC) CXX=$(ANDROID_ARM_CXX) \
 		GOOS=android GOARCH=arm GOARM=7 \
-		go build $(GOFLAGS) -o $(DIST)/$(BINARY)_android_armv7 $(MAIN); \
+		go build -trimpath -ldflags '$(LDFLAGS) $(ANDROID_LDFLAGS)' -o $(DIST)/$(BINARY)_android_armv7 $(MAIN); \
 	else \
 		echo "skipping android/armv7: $(ANDROID_ARM_CC) not found (set ANDROID_ARM_CC to an NDK clang)"; \
 	fi

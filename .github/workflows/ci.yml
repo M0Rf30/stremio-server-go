@@ -77,29 +77,32 @@ jobs:
           - { goos: darwin, goarch: arm64 }
           - { goos: windows, goarch: amd64, ext: ".exe" }
           - { goos: windows, goarch: arm64, ext: ".exe" }
-          - { goos: android, goarch: arm64, ldextra: "-checklinkname=0" }
-          # android/arm is the one target the Go toolchain refuses to build
-          # without external linking, so it needs an NDK clang and cgo.
-          - { goos: android, goarch: arm, goarm: "7", ldextra: "-checklinkname=0", cgo: "1", ndk: true }
+          # android/arm and android/arm64 are both cgo builds against
+          # bionic's DNS resolver -- a pure-Go binary finds no
+          # /etc/resolv.conf on Android and every lookup fails. android/arm
+          # also can't build any other way: the Go toolchain refuses it
+          # without external linking.
+          - { goos: android, goarch: arm64, ldextra: "-checklinkname=0", cgo: "1", ndk: true, ndkabi: "aarch64-linux-android" }
+          - { goos: android, goarch: arm, goarm: "7", ldextra: "-checklinkname=0", cgo: "1", ndk: true, ndkabi: "armv7a-linux-androideabi" }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - name: Locate the android/arm cross-compiler
+      - name: Locate the Android NDK cross-compiler
         if: matrix.ndk
         # Uses the NDK preinstalled on the runner image; see the same step in
         # release.yml for why a fetched-and-cached NDK is not trustworthy here.
         run: |
           bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           for tool in clang clang++ \
-                      armv7a-linux-androideabi21-clang \
-                      armv7a-linux-androideabi21-clang++; do
+                      ${{ matrix.ndkabi }}21-clang \
+                      ${{ matrix.ndkabi }}21-clang++; do
             test -x "$bin/$tool" || { echo "missing NDK tool: $bin/$tool"; exit 1; }
           done
-          echo "CC=$bin/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
-          echo "CXX=$bin/armv7a-linux-androideabi21-clang++" >> "$GITHUB_ENV"
+          echo "CC=$bin/${{ matrix.ndkabi }}21-clang" >> "$GITHUB_ENV"
+          echo "CXX=$bin/${{ matrix.ndkabi }}21-clang++" >> "$GITHUB_ENV"
       - name: Build
         env:
           CGO_ENABLED: ${{ matrix.cgo || '0' }}
@@ -108,9 +111,11 @@ jobs:
           GOARM: ${{ matrix.goarm }}
         run: |
           out="dist/stremio-server_${GOOS}_${GOARCH}${{ matrix.ext }}"
-          go build -trimpath \
-            -ldflags "-s -w ${{ matrix.ldextra }} -X main.buildVersion=${GITHUB_REF_NAME} -X main.buildCommit=${GITHUB_SHA::8}" \
-            -o "$out" ./cmd/stremio-server
+          ldflags="-s -w ${{ matrix.ldextra }} -X main.buildVersion=${GITHUB_REF_NAME} -X main.buildCommit=${GITHUB_SHA::8}"
+          if [ "$CGO_ENABLED" = "1" ]; then
+            ldflags="$ldflags -linkmode=external -extldflags \"-pie -lm -static-libstdc++\""
+          fi
+          go build -trimpath -ldflags "$ldflags" -o "$out" ./cmd/stremio-server
           ls -la "$out"
       - uses: actions/upload-artifact@v7
         with:

@@ -7,6 +7,8 @@ project_name: stremio-server
 env:
   - ANDROID_ARM_CC={{ if index .Env "ANDROID_ARM_CC" }}{{ .Env.ANDROID_ARM_CC }}{{ else }}armv7a-linux-androideabi21-clang{{ end }}
   - ANDROID_ARM_CXX={{ if index .Env "ANDROID_ARM_CXX" }}{{ .Env.ANDROID_ARM_CXX }}{{ else }}armv7a-linux-androideabi21-clang++{{ end }}
+  - ANDROID_ARM64_CC={{ if index .Env "ANDROID_ARM64_CC" }}{{ .Env.ANDROID_ARM64_CC }}{{ else }}aarch64-linux-android21-clang{{ end }}
+  - ANDROID_ARM64_CXX={{ if index .Env "ANDROID_ARM64_CXX" }}{{ .Env.ANDROID_ARM64_CXX }}{{ else }}aarch64-linux-android21-clang++{{ end }}
 
 before:
   hooks:
@@ -42,16 +44,35 @@ builds:
       - { goos: darwin, goarch: arm }
       - { goos: windows, goarch: arm }
 
-  # Android (arm64) — runs standalone / under Termux. Pure-Go, CGO disabled.
+  # Android (arm64) — runs standalone / under Termux.
+  #
+  # CGO is required, not merely tolerated: Android ships no /etc/resolv.conf,
+  # so a pure-Go binary's resolver falls back to 127.0.0.1:53 (nothing
+  # listens there) and every DNS lookup fails. Cgo links against bionic's
+  # real resolver instead. CC/CXX come from ANDROID_ARM64_CC/ANDROID_ARM64_CXX
+  # (set by the release workflow via setup-ndk, defaulting to the plain NDK
+  # tool names so a local build works with the NDK toolchain bin dir on
+  # PATH). -linkmode=external + PIE mirrors elgatito/elementum's
+  # Makefile:91-103.
+  #
+  # Enabling cgo also pulls in the C++ github.com/anacrolix/go-libutp
+  # implementation instead of the pure-Go uTP fallback the other targets use,
+  # hence CXX is required too -- and -static-libstdc++ so the binary doesn't
+  # NEED libc++_shared.so, an NDK-redistributable apps normally bundle inside
+  # their APK that a standalone Kodi-addon-dropped binary has no APK to ship.
   - id: stremio-server-android
     main: ./cmd/stremio-server
     binary: stremio-server
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC={{ .Env.ANDROID_ARM64_CC }}
+      - CXX={{ .Env.ANDROID_ARM64_CXX }}
     flags:
       - -trimpath
     ldflags:
       - -s -w -checklinkname=0
+      - -linkmode=external
+      - '-extldflags "-pie -lm -static-libstdc++"'
       - -X main.buildVersion={{ .Version }}
       - -X main.buildCommit={{ .ShortCommit }}
       - -X main.buildDate={{ .Date }}
@@ -64,16 +85,18 @@ builds:
   # devices (Chromecast with Google TV included): an ARMv8 kernel with a
   # 32-bit userspace, where only armeabi-v7a binaries load.
   #
-  # Unlike every other target this one CANNOT be built CGO-free: the Go
-  # toolchain hard-requires external linking for android/arm
+  # Same cgo-for-DNS requirement as arm64 above; the Go toolchain also
+  # hard-requires external linking for android/arm regardless
   # ("android/arm requires external (cgo) linking"), so it needs an NDK
   # cross-compiler. CC/CXX come from ANDROID_ARM_CC/ANDROID_ARM_CXX (set by
   # the release workflow via setup-ndk, defaulting to the plain NDK tool
   # names so a local build works with the NDK toolchain bin dir on PATH).
   #
   # Enabling cgo also pulls in the C++ github.com/anacrolix/go-libutp
-  # implementation instead of the pure-Go uTP fallback the other targets
-  # use, hence CXX is required too.
+  # implementation instead of the pure-Go uTP fallback the other targets use,
+  # hence CXX is required too -- and -static-libstdc++ so the binary doesn't
+  # NEED libc++_shared.so, an NDK-redistributable apps normally bundle inside
+  # their APK that a standalone Kodi-addon-dropped binary has no APK to ship.
   - id: stremio-server-android-arm
     main: ./cmd/stremio-server
     binary: stremio-server
@@ -85,6 +108,8 @@ builds:
       - -trimpath
     ldflags:
       - -s -w -checklinkname=0
+      - -linkmode=external
+      - '-extldflags "-pie -lm -static-libstdc++"'
       - -X main.buildVersion={{ .Version }}
       - -X main.buildCommit={{ .ShortCommit }}
       - -X main.buildDate={{ .Date }}
