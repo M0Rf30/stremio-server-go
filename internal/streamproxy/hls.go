@@ -36,6 +36,9 @@ func hlsServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden destination", http.StatusForbidden)
 		return
 	}
+	if h.rejectBlockedProxyHost(w, opts.Proxy) {
+		return
+	}
 	effProxy := opts.Proxy
 	if effProxy == "" {
 		effProxy = h.cfg.UpstreamProxy
