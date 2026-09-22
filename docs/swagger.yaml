@@ -503,6 +503,31 @@ paths:
       summary: Get stats for a specific torrent engine file
       tags:
       - Stats
+  /base64/{action}:
+    get:
+      parameters:
+      - description: encode or check
+        in: path
+        name: action
+        required: true
+        type: string
+      - description: string to encode, or candidate base64 string to check
+        in: query
+        name: d
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: '{encoded_url} for encode; {is_base64, decoded} for check'
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+      summary: Encode a string to base64url, or check/decode a base64 string
+      tags:
+      - Proxy
   /bitmagnet/manifest.json:
     get:
       produces:
@@ -533,15 +558,39 @@ paths:
     get:
       produces:
       - application/json
+      - application/json
       responses:
         "200":
           description: OK
           schema:
-            items:
-              type: object
-            type: array
-      summary: Discover DLNA renderers
+            type: object
+        "404":
+          description: Not Found
+      summary: Get a discovered DLNA renderer by id
       tags:
+      - Casting
+      - Casting
+  /casting/{id}:
+    get:
+      parameters:
+      - description: device id (USN/UDN)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+        "404":
+          description: Not Found
+      summary: Get a discovered DLNA renderer by id
+      tags:
+      - Casting
       - Casting
   /casting/{id}/player:
     get:
@@ -551,7 +600,7 @@ paths:
         name: id
         required: true
         type: string
-      - description: load|play|pause|stop|seek|status
+      - description: load|play|pause|stop|seek|subtitles|status
         in: query
         name: command
         type: string
@@ -573,7 +622,7 @@ paths:
         name: id
         required: true
         type: string
-      - description: load|play|pause|stop|seek|status
+      - description: load|play|pause|stop|seek|subtitles|status
         in: query
         name: command
         type: string
@@ -663,6 +712,32 @@ paths:
       summary: Stream a remote FTP, FTPS, or HTTP(S) file
       tags:
       - Streaming
+  /generate_url:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: '{endpoint, params, expiry_seconds, ip}'
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: '{url, expires_at}'
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+        "401":
+          description: Unauthorized
+      summary: Generate a signed, expiring proxy URL
+      tags:
+      - Proxy
   /get-https:
     get:
       parameters:

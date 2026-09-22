@@ -30,6 +30,44 @@
                 }
             }
         },
+        "/base64/{action}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Proxy"
+                ],
+                "summary": "Encode a string to base64url, or check/decode a base64 string",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "encode or check",
+                        "name": "action",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "string to encode, or candidate base64 string to check",
+                        "name": "d",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "{encoded_url} for encode; {is_base64, decoded} for check",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            }
+        },
         "/bitmagnet/manifest.json": {
             "get": {
                 "produces": [
@@ -73,21 +111,56 @@
         "/casting": {
             "get": {
                 "produces": [
+                    "application/json",
                     "application/json"
                 ],
                 "tags": [
+                    "Casting",
                     "Casting"
                 ],
-                "summary": "Discover DLNA renderers",
+                "summary": "Get a discovered DLNA renderer by id",
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "array",
-                            "items": {
-                                "type": "object"
-                            }
+                            "type": "object"
                         }
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    }
+                }
+            }
+        },
+        "/casting/{id}": {
+            "get": {
+                "produces": [
+                    "application/json",
+                    "application/json"
+                ],
+                "tags": [
+                    "Casting",
+                    "Casting"
+                ],
+                "summary": "Get a discovered DLNA renderer by id",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "device id (USN/UDN)",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found"
                     }
                 }
             }
@@ -108,7 +181,7 @@
                     },
                     {
                         "type": "string",
-                        "description": "load|play|pause|stop|seek|status",
+                        "description": "load|play|pause|stop|seek|subtitles|status",
                         "name": "command",
                         "in": "query"
                     }
@@ -141,7 +214,7 @@
                     },
                     {
                         "type": "string",
-                        "description": "load|play|pause|stop|seek|status",
+                        "description": "load|play|pause|stop|seek|subtitles|status",
                         "name": "command",
                         "in": "query"
                     }
@@ -271,6 +344,46 @@
                     },
                     "502": {
                         "description": "Bad Gateway"
+                    }
+                }
+            }
+        },
+        "/generate_url": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Proxy"
+                ],
+                "summary": "Generate a signed, expiring proxy URL",
+                "parameters": [
+                    {
+                        "description": "{endpoint, params, expiry_seconds, ip}",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "{url, expires_at}",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "401": {
+                        "description": "Unauthorized"
                     }
                 }
             }
