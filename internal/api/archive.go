@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	lzstring "github.com/daku10/go-lz-string"
@@ -321,13 +322,17 @@ func archiveLargestVideo(files []archive.Entry) string {
 	return best.Name
 }
 
-// ── SSRF pre-flight / local-path confinement ──────────────────────────────────
+// ── SSRF pre-flight / guarded outbound fetch ────────────────────────────────
 //
-// getClient (api.go) is a shared HTTP client reused by trusted-caller routes
+// api.go's getClient is a shared HTTP client reused by trusted-caller routes
 // and is hard-coded to netguard.DialControl(false) (only the cloud-metadata
-// address is blocked); it cannot be changed here. archiveDownload and
+// address is blocked); it is not touched here. archiveDownload and
 // nzb.go's nzbCreate both fetch a caller-supplied URL for an unauthenticated
-// route, so each validates the target host itself before calling out.
+// route, so both validate the target host up front (validateFetchHost) and
+// then fetch through archiveFetchClient below, whose dialer re-validates the
+// actual resolved IP at connect time and whose redirect policy re-validates
+// every hop — closing the DNS-rebinding / redirect-to-loopback gap that a
+// pure pre-flight check cannot foreclose by itself.
 
 // archiveAllowPrivateHosts reports whether STREMIO_ARCHIVE_ALLOW_PRIVATE
 // opts /create endpoints (archive download, NZB fetch) into reaching
@@ -337,6 +342,69 @@ func archiveLargestVideo(files []archive.Entry) string {
 func archiveAllowPrivateHosts() bool {
 	v := strings.TrimSpace(os.Getenv("STREMIO_ARCHIVE_ALLOW_PRIVATE"))
 	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
+}
+
+// archiveDialControl is archiveFetchClient's net.Dialer.Control hook. It
+// re-reads archiveAllowPrivateHosts() on every dial — rather than baking the
+// decision in once at package-init time — so the pooled client's behaviour
+// always reflects the current opt-in state (mirrors ftpstream's
+// ftpDialControl).
+func archiveDialControl(network, address string, c syscall.RawConn) error {
+	return netguard.DialControl(!archiveAllowPrivateHosts())(network, address, c)
+}
+
+// archiveMaxRedirects caps the number of redirects archiveFetchClient will
+// follow, matching net/http's own default limit.
+const archiveMaxRedirects = 5
+
+// archiveCheckRedirect re-validates every redirect hop's target host before
+// following it. Without this, a public URL that 30x-redirects to
+// 127.0.0.1/RFC1918 would still be fetched: the dialer's Control hook only
+// ever sees a resolved IP, so pairing it with a redirect-time host check
+// (the same validateFetchHost used for the initial URL) closes the
+// redirect-to-loopback gap, in addition to the dial-time DNS-rebinding
+// guard.
+func archiveCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= archiveMaxRedirects {
+		return fmt.Errorf("stopped after %d redirects", archiveMaxRedirects)
+	}
+	if err := validateFetchHost(req.URL.String()); err != nil {
+		return err
+	}
+	return nil
+}
+
+// archiveFetchClient is the dedicated HTTP client for /create-style outbound
+// fetches (archive download, NZB XML fetch): its dialer enforces the SSRF
+// guard at connect time (see archiveDialControl) and its CheckRedirect
+// re-validates every redirect target, unlike api.go's getClient which is
+// shared with trusted-caller routes and only blocks cloud-metadata.
+var archiveFetchClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 10 * time.Second,
+			Control: archiveDialControl,
+		}).DialContext,
+	},
+	CheckRedirect: archiveCheckRedirect,
+}
+
+// archiveFetchGet performs a guarded GET against u via archiveFetchClient
+// and returns up to maxBytes of the response body. Used by archiveDownload
+// and nzb.go's nzbCreate (fetching the NZB XML) — both fetch a
+// caller-supplied URL for an unauthenticated route, so neither may use
+// api.go's getClient/httpGet.
+func archiveFetchGet(u string, maxBytes int64) ([]byte, error) {
+	resp, err := archiveFetchClient.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: status %d", u, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 }
 
 // errFetchHostNotAllowed is returned by validateFetchHost for every blocked
@@ -371,12 +439,33 @@ func validateFetchHost(rawURL string) error {
 	if err != nil || len(addrs) == 0 {
 		return nil
 	}
-	for _, a := range addrs {
-		if netguard.ValidateIP(a.IP, true) == nil {
-			return nil
-		}
+	ips := make([]net.IP, len(addrs))
+	for i, a := range addrs {
+		ips[i] = a.IP
+	}
+	if anyAddrAllowed(ips) {
+		return nil
 	}
 	return errFetchHostNotAllowed
+}
+
+// anyAddrAllowed reports whether at least one address in addrs is allowed by
+// netguard.ValidateIP(ip, true) (public, i.e. neither cloud-metadata nor
+// private/loopback/RFC1918). Factored out of validateFetchHost so the
+// mixed-DNS-answer behavior — a hostname resolving to both a public and a
+// private address passes this pre-flight check — is unit-testable with a
+// literal []net.IP, without a real DNS lookup. This is intentionally a
+// coarse pre-flight only: archiveFetchClient's dial-time Control hook is
+// what actually forecloses the case where the connection ends up going to
+// the disallowed address (DNS-rebinding or round-robin to the private
+// answer).
+func anyAddrAllowed(addrs []net.IP) bool {
+	for _, ip := range addrs {
+		if netguard.ValidateIP(ip, true) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // archiveLocalPathErrMsg is returned for every local-path rejection: local
@@ -451,7 +540,7 @@ func archiveDownload(u string) (string, error) {
 	if err := validateFetchHost(u); err != nil {
 		return "", err
 	}
-	resp, err := getClient.Get(u)
+	resp, err := archiveFetchClient.Get(u)
 	if err != nil {
 		return "", err
 	}

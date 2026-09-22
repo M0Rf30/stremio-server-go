@@ -35,6 +35,7 @@ import (
 
 	lzstring "github.com/daku10/go-lz-string"
 
+	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 	"github.com/M0Rf30/stremio-server-go/internal/nzb"
 )
 
@@ -42,6 +43,10 @@ import (
 const (
 	nzbLzMaxEncoded = 1 << 20 // 1 MiB — max encoded ?lz= parameter length
 	nzbLzMaxDecoded = 8 << 20 // 8 MiB — max decompressed JSON length
+	// nzbMaxDownloadBytes caps the NZB XML fetched from the caller-supplied
+	// nzbUrl (mirrors the cap httpGet used before this route switched to
+	// archiveFetchGet for the guarded client).
+	nzbMaxDownloadBytes = 16 << 20 // 16 MiB
 )
 
 // ---- session store ---------------------------------------------------------
@@ -233,16 +238,17 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// Fetch the NZB file from the provided URL. validateFetchHost (defined in
-	// archive.go, same package) closes the same SSRF / internal-port-scan
-	// finding as archiveDownload: httpGet's underlying getClient (api.go) is
-	// a shared client hard-coded to netguard.DialControl(false) and cannot be
-	// changed here, so the host is validated up front instead.
+	// Fetch the NZB file from the provided URL. validateFetchHost is an
+	// early 403; archiveFetchGet (archive.go, same package) performs the
+	// actual fetch through archiveFetchClient, whose dialer re-validates
+	// the resolved IP at connect time and whose redirect policy
+	// re-validates every hop — api.go's getClient/httpGet must not be used
+	// here since this route fetches a caller-supplied URL unauthenticated.
 	if err := validateFetchHost(nzbURL); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
-	nzbData, err := httpGet(nzbURL)
+	nzbData, err := archiveFetchGet(nzbURL, nzbMaxDownloadBytes)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
@@ -255,7 +261,9 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// Build server config from the first server entry.
+	// Build server config from the first server entry. Control guards the
+	// NNTP TCP/TLS dial itself: the client-supplied host/port in servers[]
+	// previously bypassed netguard entirely (SEC-2), unlike nzbURL above.
 	srv := servers[0]
 	cfg := nzb.ServerConfig{
 		Host:        srv.Host,
@@ -264,6 +272,7 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 		Pass:        srv.Pass,
 		SSL:         srv.SSL,
 		Connections: srv.Connections,
+		Control:     netguard.DialControl(!archiveAllowPrivateHosts()),
 	}
 	if cfg.Port == 0 {
 		if cfg.SSL {

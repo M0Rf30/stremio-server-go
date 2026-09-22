@@ -8,6 +8,7 @@ import (
 	"net/textproto"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +28,13 @@ type ServerConfig struct {
 	Pass        string
 	SSL         bool
 	Connections int // informational; single-connection client ignores this
+	// Control, when set, is passed as the net.Dialer.Control hook for the
+	// TCP dial (and, for SSL, the TLS handshake's underlying TCP dial),
+	// letting callers apply an SSRF guard (e.g. netguard.DialControl) that
+	// re-validates the actual resolved IP at connect time — closing the
+	// gap where a caller-supplied NNTP host previously reached internal
+	// hosts with no guard at all. nil means no additional restriction.
+	Control func(network, address string, c syscall.RawConn) error
 }
 
 // Client is a sequential NNTP connection. A single connection is used; callers
@@ -60,13 +68,13 @@ func Dial(cfg ServerConfig) (*Client, error) {
 
 	var conn net.Conn
 	var err error
+	dialer := &net.Dialer{Timeout: dialTimeout, Control: cfg.Control}
 	if cfg.SSL {
-		dialer := &net.Dialer{Timeout: dialTimeout}
 		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
 			ServerName: cfg.Host,
 		})
 	} else {
-		conn, err = net.DialTimeout("tcp", addr, dialTimeout)
+		conn, err = dialer.Dial("tcp", addr)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("nntp: dial %s: %w", addr, err)
