@@ -76,6 +76,13 @@ func manyFreshProxyClients(n int) map[string]proxyClientEntry {
 // TestClientForCachesAndExpires drives clientFor directly (no real proxy
 // dial happens until a request is made) to confirm the same proxyURL is
 // served from cache on repeat calls and rebuilt once its TTL entry expires.
+//
+// The Handler below has an empty Config (no Password/IPACL/Secret), so
+// proxyBlockPrivate() is false and clientFor's cache key is
+// proxyClientKey(p, false) rather than the raw proxyURL — see
+// TestProxyClientKeyDistinguishesBlockPrivate for the keying contract itself.
+// http://127.0.0.1:8080 remains a fine fixture here precisely because this
+// handler is unprotected, so it is never rejected by validateProxyHost.
 func TestClientForCachesAndExpires(t *testing.T) {
 	h := &Handler{
 		cfg:          Config{Client: http.DefaultClient},
@@ -92,6 +99,7 @@ func TestClientForCachesAndExpires(t *testing.T) {
 	}
 
 	const p = "http://127.0.0.1:8080"
+	key := proxyClientKey(p, h.proxyBlockPrivate())
 	c2 := h.clientFor(p)
 	c3 := h.clientFor(p)
 	if c2 != c3 {
@@ -100,16 +108,31 @@ func TestClientForCachesAndExpires(t *testing.T) {
 	if len(h.proxyClients) != 1 {
 		t.Fatalf("expected exactly 1 cached client, got %d", len(h.proxyClients))
 	}
+	if _, ok := h.proxyClients[key]; !ok {
+		t.Fatalf("expected cache entry under key %q", key)
+	}
 
 	// Force expiry and confirm a fresh client is built.
 	h.proxyMu.Lock()
-	e := h.proxyClients[p]
+	e := h.proxyClients[key]
 	e.expiresAt = time.Now().Add(-time.Second)
-	h.proxyClients[p] = e
+	h.proxyClients[key] = e
 	h.proxyMu.Unlock()
 
 	c4 := h.clientFor(p)
 	if c4 == c3 {
 		t.Fatalf("expired cached client should be rebuilt, got the same instance")
+	}
+}
+
+// TestProxyClientKeyDistinguishesBlockPrivate confirms the cache key folds in
+// blockPrivate, so a guarded and an unguarded client for the same proxyURL
+// can never collide in h.proxyClients.
+func TestProxyClientKeyDistinguishesBlockPrivate(t *testing.T) {
+	const p = "http://proxy.example:1080"
+	guarded := proxyClientKey(p, true)
+	unguarded := proxyClientKey(p, false)
+	if guarded == unguarded {
+		t.Fatalf("expected distinct keys for blockPrivate=true/false, got %q for both", guarded)
 	}
 }

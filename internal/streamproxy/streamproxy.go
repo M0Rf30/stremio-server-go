@@ -23,6 +23,7 @@ import (
 	"golang.org/x/net/proxy"
 
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
+	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 )
 
 // Config holds the runtime configuration for the proxy handler.
@@ -497,6 +498,14 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SSRF guard for the client-supplied "proxy" query param (as opposed to
+	// ValidateDest, which guards opts.Dest above). Rejects outright rather
+	// than silently falling back to the base client, which would mask the
+	// probe while still fetching opts.Dest.
+	if h.rejectBlockedProxyHost(w, opts.Proxy) {
+		return
+	}
+
 	params, _ := h.parseDecryptParams(r)
 
 	// Build upstream request headers from opts. Range is forwarded only on the
@@ -697,6 +706,80 @@ func (h *Handler) Authorize(r *http.Request) error {
 }
 
 // ---------------------------------------------------------------------------
+// Upstream proxy host validation (SSRF guard for the client "proxy" param)
+// ---------------------------------------------------------------------------
+
+// proxyBlockPrivate reports whether this handler must block private/loopback
+// and cloud-metadata destinations for outbound requests made on a client's
+// behalf — i.e. whether it is exposed to untrusted clients. Mirrors the
+// "protected" signal in ValidateDest exactly, so a proxy URL and a
+// destination URL are held to the same trust boundary.
+func (h *Handler) proxyBlockPrivate() bool {
+	return h.cfg.Password != "" || len(h.cfg.IPACL) > 0 || len(h.cfg.Secret) > 0
+}
+
+// validateProxyHost is an SSRF guard for the client-supplied "proxy" query
+// parameter, as opposed to ValidateDest which guards the destination URL.
+// The scheme is assumed already restricted to socks5/socks5h/http/https by
+// the caller; this resolves the proxy URL's host and rejects it unless every
+// resolved IP passes netguard.ValidateIP under the same blockPrivate policy
+// as ValidateDest.
+func (h *Handler) validateProxyHost(rawurl string) error {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return fmt.Errorf("invalid proxy URL: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("proxy URL has no host")
+	}
+
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		addrs, lookupErr := net.LookupHost(host)
+		if lookupErr != nil {
+			return fmt.Errorf("cannot resolve proxy host %q: %w", host, lookupErr)
+		}
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil {
+				ips = append(ips, ip)
+			}
+		}
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("proxy host %q did not resolve to any usable IP", host)
+	}
+
+	blockPrivate := h.proxyBlockPrivate()
+	for _, ip := range ips {
+		if verr := netguard.ValidateIP(ip, blockPrivate); verr != nil {
+			return fmt.Errorf("proxy host %q: %w", host, verr)
+		}
+	}
+	return nil
+}
+
+// rejectBlockedProxyHost validates a client-supplied "proxy" query value and,
+// if it resolves to a disallowed host, writes a 403 response and logs once.
+// Returns true when the request was rejected — the caller must return
+// immediately. An empty proxyURL (no client override present) is always
+// allowed; cfg.UpstreamProxy is admin-configured and not client-controlled,
+// so it is never passed through this guard.
+func (h *Handler) rejectBlockedProxyHost(w http.ResponseWriter, proxyURL string) bool {
+	if proxyURL == "" {
+		return false
+	}
+	if err := h.validateProxyHost(proxyURL); err != nil {
+		logging.For("streamproxy").Warn("blocked proxy host", "proxy_url", proxyURL, "err", err)
+		http.Error(w, "forbidden proxy", http.StatusForbidden)
+		return true
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // Upstream proxy client management
 // ---------------------------------------------------------------------------
 
@@ -712,21 +795,23 @@ func (h *Handler) clientFor(proxyURL string) *http.Client {
 	if proxyURL == "" {
 		return base
 	}
+	blockPrivate := h.proxyBlockPrivate()
+	key := proxyClientKey(proxyURL, blockPrivate)
 	h.proxyMu.Lock()
 	defer h.proxyMu.Unlock()
-	if e, ok := h.proxyClients[proxyURL]; ok {
+	if e, ok := h.proxyClients[key]; ok {
 		if time.Now().Before(e.expiresAt) {
 			return e.client
 		}
 		e.client.CloseIdleConnections()
-		delete(h.proxyClients, proxyURL)
+		delete(h.proxyClients, key)
 	}
-	c, err := buildProxyClient(proxyURL)
+	c, err := buildProxyClient(proxyURL, blockPrivate)
 	if err != nil {
 		logging.For("streamproxy").Warn("cannot build proxy client; using default", "proxy_url", proxyURL, "err", err)
 		return base
 	}
-	h.proxyClients[proxyURL] = proxyClientEntry{client: c, expiresAt: time.Now().Add(proxyClientTTL)}
+	h.proxyClients[key] = proxyClientEntry{client: c, expiresAt: time.Now().Add(proxyClientTTL)}
 	if len(h.proxyClients) > proxyClientMaxEntries {
 		h.sweepProxyClients()
 	}
@@ -773,12 +858,35 @@ func (h *Handler) sweepProxyClients() {
 	}
 }
 
+// proxyClientKey computes the cache key for h.proxyClients, folding in
+// blockPrivate so a guarded and an unguarded client built for the same
+// proxyURL can never be confused with one another. blockPrivate is fixed for
+// a given Handler's lifetime (it derives from h.cfg), so this is defensive
+// rather than load-bearing today — but it keeps the invariant explicit and
+// keeps clientFor's cache correct if that ever changes.
+func proxyClientKey(proxyURL string, blockPrivate bool) string {
+	if blockPrivate {
+		return "p:" + proxyURL
+	}
+	return "u:" + proxyURL
+}
+
 // buildProxyClient constructs an *http.Client whose transport routes through
-// the given proxy URL (socks5/socks5h/http/https).
-func buildProxyClient(proxyURL string) (*http.Client, error) {
+// the given proxy URL (socks5/socks5h/http/https). blockPrivate mirrors the
+// same "protected" signal as ValidateDest/proxyBlockPrivate: the dialer used
+// to connect to the proxy host itself (not the ultimate destination, which
+// the caller reaches through the proxy) is guarded with netguard.DialControl,
+// closing the DNS-rebinding TOCTOU gap between validateProxyHost's pre-flight
+// check and the actual dial.
+func buildProxyClient(proxyURL string, blockPrivate bool) (*http.Client, error) {
 	u, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse proxy URL: %w", err)
+	}
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   netguard.DialControl(blockPrivate),
 	}
 	tr := &http.Transport{
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -792,17 +900,18 @@ func buildProxyClient(proxyURL string) (*http.Client, error) {
 			pw, _ := u.User.Password()
 			auth = &proxy.Auth{User: u.User.Username(), Password: pw}
 		}
-		dialer, err := proxy.SOCKS5("tcp", u.Host, auth, proxy.Direct)
+		socksDialer, err := proxy.SOCKS5("tcp", u.Host, auth, dialer)
 		if err != nil {
 			return nil, fmt.Errorf("SOCKS5 dialer: %w", err)
 		}
-		cd, ok := dialer.(proxy.ContextDialer)
+		cd, ok := socksDialer.(proxy.ContextDialer)
 		if !ok {
 			return nil, fmt.Errorf("SOCKS5 dialer does not implement ContextDialer")
 		}
 		tr.DialContext = cd.DialContext
 	case "http", "https":
 		tr.Proxy = http.ProxyURL(u)
+		tr.DialContext = dialer.DialContext
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme %q", u.Scheme)
 	}
@@ -835,7 +944,9 @@ func (h *Handler) serveIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine effective proxy from the request query (same validation as parseOptions).
+	// Determine effective proxy from the request query (same validation as
+	// parseOptions), then apply the same host-level SSRF guard used by
+	// serveStream/hlsServe/dashServe before it is ever dialed.
 	effProxy := ""
 	if raw := r.URL.Query().Get("proxy"); raw != "" {
 		if u, err := url.Parse(raw); err == nil {
@@ -844,6 +955,9 @@ func (h *Handler) serveIP(w http.ResponseWriter, r *http.Request) {
 				effProxy = raw
 			}
 		}
+	}
+	if h.rejectBlockedProxyHost(w, effProxy) {
+		return
 	}
 	if effProxy == "" {
 		effProxy = h.cfg.UpstreamProxy
