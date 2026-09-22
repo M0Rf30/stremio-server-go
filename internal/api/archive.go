@@ -18,11 +18,14 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,6 +38,7 @@ import (
 	lzstring "github.com/daku10/go-lz-string"
 
 	"github.com/M0Rf30/stremio-server-go/internal/archive"
+	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 )
 
 // ── session store ────────────────────────────────────────────────────────────
@@ -317,11 +321,136 @@ func archiveLargestVideo(files []archive.Entry) string {
 	return best.Name
 }
 
+// ── SSRF pre-flight / local-path confinement ──────────────────────────────────
+//
+// getClient (api.go) is a shared HTTP client reused by trusted-caller routes
+// and is hard-coded to netguard.DialControl(false) (only the cloud-metadata
+// address is blocked); it cannot be changed here. archiveDownload and
+// nzb.go's nzbCreate both fetch a caller-supplied URL for an unauthenticated
+// route, so each validates the target host itself before calling out.
+
+// archiveAllowPrivateHosts reports whether STREMIO_ARCHIVE_ALLOW_PRIVATE
+// opts /create endpoints (archive download, NZB fetch) into reaching
+// private/loopback/RFC1918 hosts. Default is false (secure): only public
+// addresses are reachable. The cloud-metadata address is always blocked
+// regardless, via netguard.ValidateIP's unconditional check.
+func archiveAllowPrivateHosts() bool {
+	v := strings.TrimSpace(os.Getenv("STREMIO_ARCHIVE_ALLOW_PRIVATE"))
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
+}
+
+// errFetchHostNotAllowed is returned by validateFetchHost for every blocked
+// target, regardless of *why* the specific IP is blocked (cloud-metadata vs.
+// private) or whether the host would otherwise be reachable. Callers surface
+// this fixed message verbatim so the response never distinguishes "internal
+// host exists and refused" from "internal host doesn't exist" from "internal
+// host returned garbage" — closing the internal-port-scan oracle a
+// differentiated error would otherwise provide.
+var errFetchHostNotAllowed = errors.New("remote host not allowed")
+
+// validateFetchHost resolves rawURL's host and rejects it when every
+// candidate address is disallowed by netguard. It is a validate-then-fetch
+// check (not a dial-time hook), so unlike netguard.DialControl it cannot by
+// itself foreclose a DNS-rebinding TOCTOU window; it exists to close the
+// coarse-grained "reach my LAN / cloud-metadata" SSRF on /create endpoints
+// that download from a caller-supplied URL, which is the finding in scope.
+// A DNS resolution failure is not itself treated as a block — the real fetch
+// surfaces that error naturally, and it is not a distinguishing oracle here
+// since it says nothing about the reachability of any internal address.
+func validateFetchHost(rawURL string) error {
+	if archiveAllowPrivateHosts() {
+		return nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return errFetchHostNotAllowed
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, u.Hostname())
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+	for _, a := range addrs {
+		if netguard.ValidateIP(a.IP, true) == nil {
+			return nil
+		}
+	}
+	return errFetchHostNotAllowed
+}
+
+// archiveLocalPathErrMsg is returned for every local-path rejection: local
+// archives disabled, path escapes the configured root, or the path genuinely
+// does not exist. Keeping the message and status identical across all three
+// closes the filesystem-existence oracle (an attacker probing paths cannot
+// distinguish "not configured" / "denied" / "not found").
+const archiveLocalPathErrMsg = "local path not found"
+
+// archiveLocalRoot returns the directory local archive sources are confined
+// to, or "" when local-path archives are disabled (the default — without
+// this the "url"/"from" field could name any file on disk; see
+// archiveResolveLocalPath). STREMIO_ARCHIVE_LOCAL_ROOT is an archive-specific
+// override; LOCAL_FILES_DIR (internal/api/localaddon.go's existing
+// local-files-addon root) is reused as a fallback so operators who already
+// mount a media directory get local-archive support without a second knob.
+func archiveLocalRoot() string {
+	if root := strings.TrimSpace(os.Getenv("STREMIO_ARCHIVE_LOCAL_ROOT")); root != "" {
+		return root
+	}
+	return strings.TrimSpace(os.Getenv("LOCAL_FILES_DIR"))
+}
+
+// archiveResolveLocalPath confines source to archiveLocalRoot(), returning an
+// error when local-path archives are disabled (no root configured) or when
+// the resolved path escapes the root via ".." traversal or a symlink. Both
+// the requested path and the configured root are resolved with
+// filepath.EvalSymlinks so a symlink inside (or as) the root cannot be used
+// to point outside it. When source itself does not exist yet,
+// EvalSymlinks(source) fails, so its parent directory is resolved instead and
+// the leaf name re-joined — the parent's symlink chain still cannot escape
+// the root, and the subsequent os.Stat uniformly reports non-existence.
+func archiveResolveLocalPath(source string) (string, error) {
+	root := archiveLocalRoot()
+	if root == "" {
+		return "", errors.New("local archive sources are disabled")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", err
+	}
+
+	srcAbs, err := filepath.Abs(source)
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(srcAbs)
+	if err != nil {
+		parent, perr := filepath.EvalSymlinks(filepath.Dir(srcAbs))
+		if perr != nil {
+			return "", perr
+		}
+		real = filepath.Join(parent, filepath.Base(srcAbs))
+	}
+
+	rel, err := filepath.Rel(rootReal, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("path escapes allowed root")
+	}
+	return real, nil
+}
+
 // ── helper: download / key / path-encoding ───────────────────────────────────
 
 // archiveDownload fetches u and streams it to a new temp file.
 // The caller owns the file and must remove it when done.
 func archiveDownload(u string) (string, error) {
+	if err := validateFetchHost(u); err != nil {
+		return "", err
+	}
 	resp, err := getClient.Get(u)
 	if err != nil {
 		return "", err
@@ -521,11 +650,16 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 		}
 		isTempArch = true
 	} else {
-		if _, statErr := os.Stat(source); statErr != nil {
-			http.Error(w, "local path not found: "+statErr.Error(), http.StatusBadRequest)
+		resolved, resolveErr := archiveResolveLocalPath(source)
+		if resolveErr != nil {
+			http.Error(w, archiveLocalPathErrMsg, http.StatusBadRequest)
 			return
 		}
-		archivePath = source
+		if _, statErr := os.Stat(resolved); statErr != nil {
+			http.Error(w, archiveLocalPathErrMsg, http.StatusBadRequest)
+			return
+		}
+		archivePath = resolved
 	}
 
 	// Open archive, list entries, select the target file.

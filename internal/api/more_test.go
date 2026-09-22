@@ -174,6 +174,7 @@ const minimalNZBXML = `<?xml version="1.0" encoding="UTF-8"?>
 </nzb>`
 
 func TestHandlerNZBCreate_Success(t *testing.T) {
+	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1") // exercises nzbCreate itself, not the SSRF guard
 	nzbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-nzb")
 		_, _ = w.Write([]byte(minimalNZBXML))
@@ -204,6 +205,7 @@ func TestHandlerNZBCreate_Success(t *testing.T) {
 // mirroring archive.go/ftp.go's GET+lz direct-play contract.
 
 func TestHandlerNZBCreate_GetLzRedirect(t *testing.T) {
+	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1") // exercises nzbCreate itself, not the SSRF guard
 	nzbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-nzb")
 		_, _ = w.Write([]byte(minimalNZBXML))
@@ -272,6 +274,7 @@ func buildTestZip(t *testing.T) []byte {
 }
 
 func TestHandlerArchiveCreate_ZipSuccess(t *testing.T) {
+	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1") // exercises archiveHandleCreate itself, not the SSRF guard
 	zipData := buildTestZip(t)
 	zipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/zip")
@@ -296,6 +299,7 @@ func TestHandlerArchiveCreate_ZipSuccess(t *testing.T) {
 }
 
 func TestHandlerArchiveCreate_KeyCollisionRemovesOldTempArchive(t *testing.T) {
+	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1") // exercises archiveHandleCreate itself, not the SSRF guard
 	zipData := buildTestZip(t)
 	zipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/zip")

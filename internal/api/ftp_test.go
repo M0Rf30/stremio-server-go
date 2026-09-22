@@ -51,6 +51,7 @@ func newFakeFTPSource(data []byte) *httptest.Server {
 // parseRange decides about the response status/Content-Length, so the
 // declared Content-Length always equals the actual body length.
 func TestHandlerFTP_RangeFraming(t *testing.T) {
+	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1") // exercises range framing, not the SSRF guard
 	data := make([]byte, 1000)
 	for i := range data {
 		data[i] = byte('a' + i%26)
@@ -130,5 +131,41 @@ func TestHandlerFTP_RangeFraming(t *testing.T) {
 				t.Errorf("body length = %d; want 0 for %d response", rec.Body.Len(), tc.wantStatus)
 			}
 		})
+	}
+}
+
+// TestHandlerFTP_BlocksPrivateAddressByDefault verifies the /ftp?lz= route
+// rejects a loopback target by default — closing the SSRF finding that
+// previously let this unauthenticated route reach 127.0.0.1 and RFC1918
+// hosts (ftpstream's dialers were netguard.DialControl(false), which only
+// blocks the cloud-metadata address). The local handler must never be
+// invoked: rejection happens at connect time, before any request reaches it.
+func TestHandlerFTP_BlocksPrivateAddressByDefault(t *testing.T) {
+	called := false
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer src.Close()
+
+	compressed, err := lzstring.CompressToEncodedURIComponent(fmt.Sprintf(`{"ftpUrl":"%s/secret.mkv"}`, src.URL))
+	if err != nil {
+		t.Fatalf("lz compress: %v", err)
+	}
+	path := "/ftp/secret.mkv?lz=" + url.QueryEscape(compressed)
+
+	h := newHandler(t)
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d; want %d; body = %s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "blocked private address") {
+		t.Errorf("body = %q; want it to indicate the netguard private-address block", rec.Body.String())
+	}
+	if called {
+		t.Error("local handler was invoked; the /ftp request should have been rejected before connecting")
 	}
 }
