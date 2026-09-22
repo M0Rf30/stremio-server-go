@@ -233,7 +233,15 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// Fetch the NZB file from the provided URL.
+	// Fetch the NZB file from the provided URL. validateFetchHost (defined in
+	// archive.go, same package) closes the same SSRF / internal-port-scan
+	// finding as archiveDownload: httpGet's underlying getClient (api.go) is
+	// a shared client hard-coded to netguard.DialControl(false) and cannot be
+	// changed here, so the host is validated up front instead.
+	if err := validateFetchHost(nzbURL); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
 	nzbData, err := httpGet(nzbURL)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})

@@ -15,8 +15,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jlaffaye/ftp"
@@ -24,15 +26,60 @@ import (
 	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 )
 
+// ftpAllowPrivate reports whether STREMIO_FTP_ALLOW_PRIVATE opts into
+// reaching private/loopback/RFC1918 addresses (e.g. a LAN NAS) from the
+// unauthenticated /ftp?lz= route. Default is false (secure): only public
+// addresses are reachable. The cloud-metadata address (169.254.169.254) is
+// always blocked regardless, via netguard.ValidateIP's unconditional check.
+func ftpAllowPrivate() bool {
+	v := strings.TrimSpace(os.Getenv("STREMIO_FTP_ALLOW_PRIVATE"))
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
+}
+
+// preflightHost resolves host and rejects it up front when every candidate
+// address is disallowed by netguard.ValidateIP, giving a fast, clear error
+// before any protocol handshake begins. The real enforcement point remains
+// the dialer's Control hook (netguard.DialControl via ftpDialControl /
+// openFTP's dialer), which re-validates the specific resolved IP at connect
+// time and forecloses DNS-rebinding; this is a defense-in-depth fast-fail
+// layer, not a substitute for it. A DNS resolution failure is not itself
+// treated as a block — the real dial/request attempt surfaces that error
+// naturally.
+func preflightHost(ctx context.Context, host string, blockPrivate bool) error {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+	var firstErr error
+	for _, a := range addrs {
+		if verr := netguard.ValidateIP(a.IP, blockPrivate); verr != nil {
+			if firstErr == nil {
+				firstErr = verr
+			}
+			continue
+		}
+		return nil
+	}
+	return firstErr
+}
+
+// ftpDialControl is httpGuardedClient's net.Dialer.Control hook. It re-reads
+// ftpAllowPrivate() on every dial — rather than baking the decision in at
+// package-init time — so the pooled client's behaviour always reflects the
+// current opt-in state.
+func ftpDialControl(network, address string, c syscall.RawConn) error {
+	return netguard.DialControl(!ftpAllowPrivate())(network, address, c)
+}
+
 // httpGuardedClient is a package-level HTTP client whose dialer rejects the
-// cloud-metadata address (169.254.169.254) at connect time, matching the
-// localhost-trust posture of the proxy (private/LAN targets remain reachable so
-// a trusted local caller can stream from a NAS or LAN host). Reused to pool conns.
+// cloud-metadata address and, by default, all private/loopback/RFC1918
+// addresses at connect time (see ftpDialControl / STREMIO_FTP_ALLOW_PRIVATE).
+// Reused across requests to pool connections.
 var httpGuardedClient = &http.Client{
 	Transport: &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: 10 * time.Second,
-			Control: netguard.DialControl(false),
+			Control: ftpDialControl,
 		}).DialContext,
 	},
 }
@@ -108,12 +155,15 @@ func openFTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, i
 	if err != nil {
 		return nil, -1, err
 	}
+	if err := preflightHost(ctx, p.host, !ftpAllowPrivate()); err != nil {
+		return nil, -1, fmt.Errorf("ftpstream: %w", err)
+	}
 
 	opts := []ftp.DialOption{
 		ftp.DialWithContext(ctx),
 		ftp.DialWithDialer(net.Dialer{
 			Timeout: 10 * time.Second,
-			Control: netguard.DialControl(false),
+			Control: netguard.DialControl(!ftpAllowPrivate()),
 		}),
 	}
 	if p.tls {
@@ -166,6 +216,14 @@ func openFTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, i
 // When offset > 0, a Range header is sent. The total resource size is inferred
 // from Content-Range (206 response) or Content-Length (200 response).
 func openHTTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, int64, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, -1, fmt.Errorf("ftpstream: parse URL: %w", err)
+	}
+	if err := preflightHost(ctx, u.Hostname(), !ftpAllowPrivate()); err != nil {
+		return nil, -1, fmt.Errorf("ftpstream: %w", err)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, -1, fmt.Errorf("ftpstream: build request for %s: %w", rawURL, err)
