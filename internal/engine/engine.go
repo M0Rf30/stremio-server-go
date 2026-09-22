@@ -157,6 +157,12 @@ type manager struct {
 	// refetching dedupes in-flight VerifyData re-downloads of evicted in-RAM
 	// pieces, keyed by refetchKey. Only exercised when the in-RAM cache is on.
 	refetching sync.Map
+
+	// purging tracks infohashes whose on-disk cache directory is mid-delete
+	// (RemoveEngine/RemoveAll/evict/evictIdle running os.RemoveAll outside
+	// m.mu — see beginPurge). EnsureEngine waits on the channel instead of
+	// recreating the same directory while the delete is still running.
+	purging map[string]chan struct{}
 }
 
 // Compile-time interface satisfaction checks.
@@ -310,6 +316,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		engines:     make(map[string]*engine),
 		done:        done,
 		memStorage:  memStorageCloser,
+		purging:     make(map[string]chan struct{}),
 	}
 	// Wire the evicted-piece re-download hook now that the manager (and its
 	// engine map) exists. No torrents are added until EnsureEngine, so this is
@@ -325,69 +332,99 @@ func New(cfg types.Config) (types.EngineManager, error) {
 // --------------------------------------------------------------------------
 
 // EnsureEngine returns the existing engine for infoHash or creates one.
-// A second call with additional trackers merges them without restarting.
+// A second call with additional trackers merges them without restarting, and
+// bumps lastAccess in both reuse paths so the reuse itself counts as activity
+// for the LRU/idle janitor — otherwise a torrent that is only ever re-fetched
+// via EnsureEngine (never Stats()/NewReader) could look idle and be evicted
+// before the caller gets a chance to touch it.
+//
+// If infoHash is currently mid-purge (a concurrent RemoveEngine/RemoveAll/
+// evict/evictIdle is still running os.RemoveAll on its cache directory —
+// see beginPurge), EnsureEngine blocks until that purge finishes before
+// creating a fresh engine at the same on-disk path, so the new engine's
+// directory can never be deleted out from under it by the tail end of the
+// in-flight removal.
 func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.Engine, error) {
 	ih := strings.ToLower(infoHash)
 
-	// Fast path: already exists.
-	m.mu.RLock()
-	if e, ok := m.engines[ih]; ok {
-		t := e.t // read e.t under RLock before releasing
-		m.mu.RUnlock()
-		mergeTrackers(t, opts, !m.cfg.DisableWebtorrent)
-		return e, nil
-	}
-	m.mu.RUnlock()
-
-	// Slow path: acquire write lock, re-check (double-check locking), then add.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if e, ok := m.engines[ih]; ok {
-		mergeTrackers(e.t, opts, !m.cfg.DisableWebtorrent)
-		return e, nil
-	}
-
-	var (
-		t   *torrent.Torrent
-		err error
-	)
-
-	if opts.MetaInfo != nil {
-		// Raw .torrent bytes provided — parse and add.
-		mi, miErr := metainfo.Load(bytes.NewReader(opts.MetaInfo))
-		if miErr != nil {
-			return nil, fmt.Errorf("engine: parse metainfo for %s: %w", ih, miErr)
+	for {
+		// Fast path: already exists.
+		m.mu.RLock()
+		if e, ok := m.engines[ih]; ok {
+			t := e.t // read e.t under RLock before releasing
+			m.mu.RUnlock()
+			mergeTrackers(t, opts, !m.cfg.DisableWebtorrent)
+			e.mu.Lock()
+			e.lastAccess = time.Now()
+			e.mu.Unlock()
+			return e, nil
 		}
-		// Drop ws/wss (and any non-http(s)/udp) announces when WebTorrent is
-		// disabled; otherwise anacrolix's regular dispatcher panics on them.
-		allowWS := !m.cfg.DisableWebtorrent
-		mi.Announce = strings.Join(announceableTrackers([]string{mi.Announce}, allowWS), "")
-		mi.AnnounceList = announceableTiers(mi.AnnounceList, allowWS)
-		t, err = m.client.AddTorrent(mi)
-	} else {
-		// Only the info-hash is known; start with a plain magnet URI.
-		magnet := "magnet:?xt=urn:btih:" + ih
-		t, err = m.client.AddMagnet(magnet)
+		waitCh := m.purging[ih]
+		m.mu.RUnlock()
+		if waitCh != nil {
+			<-waitCh
+			continue // purge finished (or another one started) — re-check from the top
+		}
+
+		// Slow path: acquire write lock, re-check (double-check locking), then add.
+		m.mu.Lock()
+		if e, ok := m.engines[ih]; ok {
+			mergeTrackers(e.t, opts, !m.cfg.DisableWebtorrent)
+			e.mu.Lock()
+			e.lastAccess = time.Now()
+			e.mu.Unlock()
+			m.mu.Unlock()
+			return e, nil
+		}
+		if waitCh := m.purging[ih]; waitCh != nil {
+			m.mu.Unlock()
+			<-waitCh
+			continue
+		}
+
+		var (
+			t   *torrent.Torrent
+			err error
+		)
+
+		if opts.MetaInfo != nil {
+			// Raw .torrent bytes provided — parse and add.
+			mi, miErr := metainfo.Load(bytes.NewReader(opts.MetaInfo))
+			if miErr != nil {
+				m.mu.Unlock()
+				return nil, fmt.Errorf("engine: parse metainfo for %s: %w", ih, miErr)
+			}
+			// Drop ws/wss (and any non-http(s)/udp) announces when WebTorrent is
+			// disabled; otherwise anacrolix's regular dispatcher panics on them.
+			allowWS := !m.cfg.DisableWebtorrent
+			mi.Announce = strings.Join(announceableTrackers([]string{mi.Announce}, allowWS), "")
+			mi.AnnounceList = announceableTiers(mi.AnnounceList, allowWS)
+			t, err = m.client.AddTorrent(mi)
+		} else {
+			// Only the info-hash is known; start with a plain magnet URI.
+			magnet := "magnet:?xt=urn:btih:" + ih
+			t, err = m.client.AddMagnet(magnet)
+		}
+		if err != nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("engine: add torrent %s: %w", ih, err)
+		}
+
+		mergeTrackers(t, opts, !m.cfg.DisableWebtorrent)
+		// Inject a baseline public-tracker list (like the official server) so bare /
+		// trackerless magnets still find peers instead of relying on DHT alone.
+		t.AddTrackers([][]string{announceableTrackers(getTrackers(), !m.cfg.DisableWebtorrent)})
+
+		e := &engine{t: t, infoHash: ih, path: filepath.Join(m.cfg.CacheRoot, ih), lastAccess: time.Now()}
+		m.engines[ih] = e
+		m.mu.Unlock()
+
+		// Spawn a one-shot goroutine that boosts container-metadata (moov-atom /
+		// codec-init) reads once the torrent info dict is available.
+		go applyBoundaryPriorities(e)
+
+		return e, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("engine: add torrent %s: %w", ih, err)
-	}
-
-	mergeTrackers(t, opts, !m.cfg.DisableWebtorrent)
-	// Inject a baseline public-tracker list (like the official server) so bare /
-	// trackerless magnets still find peers instead of relying on DHT alone.
-	t.AddTrackers([][]string{announceableTrackers(getTrackers(), !m.cfg.DisableWebtorrent)})
-
-	e := &engine{t: t, infoHash: ih, path: filepath.Join(m.cfg.CacheRoot, ih), lastAccess: time.Now()}
-	m.engines[ih] = e
-
-	// Spawn a one-shot goroutine that boosts container-metadata (moov-atom /
-	// codec-init) reads once the torrent info dict is available. This is safe
-	// to start inside the write lock because the goroutine only blocks on GotInfo.
-	go applyBoundaryPriorities(e)
-
-	return e, nil
 }
 
 // GetEngine returns the engine for infoHash if it exists.
@@ -401,39 +438,57 @@ func (m *manager) GetEngine(infoHash string) (types.Engine, bool) {
 	return nil, false
 }
 
-// dropAndPurge drops the torrent and removes its on-disk cache directory,
-// then deletes the map entry. Mirrors evict/evictIdle: RemoveAll runs while
-// still holding the caller's write lock so a concurrent EnsureEngine for the
-// same infohash cannot recreate the directory before this delete lands, and
-// the freed bytes never survive as an orphaned, unbudgeted directory. In-RAM
-// storage mode (Config.MemoryCacheSize > 0) never creates e.path on disk, so
-// removing a nonexistent directory is a harmless no-op. Callers must hold
-// m.mu for writing.
-func (m *manager) dropAndPurge(ih string, e *engine) {
+// beginPurge removes ih's engine from the live map and drops its torrent
+// while still holding m.mu (both O(1)), then returns a function that runs
+// the (potentially slow) os.RemoveAll off the lock and clears the purge
+// marker when done. Previously RemoveAll ran while still holding m.mu,
+// which stalled every other API call (including /stats.json polling) for
+// the duration of a bulk filesystem delete on slow storage.
+//
+// While the returned function is in flight, ih is recorded in m.purging so a
+// concurrent EnsureEngine for the same infohash blocks instead of racing to
+// recreate e.path mid-delete (see EnsureEngine). Callers must hold m.mu for
+// writing when calling beginPurge, and must invoke the returned function only
+// after releasing m.mu.
+func (m *manager) beginPurge(ih string, e *engine) func() {
 	e.t.Drop()
 	delete(m.engines, ih)
-	_ = os.RemoveAll(e.path)
+	done := make(chan struct{})
+	m.purging[ih] = done
+	return func() {
+		_ = os.RemoveAll(e.path)
+		m.mu.Lock()
+		delete(m.purging, ih)
+		m.mu.Unlock()
+		close(done)
+	}
 }
 
 // RemoveEngine stops and removes the torrent identified by infoHash.
 func (m *manager) RemoveEngine(infoHash string) error {
 	ih := strings.ToLower(infoHash)
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	e, ok := m.engines[ih]
 	if !ok {
+		m.mu.Unlock()
 		return nil // idempotent
 	}
-	m.dropAndPurge(ih, e)
+	finish := m.beginPurge(ih, e)
+	m.mu.Unlock()
+	finish()
 	return nil
 }
 
 // RemoveAll stops and removes all active torrents.
 func (m *manager) RemoveAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	finishers := make([]func(), 0, len(m.engines))
 	for ih, e := range m.engines {
-		m.dropAndPurge(ih, e)
+		finishers = append(finishers, m.beginPurge(ih, e))
+	}
+	m.mu.Unlock()
+	for _, finish := range finishers {
+		finish()
 	}
 }
 
@@ -547,14 +602,18 @@ func (m *manager) SetLimitFn(fn func() (downBytesPerSec, upBytesPerSec int64)) {
 	})
 }
 
-// evict removes the least-recently-used engines until total on-disk cache usage
-// is within budget. budget <= 0 means unlimited — no eviction is performed.
+// evict enforces the cache budget returned by cacheSizeFn. Contract:
+// budget < 0 means unlimited (no eviction ever runs). budget == 0 means
+// "no caching": every engine with zero open readers is purged as soon as its
+// grace window has elapsed, regardless of on-disk size. budget > 0 is a byte
+// cap: least-recently-used, reader-less engines are dropped until total
+// on-disk usage is back within budget.
 //
 // Lock ordering: sizes are measured without any lock held; the write lock is
 // acquired only for individual map mutations, minimising contention with readers.
 func (m *manager) evict(budget int64) {
-	if budget <= 0 {
-		return // 0 / nil cacheSize => unlimited
+	if budget < 0 {
+		return // unlimited — never purge
 	}
 
 	const graceWindow = 90 * time.Second
@@ -569,6 +628,13 @@ func (m *manager) evict(budget int64) {
 	m.mu.RUnlock()
 
 	if len(snap) == 0 {
+		return
+	}
+
+	if budget == 0 {
+		// "no caching": on-disk size is irrelevant — purge every reader-less
+		// engine once its grace window has elapsed.
+		m.purgeReaderless(snap, graceWindow, "evicted torrent (no caching)")
 		return
 	}
 
@@ -650,10 +716,51 @@ func (m *manager) evict(budget int64) {
 			m.mu.Unlock()
 			continue
 		}
-		m.dropAndPurge(ih, ent.e)
+		finish := m.beginPurge(ih, ent.e)
 		m.mu.Unlock()
+		finish()
 		total -= ent.size
 		logging.For("engine").Info("evicted torrent", "info_hash", ih, "freed_bytes", ent.size, "budget_bytes", budget)
+	}
+}
+
+// purgeReaderless drops every engine in snap that currently has no open
+// readers and has been idle (no NewReader/Stats access) for at least
+// threshold, logging each removal under event. It is the shared reader-less
+// scan used by both evict(0) ("no caching", threshold = the fixed grace
+// window) and evictIdle (threshold = the configured idle timeout).
+//
+// Lock ordering matches evict: m.mu -> e.mu; the engine is re-checked under
+// the write lock so a reader that opened since the snapshot is never dropped.
+func (m *manager) purgeReaderless(snap []*engine, threshold time.Duration, event string) {
+	now := time.Now()
+	for _, e := range snap {
+		e.mu.Lock()
+		idleFor := now.Sub(e.lastAccess)
+		pinned := e.openReaders > 0
+		e.mu.Unlock()
+		if pinned || idleFor < threshold {
+			continue
+		}
+		ih := e.infoHash
+		m.mu.Lock()
+		if m.engines[ih] != e {
+			m.mu.Unlock()
+			continue // already removed or replaced by a concurrent caller
+		}
+		// Re-check under the write lock: a reader may have opened since the
+		// snapshot. Lock order m.mu -> e.mu.
+		e.mu.Lock()
+		stillPinned := e.openReaders > 0 || now.Sub(e.lastAccess) < threshold
+		e.mu.Unlock()
+		if stillPinned {
+			m.mu.Unlock()
+			continue
+		}
+		finish := m.beginPurge(ih, e)
+		m.mu.Unlock()
+		finish()
+		logging.For("engine").Info(event, "info_hash", ih, "idle_for", idleFor.Round(time.Second).String())
 	}
 }
 
@@ -662,9 +769,6 @@ func (m *manager) evict(budget int64) {
 // server's inactive-torrent reclaim (~5 min) so a stopped torrent is dropped
 // even when cacheSize is unlimited (the size-based evict never fires then),
 // while still keeping it alive long enough for instant scrub/resume/next-episode.
-//
-// Lock ordering matches evict (m.mu -> e.mu); the engine is re-checked under the
-// write lock so a reader that opened since the snapshot is never dropped.
 func (m *manager) evictIdle(idle time.Duration) {
 	if idle <= 0 {
 		return
@@ -677,34 +781,7 @@ func (m *manager) evictIdle(idle time.Duration) {
 	}
 	m.mu.RUnlock()
 
-	now := time.Now()
-	for _, e := range snap {
-		e.mu.Lock()
-		idleFor := now.Sub(e.lastAccess)
-		pinned := e.openReaders > 0
-		e.mu.Unlock()
-		if pinned || idleFor < idle {
-			continue
-		}
-		ih := e.infoHash
-		m.mu.Lock()
-		if m.engines[ih] != e {
-			m.mu.Unlock()
-			continue // already removed or replaced by a concurrent caller
-		}
-		// Re-check under the write lock: a reader may have opened since the
-		// snapshot. Lock order m.mu -> e.mu.
-		e.mu.Lock()
-		stillPinned := e.openReaders > 0 || now.Sub(e.lastAccess) < idle
-		e.mu.Unlock()
-		if stillPinned {
-			m.mu.Unlock()
-			continue
-		}
-		m.dropAndPurge(ih, e)
-		m.mu.Unlock()
-		logging.For("engine").Info("removed idle torrent", "info_hash", ih, "idle_for", idleFor.Round(time.Second).String())
-	}
+	m.purgeReaderless(snap, idle, "removed idle torrent")
 }
 
 // uploadToggler is the slice of *torrent.Torrent the seed-ratio enforcer needs.
@@ -1300,6 +1377,12 @@ func (e *engine) Stats(idx int) *types.Stats {
 	totalPeers := ts.TotalPeers
 
 	files := e.Files()
+	if files == nil {
+		// stremio-core's Statistics deserializer requires files as a sequence
+		// (Vec<File>, never Option<Vec<File>>), even before the torrent's
+		// metadata — and therefore its file list — is available (COMPAT-1).
+		files = []types.FileInfo{}
+	}
 	// Refresh the announce-URL / Opts cache when the TTL has elapsed.
 	// Metainfo() and DistinctValues() each acquire anacrolix internal locks; at
 	// ~1 Hz polling from stremio-web those contend heavily. We memoize the
