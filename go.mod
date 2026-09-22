@@ -1,6 +1,6 @@
 module github.com/M0Rf30/stremio-server-go
 
-go 1.26.0
+go 1.27.1
 
 require (
 	github.com/anacrolix/dht/v2 v2.24.1-0.20260908044610-a669bdd3bdcf
