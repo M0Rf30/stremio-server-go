@@ -15,15 +15,19 @@
 // Player control (UPnP AVTransport:1 via goupnp):
 //
 //	Command → AVTransport action
-//	  load / setUrl → SetAVTransportURI(CurrentURI, DIDL-Lite meta) then Play
+//	  load / setUrl → SetAVTransportURI(CurrentURI, DIDL-Lite meta) then Play,
+//	                   then Seek(REL_TIME) if the body's "time" (ms) > 0
 //	  play          → Play(Speed=1)
 //	  pause         → Pause
-//	  stop          → Stop
+//	  stop          → Stop (core sends this as {"source": null})
 //	  seek          → Seek(Unit=REL_TIME, Target=HH:MM:SS from "time" param)
+//	  subtitles     → acknowledged only; no standard AVTransport:1 action
+//	                   exists for live subtitle track/offset changes
 //	  status        → GetPositionInfo → {trackDuration, relTime, trackURI}
 //
 // Command resolution: (1) path suffix /casting/:id/player/:cmd, (2) ?command=,
-// (3) inferred from param presence (source→load, stop→stop, etc.).
+// (3) inferred from param presence (source→load, null source→stop,
+// subtitlesSrc/subtitlesDelay→subtitles, stop→stop, etc.).
 package api
 
 import (
@@ -43,6 +47,8 @@ import (
 	"github.com/huin/goupnp"
 	"github.com/huin/goupnp/dcps/av1"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
 
 // CastingDevice is one UPnP MediaRenderer discovered on the LAN.
@@ -80,6 +86,14 @@ const (
 // @Produce  json
 // @Success  200  {array}   object
 // @Router   /casting [get]
+//
+// @Summary  Get a discovered DLNA renderer by id
+// @Tags     Casting
+// @Produce  json
+// @Param    id  path  string  true  "device id (USN/UDN)"
+// @Success  200  {object}  object
+// @Failure  404
+// @Router   /casting/{id} [get]
 func (s *server) handleCasting(w http.ResponseWriter, r *http.Request, seg []string) {
 	// DLNA is opt-in (STREMIO_ENABLE_DLNA). When disabled, advertise no devices
 	// so clients show nothing castable, and 404 any device/control sub-route — no
@@ -129,14 +143,14 @@ func (s *server) handleCasting(w http.ResponseWriter, r *http.Request, seg []str
 // Command dispatch via goupnp AVTransport:1 client. The command may come from:
 //   - Path suffix:    /casting/:id/player/play
 //   - Query param:    ?command=play
-//   - Param inference: ?source=… → load, ?stop=1 → stop, ?paused=true → pause, ?time=N → seek
+//   - Param inference: ?source=… → load (null → stop), ?stop=1 → stop, ?paused=true → pause, ?time=N → seek
 //
 // All AVTransport calls time out after 5 s.
 //
 // @Summary  UPnP AVTransport control
 // @Tags     Casting
 // @Param    id       path   string  true   "device id"
-// @Param    command  query  string  false  "load|play|pause|stop|seek|status"
+// @Param    command  query  string  false  "load|play|pause|stop|seek|subtitles|status"
 // @Success  200  {object}  map[string]interface{}
 // @Failure  404
 // @Router   /casting/{id}/player [get]
@@ -186,11 +200,13 @@ func (s *server) handlePlayerControl(w http.ResponseWriter, r *http.Request, seg
 		s.castingStop(w, client, dev)
 	case "seek":
 		s.castingSeek(w, client, dev, params)
+	case "subtitles":
+		s.castingSubtitles(w, dev, params)
 	case "status":
 		s.castingStatus(w, client, dev)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": fmt.Sprintf("unknown command %q; valid: load, setUrl, play, pause, stop, seek, status", cmd),
+			"error": fmt.Sprintf("unknown command %q; valid: load, setUrl, play, pause, stop, seek, subtitles, status", cmd),
 		})
 	}
 }
@@ -223,6 +239,14 @@ func castingParams(r *http.Request) url.Values {
 					params.Set(k, val.String())
 				case bool:
 					params.Set(k, strconv.FormatBool(val))
+				case nil:
+					// Explicit JSON null (core sends Stop as {"source":null}
+					// and a cleared subtitlesSrc as {"subtitlesSrc":null,…};
+					// see casting.rs:288 and msg/action.rs CastingSubtitles).
+					// Record presence with an empty-but-non-nil slice:
+					// params.Get can't distinguish "explicit null" from
+					// "absent", so isJSONNull checks the map directly.
+					params[k] = []string{}
 				}
 			}
 		}
@@ -230,6 +254,15 @@ func castingParams(r *http.Request) url.Values {
 	}
 	_ = r.ParseForm()
 	return r.Form
+}
+
+// isJSONNull reports whether key was present in the JSON body with an
+// explicit null value, as recorded by castingParams. url.Values.Get cannot
+// distinguish "explicit null" from "absent" or "empty string", so this
+// checks the underlying map for a present-but-zero-length slice.
+func isJSONNull(params url.Values, key string) bool {
+	vs, ok := params[key]
+	return ok && len(vs) == 0
 }
 
 // castingCommand resolves the player command from the path suffix or params.
@@ -242,9 +275,23 @@ func castingCommand(seg []string, params url.Values) string {
 	if c := params.Get("command"); c != "" {
 		return strings.ToLower(c)
 	}
+	// Core sends Stop as the bare {"source": null} (casting.rs cast_request);
+	// without this check it falls through to "status" instead (COMPAT-2).
+	if isJSONNull(params, "source") {
+		return "stop"
+	}
 	// Infer from param presence (mirrors reference PlayerParams semantics).
 	if params.Get("source") != "" {
 		return "load"
+	}
+	// Core sends subtitle updates as the bare CastingSubtitles object
+	// ({"subtitlesSrc":…,"subtitlesDelay":…}, msg/action.rs), with no
+	// source/command/stop/paused/time field of its own.
+	if _, ok := params["subtitlesSrc"]; ok {
+		return "subtitles"
+	}
+	if _, ok := params["subtitlesDelay"]; ok {
+		return "subtitles"
 	}
 	if params.Get("stop") != "" {
 		return "stop"
@@ -302,12 +349,34 @@ func (s *server) castingLoad(w http.ResponseWriter, client *av1.AVTransport1, de
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":   "ok",
 		"action":   "load+play",
 		"deviceId": dev.ID,
 		"uri":      mediaURI,
-	})
+	}
+
+	// Core always sends "time" alongside "source" for Play/load
+	// (PlayOnDeviceArgs.time in runtime/msg/action.rs; cast_request in
+	// casting.rs sends args.time.unwrap_or(0)), in milliseconds — the same
+	// unit as the rest of the wire API's resume-position fields (e.g.
+	// LibraryItemState.time_offset in models/player.rs). Seek only for an
+	// actual resume position; time == 0 means "start from the beginning",
+	// which SetAVTransportURI+Play already does. A seek failure here must
+	// not fail the load response: playback already started successfully.
+	if rawTime := params.Get("time"); rawTime != "" {
+		if ms, err := strconv.ParseFloat(rawTime, 64); err == nil && ms > 0 {
+			target, err := seekToSecs(client, ms/1000)
+			if err != nil {
+				logging.For("casting").Debug("resume seek after load failed",
+					"device_id", dev.ID, "target", target, "err", err)
+			} else {
+				resp["seek"] = target
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // castingPlay sends Play(Speed=1).
@@ -343,6 +412,51 @@ func (s *server) castingStop(w http.ResponseWriter, client *av1.AVTransport1, de
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "action": "stop", "deviceId": dev.ID})
 }
 
+// castingSubtitles acknowledges a subtitle-track/offset update from core
+// (CastingSubtitles{subtitlesSrc, subtitlesDelay}, runtime/msg/action.rs),
+// sent bare via cast_request's Command::Subtitles arm in
+// streaming_server/casting.rs — no "source" field, so castingCommand routes
+// it here instead of falling through to "status".
+//
+// AVTransport:1 has no standard action for changing the subtitle track or
+// timing offset of an item that is already loaded. The closest analogue —
+// re-issuing SetAVTransportURI with a vendor-specific sec:CaptionInfo /
+// sec:CaptionInfoEx attribute in the DIDL-Lite <res> element (a Samsung DLNA
+// extension some renderers honor) — causes most renderers to reload the
+// stream from its current position, trading a subtitle change for a visible
+// playback interruption; that tradeoff cannot be safely evaluated without a
+// matrix of real hardware to test against. So this deliberately does not
+// touch AVTransport state (no GetPositionInfo/SetAVTransportURI/Seek call):
+// it just answers 200 so core does not surface the update as a failure, and
+// logs at debug for diagnosis. It intentionally does NOT reuse castingStatus
+// — GetPositionInfo after a subtitle-only change is unnecessary chatter to
+// the device and would misreport the response shape as a poll result.
+func (s *server) castingSubtitles(w http.ResponseWriter, dev *CastingDevice, params url.Values) {
+	logging.For("casting").Debug("subtitles update acknowledged (no DLNA action taken)",
+		"device_id", dev.ID,
+		"subtitles_src", params.Get("subtitlesSrc"),
+		"subtitles_delay", params.Get("subtitlesDelay"))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"action":   "subtitles",
+		"deviceId": dev.ID,
+	})
+}
+
+// seekToSecs issues Seek(Unit=REL_TIME) to the given offset (seconds) and
+// returns the HH:MM:SS target that was sent, even on error, so callers can
+// log/report it. Shared by castingSeek (direct "time" param, seconds) and
+// castingLoad (resume position after Play, converted from core's ms unit).
+func seekToSecs(client *av1.AVTransport1, secs float64) (string, error) {
+	target := secsToHHMMSS(secs)
+	ctx, cancel := context.WithTimeout(context.Background(), soapTimeout)
+	defer cancel()
+	if err := client.SeekCtx(ctx, 0, "REL_TIME", target); err != nil {
+		return target, err
+	}
+	return target, nil
+}
+
 // castingSeek sends Seek(Unit=REL_TIME, Target=HH:MM:SS).
 // The "time" query/form param is seconds (int or float).
 func (s *server) castingSeek(w http.ResponseWriter, client *av1.AVTransport1, dev *CastingDevice, params url.Values) {
@@ -356,10 +470,8 @@ func (s *server) castingSeek(w http.ResponseWriter, client *av1.AVTransport1, de
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing or invalid time parameter"})
 		return
 	}
-	target := secsToHHMMSS(secs)
-	ctx, cancel := context.WithTimeout(context.Background(), soapTimeout)
-	defer cancel()
-	if err := client.SeekCtx(ctx, 0, "REL_TIME", target); err != nil {
+	target, err := seekToSecs(client, secs)
+	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
