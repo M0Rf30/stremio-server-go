@@ -10,7 +10,15 @@ LDFLAGS     := -s -w -checklinkname=0 \
 	-X main.buildVersion=$(VERSION) \
 	-X main.buildCommit=$(COMMIT) \
 	-X main.buildDate=$(DATE)
-GOFLAGS     := -trimpath -ldflags "$(LDFLAGS)"
+# -mod=readonly is exported so EVERY go invocation (build, test, vet, list)
+# inherits it. Without it, a toolchain newer than the go.mod directive silently
+# rewrites go.mod/go.sum and bumps pinned dependencies out from under you.
+export GOFLAGS := -mod=readonly
+
+# Build-only flags. Deliberately NOT part of GOFLAGS: exporting -ldflags would
+# leak "-s -w" into `go test`/`go vet` binaries too.
+BUILDFLAGS  := -trimpath -ldflags "$(LDFLAGS)"
+
 
 # CGO is not required for most targets; disabling it makes them cross-compile
 # as pure Go. The two exceptions are android/arm and android/arm64: Android
@@ -39,7 +47,7 @@ ANDROID_LDFLAGS    := -linkmode=external -extldflags "-pie -lm -static-libstdc++
 all: fmt-check vet lint test build
 
 build: ## Build the binary for the host platform
-	go build $(GOFLAGS) -o $(BINARY) $(MAIN)
+	go build $(BUILDFLAGS) -o $(BINARY) $(MAIN)
 
 run: build ## Build and run
 	./$(BINARY)
@@ -83,13 +91,13 @@ clean: ## Remove build artifacts
 # android/arm64 needs -checklinkname=0 (already in LDFLAGS) for github.com/wlynxg/anet on Go 1.23+.
 build-all: ## Cross-build all release targets into dist/
 	@mkdir -p $(DIST)
-	GOOS=linux   GOARCH=amd64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_linux_amd64        $(MAIN)
-	GOOS=linux   GOARCH=arm64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_linux_arm64        $(MAIN)
-	GOOS=linux   GOARCH=arm GOARM=7  go build $(GOFLAGS) -o $(DIST)/$(BINARY)_linux_armv7        $(MAIN)
-	GOOS=darwin  GOARCH=amd64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_darwin_amd64       $(MAIN)
-	GOOS=darwin  GOARCH=arm64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_darwin_arm64       $(MAIN)
-	GOOS=windows GOARCH=amd64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_windows_amd64.exe  $(MAIN)
-	GOOS=windows GOARCH=arm64        go build $(GOFLAGS) -o $(DIST)/$(BINARY)_windows_arm64.exe  $(MAIN)
+	GOOS=linux   GOARCH=amd64        go build $(BUILDFLAGS) -o $(DIST)/$(BINARY)_linux_amd64        $(MAIN)
+	GOOS=linux   GOARCH=arm64        go build $(BUILDFLAGS) -o $(DIST)/$(BINARY)_linux_arm64        $(MAIN)
+	GOOS=linux   GOARCH=arm GOARM=7  go build $(BUILDFLAGS) -o $(DIST)/$(BINARY)_linux_armv7        $(MAIN)
+	GOOS=darwin  GOARCH=amd64        go build $(BUILDFLAGS) -o $(DIST)/$(BINARY)_darwin_amd64       $(MAIN)
+	GOOS=darwin  GOARCH=arm64        go build $(BUILDFLAGS) -o $(DIST)/$(BINARY)_darwin_arm64       $(MAIN)
+	GOOS=windows GOARCH=amd64        go build $(BUILDFLAGS) -o $(DIST)/$(BINARY)_windows_amd64.exe  $(MAIN)
+	GOOS=windows GOARCH=arm64        go build $(BUILDFLAGS) -o $(DIST)/$(BINARY)_windows_arm64.exe  $(MAIN)
 	@if command -v $(ANDROID_ARM64_CC) >/dev/null 2>&1; then \
 		CGO_ENABLED=1 CC=$(ANDROID_ARM64_CC) CXX=$(ANDROID_ARM64_CXX) \
 		GOOS=android GOARCH=arm64 \

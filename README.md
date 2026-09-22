@@ -26,7 +26,7 @@ Not affiliated with or endorsed by Stremio.
   (`/nzb`, NNTP + yEnc) and **FTP/FTPS** (`/ftp`) streaming - all pure-Go.
 - **Disk-bounded cache** - LRU eviction honouring the `cacheSize` setting, plus idle-torrent removal after inactivity (`STREMIO_TORRENT_IDLE_TIMEOUT`).
 - Self-signed HTTPS on `:12470` for HTTPS web UIs (e.g. WebKitGTK shells).
-- **Metrics** - `GET /metrics` exposes Prometheus-format gauges (goroutines, heap, active torrents, HLS sessions, proxy cache).
+- **Metrics** - `GET /metrics` exposes Prometheus-format gauges (goroutines, heap, active torrents, HLS sessions, proxy cache) with permissive CORS headers (`Access-Control-Allow-Origin: *`); **do not expose to untrusted networks** — bind to loopback only.
 
 ## Install
 
@@ -81,6 +81,7 @@ Then point any Stremio client's **streaming server URL** at
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `BIND_ADDRESS` | _(unset)_ | interface the HTTP/HTTPS listeners bind to. Unset (the default) binds **every** interface — on an IPv6-enabled host that includes globally routable addresses, and this API is **unauthenticated**. Set `127.0.0.1` (or `::1`) to restrict it to loopback, which is all the official Stremio desktop/web client needs. |
 | `HTTP_PORT` | `11470` | enginefs HTTP API port |
 | `HTTPS_PORT` | `12470` | HTTPS port (`0` disables). Serves a persisted cert if present, else self-signed; with a Stremio authKey it auto-provisions and renews a browser-trusted Let's Encrypt cert via `/get-https`. |
 | `BT_LISTEN_PORT` | `0` | BitTorrent peer port (`0` = OS-assigned) |
@@ -89,6 +90,9 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_TORRENT_IDLE_TIMEOUT` | `300` | seconds a torrent may sit with no open stream readers and no access before it is dropped (peers disconnected, cached pieces freed). Matches official Stremio's inactive-torrent reclaim so a stopped stream is released even when `cacheSize` is unlimited, while staying alive long enough for instant scrub/resume/next-episode. `0` disables idle removal (cache-size LRU only). |
 | `WEB_UI_LOCATION` | `https://web.stremio.com/` | redirect target for `GET /` |
 | `LOCAL_FILES_DIR` | _(unset)_ | directory scanned by the local-files addon |
+| `STREMIO_ARCHIVE_LOCAL_ROOT` | _(unset)_ | root directory under which `/{zip,rar,7zip,tar,tgz}/create` may open a **local** archive path. Unset falls back to `LOCAL_FILES_DIR`; if both are unset, local-path archive sources are disabled entirely and only `http(s)://` sources are accepted. Paths are resolved through symlinks and must stay inside the root. |
+| `STREMIO_ARCHIVE_ALLOW_PRIVATE` | _(off)_ | `1`/`true` lets `/{zip,rar,7zip,tar,tgz}/create` and `/nzb/create` fetch from private/loopback/RFC1918 URLs. Off by default (SSRF guard); the cloud-metadata address stays blocked either way. Enable only to pull archives from a LAN host. |
+| `STREMIO_FTP_ALLOW_PRIVATE` | _(off)_ | `1`/`true` lets `/ftp` reach private/loopback/RFC1918 hosts. Off by default (SSRF guard); the cloud-metadata address stays blocked either way. Enable to stream from a LAN NAS. |
 | `STREMIO_LOCAL_IMDB` | `on` | local-files add-on resolves filenames to IMDB ids/metadata via IMDb's suggestion API (catalog posters/titles). **Enabled by default**; set `=0`/`off` to disable — local files then keep filename titles + `local:` ids and no request is sent to IMDb. |
 | `STREMIO_HWACCEL` | _(auto)_ | `0` forces software transcode; or pin `vaapi`/`nvenc`/… |
 | `STREMIO_HTTP_LOG` | _(off)_ | `1` emits a structured access log line per request (`method`, `uri`, `status`, `duration_ms`, `bytes`, `remote`) |
@@ -112,7 +116,7 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_ENABLE_DLNA` | _(off)_ | enable DLNA/UPnP casting on `/casting` (SSDP discovery + UPnP AVTransport control). **Disabled by default**; set `=1`/`true` to enable. |
 | `STREMIO_CERT_AUTHKEY` | _(unset)_ | Stremio authKey used to auto-provision/renew a trusted HTTPS cert from `api.strem.io`. If unset, a key cached from a prior `/get-https` call is reused. |
 | `STREMIO_CERT_IP` | _(primary IPv4)_ | IP encoded into the provisioned cert's domain; defaults to the first non-loopback IPv4. |
-| `STREMIO_PEERS_PER_TORRENT` | `50` | established peer connections per torrent (half-open=n/2, high-water=n*10); lower (e.g. 30) trims peer goroutines/RAM |
+| `STREMIO_PEERS_PER_TORRENT` | `0` | established peer connections per torrent. `0` (the default) is a sentinel meaning "use the built-in defaults" (50 established, 25 half-open, 500 high-water); set explicitly (e.g. `30`) to override (half-open=n/2, high-water=n*10). Lower values trim peer goroutines/RAM. |
 | `STREMIO_MEM_LIMIT` | _(unset)_ | soft memory ceiling in bytes (runtime/debug.SetMemoryLimit; GOMEMLIMIT env also works). RSS high-water is returned to the OS every 5 min regardless |
 | `STREMIO_BT_ENCRYPTION` | `prefer` | BitTorrent peer-connection encryption (MSE/PE header obfuscation). `prefer` encrypts when the peer supports it and falls back to plaintext (default, DPI-detectable). `require` refuses plaintext entirely (RC4 only) for DPI evasion in censored networks. `disable` turns obfuscation off. |
 | `STREMIO_BT_PROXY` | _(unset)_ | Upstream proxy for BitTorrent **tracker announces, HTTP webseeds, metainfo fetch, and the tracker-list download** (`socks5://host:port` or `http(s)://host:port`). Lets you reach trackers blocked by your ISP. **Peer connections are not proxied** — use `STREMIO_BT_ENCRYPTION=require` for peer-traffic DPI evasion. |
