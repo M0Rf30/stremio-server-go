@@ -3,7 +3,6 @@ package streamproxy
 import (
 	"encoding/base64"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,72 +11,14 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// isPrivate
+// ValidateDest private-range/cloud-metadata detection
 // ---------------------------------------------------------------------------
-
-func TestIsPrivate(t *testing.T) {
-	cases := []struct {
-		ip      string
-		private bool
-	}{
-		{"127.0.0.1", true},
-		{"10.0.0.1", true},
-		{"10.255.255.255", true},
-		{"172.16.0.1", true},
-		{"172.31.255.255", true},
-		{"192.168.1.1", true},
-		{"169.254.1.1", true},
-		{"::1", true},
-		{"203.0.113.1", false},
-		{"8.8.8.8", false},
-		{"1.1.1.1", false},
-		{"172.32.0.1", false}, // just outside RFC 1918 /12
-	}
-	for _, tc := range cases {
-		ip := net.ParseIP(tc.ip)
-		if ip == nil {
-			t.Fatalf("cannot parse IP %q", tc.ip)
-		}
-		got := isPrivate(ip)
-		if got != tc.private {
-			t.Errorf("isPrivate(%q) = %v, want %v", tc.ip, got, tc.private)
-		}
-	}
-}
-
-func TestIsPrivateIPv4MappedIPv6(t *testing.T) {
-	// ::ffff:10.0.0.1 is an IPv4-mapped IPv6 address that should match the
-	// 10.0.0.0/8 range after normalisation.
-	ip := net.ParseIP("::ffff:10.0.0.1")
-	if !isPrivate(ip) {
-		t.Error("expected ::ffff:10.0.0.1 to be private (IPv4-mapped)")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// isCloudMetadata
-// ---------------------------------------------------------------------------
-
-func TestIsCloudMetadata(t *testing.T) {
-	cases := []struct {
-		ip   string
-		want bool
-	}{
-		{"169.254.169.254", true},
-		{"169.254.1.1", false},
-		{"1.2.3.4", false},
-		{"::1", false},
-	}
-	for _, tc := range cases {
-		ip := net.ParseIP(tc.ip)
-		if ip == nil {
-			t.Fatalf("cannot parse %q", tc.ip)
-		}
-		if got := isCloudMetadata(ip); got != tc.want {
-			t.Errorf("isCloudMetadata(%q) = %v, want %v", tc.ip, got, tc.want)
-		}
-	}
-}
+//
+// isPrivate/isCloudMetadata used to be a local copy of netguard's logic
+// (SEC-5); ValidateDest now calls netguard.IsPrivate / netguard.IsCloudMetadata
+// directly, so those primitives are exercised (and covered) by
+// internal/netguard/netguard_test.go. The tests below cover ValidateDest's
+// own behavior end to end, including the ranges the old local copy missed.
 
 // ---------------------------------------------------------------------------
 // ValidateDest
@@ -114,6 +55,22 @@ func TestValidateDestPrivateBlockedWhenProtected(t *testing.T) {
 	h := New(Config{Password: "s"})
 	if err := h.ValidateDest("http://10.0.0.1/stream"); err == nil {
 		t.Error("expected error for private IP on protected handler, got nil")
+	}
+}
+
+func TestValidateDestSEC5MissingRanges(t *testing.T) {
+	// SEC-5: the old local privateRanges copy in this package lacked
+	// 0.0.0.0/8, 100.64.0.0/10 (CGNAT), and ::/128. ValidateDest now
+	// delegates to netguard.IsPrivate, which covers all three.
+	h := New(Config{Password: "s"}) // protected
+	for _, dest := range []string{
+		"http://100.64.0.1/stream", // RFC 6598 CGNAT
+		"http://0.0.0.0/stream",    // "this host" / unspecified
+		"http://[::]/stream",       // IPv6 unspecified
+	} {
+		if err := h.ValidateDest(dest); err == nil {
+			t.Errorf("ValidateDest(%q) on protected handler = nil, want error", dest)
+		}
 	}
 }
 

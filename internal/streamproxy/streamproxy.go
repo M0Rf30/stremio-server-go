@@ -169,6 +169,16 @@ func (h *Handler) Route(w http.ResponseWriter, r *http.Request, seg []string) bo
 }
 
 // HandleGenerateURL handles POST /generate_url and returns a signed token URL.
+//
+// @Summary  Generate a signed, expiring proxy URL
+// @Tags     Proxy
+// @Accept   json
+// @Produce  json
+// @Param    body  body  object  true  "{endpoint, params, expiry_seconds, ip}"
+// @Success  200  {object}  map[string]interface{}  "{url, expires_at}"
+// @Failure  400
+// @Failure  401
+// @Router   /generate_url [post]
 func (h *Handler) HandleGenerateURL(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorize(r); err != nil {
 		writeAuthError(w, err)
@@ -208,6 +218,15 @@ func (h *Handler) HandleGenerateURL(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleBase64 handles /base64/encode and /base64/check.
+//
+// @Summary  Encode a string to base64url, or check/decode a base64 string
+// @Tags     Proxy
+// @Produce  json
+// @Param    action  path   string  true   "encode or check"
+// @Param    d       query  string  false  "string to encode, or candidate base64 string to check"
+// @Success  200  {object}  map[string]interface{}  "{encoded_url} for encode; {is_base64, decoded} for check"
+// @Failure  404
+// @Router   /base64/{action} [get]
 func (h *Handler) HandleBase64(w http.ResponseWriter, r *http.Request, seg []string) {
 	if len(seg) < 2 {
 		http.NotFound(w, r)
@@ -396,7 +415,7 @@ func clientIP(r *http.Request) net.IP {
 	peer := net.ParseIP(host)
 
 	// Trust XFF only from a local reverse proxy.
-	if peer != nil && isPrivate(peer) {
+	if peer != nil && netguard.IsPrivate(peer) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			first := strings.SplitN(xff, ",", 2)[0]
 			if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
@@ -604,51 +623,10 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 // SSRF guard helpers
 // ---------------------------------------------------------------------------
 
-// privateRanges lists IP ranges that are considered private/non-routable.
-var privateRanges []*net.IPNet
-
-func init() {
-	for _, cidr := range []string{
-		"127.0.0.0/8",    // IPv4 loopback
-		"10.0.0.0/8",     // RFC 1918
-		"172.16.0.0/12",  // RFC 1918
-		"192.168.0.0/16", // RFC 1918
-		"169.254.0.0/16", // IPv4 link-local
-		"::1/128",        // IPv6 loopback
-		"fc00::/7",       // IPv6 ULA
-		"fe80::/10",      // IPv6 link-local
-	} {
-		_, network, _ := net.ParseCIDR(cidr)
-		if network != nil {
-			privateRanges = append(privateRanges, network)
-		}
-	}
-}
-
-// isPrivate reports whether ip is a loopback, RFC 1918, link-local, or ULA address.
-// IPv4-mapped IPv6 addresses are normalised to IPv4 before matching.
-func isPrivate(ip net.IP) bool {
-	// Normalise so IPv4-mapped IPv6 (::ffff:x.x.x.x) matches v4 ranges.
-	if ip4 := ip.To4(); ip4 != nil {
-		ip = ip4
-	}
-	for _, r := range privateRanges {
-		if r.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// isCloudMetadata reports whether ip is the well-known cloud metadata address
-// 169.254.169.254 (or its IPv4-mapped IPv6 form ::ffff:169.254.169.254).
-func isCloudMetadata(ip net.IP) bool {
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return false
-	}
-	return ip4[0] == 169 && ip4[1] == 254 && ip4[2] == 169 && ip4[3] == 254
-}
+// SSRF guard: private-range and cloud-metadata detection is delegated to
+// netguard.IsPrivate / netguard.IsCloudMetadata (SEC-5) so this package
+// cannot drift out of sync with the shared, tested definitions used by
+// every other outbound-fetch path (archive, nzb, ftpstream).
 
 // ValidateDest is an SSRF guard for proxy destination URLs.
 // It rejects non-http(s) schemes, resolves the hostname, and blocks:
@@ -688,10 +666,10 @@ func (h *Handler) ValidateDest(rawurl string) error {
 	protected := h.cfg.Password != "" || len(h.cfg.IPACL) > 0 || len(h.cfg.Secret) > 0
 
 	for _, ip := range ips {
-		if isCloudMetadata(ip) {
+		if netguard.IsCloudMetadata(ip) {
 			return fmt.Errorf("destination resolves to disallowed cloud-metadata address %s", ip)
 		}
-		if protected && isPrivate(ip) {
+		if protected && netguard.IsPrivate(ip) {
 			return fmt.Errorf("destination resolves to private address %s (proxy is protected)", ip)
 		}
 	}

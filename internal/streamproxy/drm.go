@@ -757,15 +757,22 @@ func drmParseBoxesAt(b []byte, startOffset, limit, depth int) ([]drmBox, error) 
 			boxSize = int(size32)
 		}
 
-		// Handle uuid: 16-byte usertype follows the 4-byte type field.
+		// Handle uuid: a 16-byte usertype follows the 4-byte type field
+		// (ISO/IEC 14496-12 §4.2: extended_type[16]).
 		if boxType == "uuid" {
-			if len(b) < pos+12 {
+			if len(b) < pos+16 {
 				return nil, fmt.Errorf("uuid box at %d: too short for usertype", boxStart)
 			}
-			// The usertype is 16 bytes total; we already consumed 4 as boxType.
-			// Skip the remaining 12 bytes of the UUID.
-			pos += 12
-			hdrSize += 12
+			pos += 16
+			hdrSize += 16
+		}
+
+		// The declared box size must be able to hold at least the header we
+		// just consumed (8 bytes, +8 for a largesize field, +16 for uuid's
+		// usertype); otherwise pos would run past endPos below and the
+		// payload slice expression would panic with low > high.
+		if boxSize < hdrSize {
+			return nil, fmt.Errorf("box at %d: size %d smaller than header size %d", boxStart, boxSize, hdrSize)
 		}
 
 		endPos := boxStart + boxSize

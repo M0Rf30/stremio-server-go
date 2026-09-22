@@ -278,6 +278,107 @@ func drmAssertBoxType(t *testing.T, boxes []drmBox, typ string) {
 }
 
 // ---------------------------------------------------------------------------
+// BUG-2: malformed uuid / truncated box headers must error, never panic.
+// ---------------------------------------------------------------------------
+
+// TestDrmParseBoxes_UUIDTooShortForUsertype covers an 8-byte "uuid" box
+// (just the size+type header, no room at all for the 16-byte usertype):
+// drmParseBoxesAt must return an error instead of indexing past the buffer.
+func TestDrmParseBoxes_UUIDTooShortForUsertype(t *testing.T) {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint32(b[0:4], 8)
+	copy(b[4:8], "uuid")
+
+	if _, err := drmParseBoxes(b); err == nil {
+		t.Fatal("expected error for 8-byte uuid box, got nil")
+	}
+}
+
+// TestDrmParseBoxes_UUIDBoxSizeSmallerThanHeader reproduces the exact BUG-2
+// repro: a "uuid" box whose declared size (8) is smaller than the header it
+// actually requires (8 header + 16 usertype = 24), even though the buffer
+// itself is long enough to read the usertype bytes. Before the fix this made
+// pos (24) run past endPos (8) and panicked with "slice bounds out of range
+// [24:8]"; now it must return an error.
+func TestDrmParseBoxes_UUIDBoxSizeSmallerThanHeader(t *testing.T) {
+	b := make([]byte, 24)
+	binary.BigEndian.PutUint32(b[0:4], 8) // declared size: header-only, too small for uuid
+	copy(b[4:8], "uuid")
+
+	if _, err := drmParseBoxes(b); err == nil {
+		t.Fatal("expected error for uuid box with size < header size, got nil")
+	}
+}
+
+// TestDrmParseBoxes_UUIDSkipsFullUsertype verifies the fixed comment/behavior:
+// a well-formed uuid box skips all 16 usertype bytes (not the old buggy 12),
+// leaving the payload correctly positioned after the full 24-byte header.
+func TestDrmParseBoxes_UUIDSkipsFullUsertype(t *testing.T) {
+	payload := []byte("hello-uuid-payload")
+	usertype := make([]byte, 16)
+	b := make([]byte, 0, 8+16+len(payload))
+	b = append(b, 0, 0, 0, byte(8+16+len(payload))) // size32
+	b = append(b, []byte("uuid")...)
+	b = append(b, usertype...)
+	b = append(b, payload...)
+
+	boxes, err := drmParseBoxes(b)
+	if err != nil {
+		t.Fatalf("drmParseBoxes error: %v", err)
+	}
+	if len(boxes) != 1 {
+		t.Fatalf("got %d boxes, want 1", len(boxes))
+	}
+	if boxes[0].HdrSize != 24 {
+		t.Errorf("HdrSize = %d, want 24 (8 base + 16 usertype)", boxes[0].HdrSize)
+	}
+	if !bytes.Equal(boxes[0].Payload, payload) {
+		t.Errorf("Payload = %q, want %q", boxes[0].Payload, payload)
+	}
+}
+
+// TestDrmParseBoxes_LargesizeSmallerThanHeader covers the general
+// boxSize < hdrSize check for the size==1 (largesize) path: a largesize
+// value smaller than the 16-byte header it declares must error, not panic.
+func TestDrmParseBoxes_LargesizeSmallerThanHeader(t *testing.T) {
+	b := make([]byte, 16)
+	binary.BigEndian.PutUint32(b[0:4], 1) // size==1: largesize follows
+	copy(b[4:8], "moof")
+	binary.BigEndian.PutUint64(b[8:16], 4) // largesize=4, smaller than the 16-byte header
+
+	if _, err := drmParseBoxes(b); err == nil {
+		t.Fatal("expected error for largesize smaller than header, got nil")
+	}
+}
+
+// FuzzDrmParseBoxes asserts drmParseBoxesAt never panics on arbitrary or
+// truncated ISO BMFF input, only ever returning a value or an error.
+func FuzzDrmParseBoxes(f *testing.F) {
+	// Seed corpus: empty, truncated headers, the BUG-2 uuid repro, size==0/1
+	// edge cases, and a valid nested moof/traf/mdat segment.
+	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0})                                                     // shorter than any header
+	f.Add([]byte{0, 0, 0, 7, 'a', 'b', 'c', 'd'})                              // size < 8
+	f.Add([]byte{0, 0, 0, 8, 'u', 'u', 'i', 'd'})                              // uuid, no usertype at all
+	f.Add(append([]byte{0, 0, 0, 8, 'u', 'u', 'i', 'd'}, make([]byte, 16)...)) // BUG-2 repro
+	f.Add([]byte{0, 0, 0, 1, 'm', 'o', 'o', 'f'})                              // size==1, no largesize bytes
+	f.Add([]byte{0, 0, 0, 0, 'm', 'd', 'a', 't', 1, 2, 3})                     // size==0: extends to EOF
+	f.Add(drmBuildBox("moof", drmBuildBox("traf", append(
+		drmBuildBox("tfhd", make([]byte, 8)),
+		drmBuildBox("trun", make([]byte, 8))...,
+	))))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("drmParseBoxes panicked on input %x: %v", data, r)
+			}
+		}()
+		_, _ = drmParseBoxes(data)
+	})
+}
+
+// ---------------------------------------------------------------------------
 // CENC fMP4 integration test
 // ---------------------------------------------------------------------------
 

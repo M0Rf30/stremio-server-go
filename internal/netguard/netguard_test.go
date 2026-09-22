@@ -36,6 +36,8 @@ func TestIsPrivate(t *testing.T) {
 		"172.32.0.1":    false, // just outside RFC 1918
 		"192.168.1.1":   true,
 		"100.64.0.1":    true, // CGNAT
+		"0.0.0.0":       true, // "this host" / unspecified
+		"::":            true, // IPv6 unspecified
 		"169.254.1.1":   true, // link-local
 		"::1":           true,
 		"fc00::1":       true,
