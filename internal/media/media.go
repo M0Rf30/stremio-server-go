@@ -96,6 +96,10 @@ func (p *prober) Probe(streamURL string) (interface{}, error) {
 	} else {
 		streamURL = p.baseURLLocal + "/" + strings.TrimLeft(streamURL, "/")
 	}
+	// Rewrite loopback HTTPS to plain HTTP (ffprobe rejects self-signed
+	// certs); matches Tracks(), which applies the same rewrite before its
+	// own ffprobe invocation.
+	streamURL = localize(streamURL)
 
 	// Serve from cache — avoids repeated ffprobe spawns for the same URL.
 	p.probeMu.Lock()
@@ -283,6 +287,10 @@ func (p *prober) OpenSubHash(videoURL string) (interface{}, error) {
 	if err := validateRemoteURL(videoURL, p.baseURLLocal); err != nil {
 		return nil, err
 	}
+	// Rewrite loopback HTTPS to plain HTTP: fetchHTTPChunks' openSubClient
+	// is plain net/http and cannot complete a TLS handshake against this
+	// server's self-signed :12470 certificate.
+	videoURL = localize(videoURL)
 
 	size, head, tail, err := fetchHTTPChunks(videoURL)
 	if err != nil {

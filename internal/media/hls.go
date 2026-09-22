@@ -102,6 +102,13 @@ type hlsSession struct {
 	highBitDepth    bool                   // true if any video stream is 10/12-bit
 	segLocks        map[string]*sync.Mutex // keyed by segment filename
 	lastAccess      atomic.Int64           // unix nanoseconds; updated on each StartHLS/HLSFile call
+	// inFlight counts calls currently executing HLSFile (which covers
+	// transcodeSegment/extractSubtitle/writePlaylist) for this session.
+	// evictIdle refuses to remove any session with inFlight > 0, so the
+	// reaper can never os.RemoveAll(s.dir) while ffmpeg is still writing
+	// seg<n>.ts.tmp.ts into it. Incremented/decremented with defer so it
+	// cannot leak on any error path.
+	inFlight atomic.Int32
 	// playlistData records which segPrefix playlists have already been rendered
 	// and written to disk; content is immutable once duration is set, so a
 	// presence marker is enough to skip the rebuild + write.  Guarded by mu.
@@ -629,14 +636,27 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 	m.mu.Lock()
 	s, ok := m.sessions[id]
 	if ok {
-		// Touch lastAccess while still holding m.mu so the reaper cannot evict
-		// this session between the map lookup and the update.
+		// Touch lastAccess and mark work in flight while still holding m.mu so
+		// the reaper cannot evict this session between the map lookup and the
+		// update (see evictIdle's inFlight check).
 		s.lastAccess.Store(time.Now().UnixNano())
+		s.inFlight.Add(1)
 	}
 	m.mu.Unlock()
 	if !ok {
 		return "", "", fmt.Errorf("hls: unknown session %s", id)
 	}
+	// Held for the whole call, including transcodeSegment/extractSubtitle,
+	// which can run well past sessionTTL on a slow/software-encode host.
+	// evictIdle skips any session with inFlight > 0, so a concurrent reaper
+	// pass can never os.RemoveAll(s.dir) out from under an in-progress ffmpeg
+	// write. lastAccess is refreshed again on the way out (success or error)
+	// so the idle clock restarts from completion, not from before the
+	// transcode began.
+	defer func() {
+		s.lastAccess.Store(time.Now().UnixNano())
+		s.inFlight.Add(-1)
+	}()
 
 	name = filepath.Base(name)
 	// Belt-and-suspenders: ensure the joined path stays inside the session directory.
@@ -1191,13 +1211,30 @@ func (m *hlsManager) reaper() {
 	}
 }
 
-// evictIdle removes sessions whose lastAccess timestamp is older than sessionTTL.
-// Deleting from a map during range is safe and defined in Go.
+// evictIdle removes sessions whose lastAccess timestamp is older than sessionTTL
+// AND that have no work currently in flight. Eviction predicate:
+//
+//	inFlight == 0  &&  lastAccess != 0  &&  lastAccess < now-sessionTTL
+//
+// A session with inFlight > 0 (an HLSFile call — segment transcode, subtitle
+// extraction, or playlist write — is still running) is never evicted no
+// matter how stale lastAccess looks: deleting it mid-write would RemoveAll
+// the directory ffmpeg is actively writing seg<n>.ts.tmp.ts into, breaking
+// the in-flight request and orphaning the session id ("unknown session") for
+// every subsequent request. Deleting from a map during range is safe and
+// defined in Go.
 func (m *hlsManager) evictIdle() {
 	cutoff := time.Now().Add(-sessionTTL)
 	var victims []string
 	m.mu.Lock()
 	for id, s := range m.sessions {
+		if s.inFlight.Load() > 0 {
+			// Work is actively running for this session; skip regardless of
+			// how old lastAccess is. HLSFile refreshes lastAccess again on
+			// exit, so once the work finishes the session gets a fresh idle
+			// window before the next reaper pass can evict it.
+			continue
+		}
 		ts := s.lastAccess.Load()
 		if ts == 0 {
 			// Session created but not yet accessed (e.g. in the window between

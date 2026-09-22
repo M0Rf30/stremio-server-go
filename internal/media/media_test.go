@@ -376,6 +376,95 @@ func TestHLSManagerEvictIdle(t *testing.T) {
 	}
 }
 
+// TestHLSManagerEvictIdleSkipsInFlight is the regression test for the HLS
+// reaper deleting a session dir while its transcode is still running: a
+// session with in-flight work (transcodeSegment/HLSFile) must never be
+// evicted no matter how stale lastAccess is, and must be evicted on the
+// very next reaper pass once that work completes and the TTL window has
+// elapsed. Drives evictIdle directly instead of sleeping past sessionTTL.
+func TestHLSManagerEvictIdleSkipsInFlight(t *testing.T) {
+	m := newTestHLSManager(t)
+
+	dir := filepath.Join(m.base, "busy")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess := &hlsSession{dir: dir, segLocks: map[string]*sync.Mutex{}}
+	// lastAccess is already well past sessionTTL, as it would be for a real
+	// segment transcode that has been running for minutes.
+	sess.lastAccess.Store(time.Now().Add(-2 * sessionTTL).UnixNano())
+	sess.inFlight.Add(1) // simulates an HLSFile call still executing
+
+	m.mu.Lock()
+	m.sessions["busy"] = sess
+	m.mu.Unlock()
+
+	m.evictIdle()
+
+	m.mu.Lock()
+	_, stillPresent := m.sessions["busy"]
+	m.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("evictIdle removed a session with in-flight work despite a stale lastAccess")
+	}
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Fatal("evictIdle removed the session dir while work was in flight")
+	}
+
+	// The work finishes: HLSFile's defer decrements inFlight to 0. lastAccess
+	// stays stale (it was set before the simulated transcode began), so the
+	// very next reaper pass must now evict the session.
+	sess.inFlight.Add(-1)
+	m.evictIdle()
+
+	m.mu.Lock()
+	_, stillPresent = m.sessions["busy"]
+	m.mu.Unlock()
+	if stillPresent {
+		t.Fatal("evictIdle did not remove the session once work completed and the TTL elapsed")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("evictIdle did not remove the session dir once genuinely idle")
+	}
+}
+
+// TestHLSFileTracksInFlight verifies HLSFile itself increments/decrements
+// hlsSession.inFlight around the whole call (not just at entry), on both the
+// success and the error return path, using the pure-Go playlist.m3u8 branch
+// so no real ffmpeg/ffprobe invocation is required.
+func TestHLSFileTracksInFlight(t *testing.T) {
+	m := newTestHLSManager(t)
+	dir := filepath.Join(m.base, "playlist-sess")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess := &hlsSession{
+		dir:          dir,
+		duration:     8,
+		segLocks:     map[string]*sync.Mutex{},
+		playlistData: map[string]struct{}{},
+	}
+	sess.lastAccess.Store(time.Now().UnixNano())
+	m.mu.Lock()
+	m.sessions["playlist-sess"] = sess
+	m.mu.Unlock()
+
+	if _, _, err := m.HLSFile(context.Background(), "playlist-sess", "playlist.m3u8"); err != nil {
+		t.Fatalf("HLSFile(playlist.m3u8) = %v, want nil", err)
+	}
+	if n := sess.inFlight.Load(); n != 0 {
+		t.Fatalf("inFlight = %d after a successful HLSFile call, want 0 (leaked guard)", n)
+	}
+
+	// Error path (malformed segment name) must also release the guard.
+	if _, _, err := m.HLSFile(context.Background(), "playlist-sess", "seg-bad.ts"); err == nil {
+		t.Fatal("HLSFile with a malformed segment name should have errored")
+	}
+	if n := sess.inFlight.Load(); n != 0 {
+		t.Fatalf("inFlight = %d after an error return, want 0 (leaked guard on error path)", n)
+	}
+}
+
 // TestHLSManagerBaseDirSurvivesCloseHLS is the regression test for the
 // base-dir-wipe bug: CloseHLS must remove session sub-dirs but not the base.
 func TestHLSManagerBaseDirSurvivesCloseHLS(t *testing.T) {
@@ -524,6 +613,49 @@ func TestTracksCacheHardCap(t *testing.T) {
 	}
 }
 
+// TestProbeAppliesLocalize is the regression test for Probe() skipping the
+// localize() rewrite: a mediaURL of the self-signed https://…:12470 UI-origin
+// form must reach ffprobe already rewritten to http://…:11470 — exactly like
+// Tracks() and every hls.go ffmpeg/ffprobe call already do — otherwise
+// ffprobe attempts a real TLS handshake against this server's self-signed
+// cert and always fails for exactly the self-reference case the selfBase
+// exemption in validateRemoteURL was written for.
+//
+// A PATH-shim stub replaces the real ffprobe binary so the rewritten URL can
+// be asserted directly from the argv it was invoked with, without spawning
+// real ffprobe or any network I/O.
+func TestProbeAppliesLocalize(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	stub := filepath.Join(dir, "ffprobe")
+	script := "#!/bin/sh\necho \"$@\" > \"" + argsFile + "\"\necho '{}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	p := newTestProber()
+	p.baseURLLocal = "http://127.0.0.1:11470"
+	raw := "https://127.0.0.1:12470/videos/movie.mkv"
+
+	if _, err := p.Probe(raw); err != nil {
+		t.Fatalf("Probe with stub ffprobe: %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("stub ffprobe was never invoked: %v", err)
+	}
+	argv := string(got)
+	want := localize(raw)
+	if !strings.Contains(argv, want) {
+		t.Errorf("ffprobe argv = %q, want it to contain the localized URL %q", argv, want)
+	}
+	if strings.Contains(argv, "12470") {
+		t.Errorf("ffprobe argv = %q, still contains the raw un-localized :12470 URL", argv)
+	}
+}
+
 // ── media.go: computeOpenSubHash ─────────────────────────────────────────────
 
 func TestComputeOpenSubHash(t *testing.T) {
@@ -640,6 +772,43 @@ func TestOpenSubHashHTTP(t *testing.T) {
 	))
 	if hash != wantHash {
 		t.Errorf("HTTP hash = %q, want %q (from local computation)", hash, wantHash)
+	}
+}
+
+// TestOpenSubHashAppliesLocalize is the regression test for OpenSubHash()
+// skipping the localize() rewrite: a videoURL of the self-signed
+// https://…:12470 UI-origin form must be rewritten to http://…:11470 before
+// it reaches fetchHTTPChunks' plain net/http client — exactly like Tracks()
+// and every hls.go ffmpeg call already do. stubOpenSubClientTransport
+// redirects openSubClient's dial target to a plain-HTTP httptest.Server
+// regardless of the request's declared host, so the https scheme alone is
+// enough to prove the point: without localize(), OpenSubHash would attempt a
+// real TLS handshake against that plain-HTTP listener and fail outright.
+func TestOpenSubHashAppliesLocalize(t *testing.T) {
+	const fileSize = 4096
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "video.bin", time.Time{}, bytes.NewReader(content))
+	}))
+	defer ts.Close()
+	stubOpenSubClientTransport(t, ts)
+
+	p := &prober{baseURLLocal: "http://127.0.0.1:11470"}
+	// Raw self-signed UI-origin form; validateRemoteURL's selfBase exemption
+	// allows it via its own internal localize() check, but OpenSubHash must
+	// also localize() before calling fetchHTTPChunks.
+	videoURL := "https://127.0.0.1:12470/video.bin"
+
+	result, err := p.OpenSubHash(videoURL)
+	if err != nil {
+		t.Fatalf("OpenSubHash did not apply localize() before fetching: %v", err)
+	}
+	m := result.(map[string]interface{})
+	if size, _ := m["size"].(int64); size != fileSize {
+		t.Errorf("size = %v, want %d", m["size"], fileSize)
 	}
 }
 
