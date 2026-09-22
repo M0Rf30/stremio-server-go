@@ -16,7 +16,8 @@ updates:
         exclude-patterns:
           - "github.com/anacrolix/torrent"
     ignore:
-      # Pinned to a fork commit via `replace`; bump this manually.
+      # Pinned to a specific upstream commit (pseudo-version, not a `replace`
+      # directive); bump this manually in go.mod.
       - dependency-name: "github.com/anacrolix/torrent"
 
   - package-ecosystem: "github-actions"

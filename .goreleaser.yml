@@ -12,7 +12,9 @@ env:
 
 before:
   hooks:
-    - go mod tidy
+    # -diff fails instead of silently rewriting go.mod/go.sum, so dependency
+    # drift breaks the release instead of shipping an unreviewed tidy.
+    - go mod tidy -diff
 
 builds:
   # Desktop / server targets.
@@ -149,6 +151,10 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+sboms:
+  - id: archives
+    artifacts: archive
 
 changelog:
   use: github
