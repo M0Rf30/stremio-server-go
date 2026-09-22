@@ -80,6 +80,15 @@ type Config struct {
 	// stopped torrent is dropped even when cacheSize is unlimited, while staying
 	// alive long enough for instant scrub/resume/next-episode.
 	IdleTimeout time.Duration
+	// MaxSeedRatio stops a torrent from uploading once its share ratio
+	// (bytes uploaded / bytes downloaded) reaches this value
+	// (STREMIO_MAX_SEED_RATIO; default 0 = unlimited). Enforcement is
+	// deliberately independent of IdleTimeout: reaching the ratio only pauses
+	// uploading, it never drops the torrent or purges its cache, so seeding can
+	// be capped without shortening how long a torrent stays available for
+	// instant scrub/resume. Uploading resumes automatically if the ratio falls
+	// back below the cap (e.g. more data is downloaded, or the cap is raised).
+	MaxSeedRatio float64
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.
