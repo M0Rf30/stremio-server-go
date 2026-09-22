@@ -307,14 +307,29 @@ func main() {
 
 	handler := api.New(em, ss, prober, cfg)
 
+	// BIND_ADDRESS restricts which network interface(s) the HTTP/HTTPS
+	// listeners accept connections on. Empty (default) preserves the
+	// historical all-interfaces behaviour (net.JoinHostPort("", port) ==
+	// ":<port>", i.e. 0.0.0.0 + ::) — not a breaking change. This server has
+	// no authentication by design, so operators on a multi-homed or
+	// publicly-routable host should set this to a loopback or LAN-only
+	// address (e.g. BIND_ADDRESS=127.0.0.1).
+	bindAddr := getenv("BIND_ADDRESS", "")
+	if isWildcardBindHost(bindAddr) {
+		logging.For("http").Warn("no BIND_ADDRESS set; the unauthenticated API is reachable from every network interface", "bind_address", bindAddr)
+	}
+	httpAddr := net.JoinHostPort(bindAddr, strconv.Itoa(cfg.HTTPPort))
+
 	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
+		Addr:              httpAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
-		logging.For("http").Info("listening", "version", version, "addr", baseLocal, "app_path", appPath)
+		logging.For("http").Info("listening", "version", version, "addr", baseLocal, "bind_addr", httpAddr, "app_path", appPath)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logging.Fatal("http server error", "err", err)
 		}
@@ -371,14 +386,17 @@ func main() {
 					logging.For("https").Info("live cert reloaded", "path", certFile)
 				})
 			}
+			httpsAddr := net.JoinHostPort(bindAddr, strconv.Itoa(cfg.HTTPSPort))
 			tlsSrv = &http.Server{
-				Addr:              fmt.Sprintf(":%d", cfg.HTTPSPort),
+				Addr:              httpsAddr,
 				Handler:           handler,
 				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       30 * time.Second,
+				IdleTimeout:       120 * time.Second,
 				TLSConfig:         &tls.Config{GetCertificate: holder.get, MinVersion: tls.VersionTLS12},
 			}
 			go func() {
-				logging.For("https").Info("listening", "version", version, "addr", fmt.Sprintf("https://127.0.0.1:%d", cfg.HTTPSPort), "app_path", appPath)
+				logging.For("https").Info("listening", "version", version, "addr", fmt.Sprintf("https://127.0.0.1:%d", cfg.HTTPSPort), "bind_addr", httpsAddr, "app_path", appPath)
 				if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					logging.For("https").Error("server error", "err", err)
 				}
@@ -423,6 +441,14 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// isWildcardBindHost reports whether host (a BIND_ADDRESS value — the host
+// part only, never host:port) leaves the listener reachable from every
+// network interface: empty (net.JoinHostPort's all-interfaces default),
+// "0.0.0.0" (all IPv4 interfaces), or "::" (all IPv6 interfaces).
+func isWildcardBindHost(host string) bool {
+	return host == "" || host == "0.0.0.0" || host == "::"
 }
 
 // isLoopbackAddr reports whether a host:port listen address binds only the
