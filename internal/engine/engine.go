@@ -795,11 +795,18 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	r := f.NewReader()
 	r.SetReadahead(readaheadFor(cachedSpeed))
 	now := time.Now()
+	// ctx is the reader's long-lived context: it lives for the reader's
+	// whole lifetime and is cancelled only from pinnedReader.Close (see the
+	// pinnedReader doc comment for why a fresh, request-scoped context is
+	// required here instead of reusing ReadContext's deadline context).
+	ctx, cancel := context.WithCancel(context.Background())
 	pr := &pinnedReader{
 		tr:       r,
 		e:        e,
 		idx:      idx,
 		deadline: now.Add(startupReadTimeout),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	// nextRAAdj is an atomic.Int64 (unix-nanos); must be set after construction.
 	pr.nextRAAdj.Store(now.Add(readaheadAdjustInterval).UnixNano())
@@ -949,33 +956,71 @@ func readaheadFor(speed float64) int64 {
 // measured speed rises — small at first for a fast start, deeper later for
 // smooth playback — and (b) bounds the FIRST read with a deadline so a dead
 // swarm returns an error instead of hanging the player forever.
+//
+// Context handling is deliberately NOT built on torrent.Reader.ReadContext:
+// ReadContext stores whatever context it is given directly on the reader
+// (anacrolix/torrent reader.go SetContext) with NO expiry tied to the call
+// returning. A naive `ctx, cancel := context.WithDeadline(...); defer
+// cancel(); tr.ReadContext(ctx, b)` therefore poisons the reader forever:
+// the deferred cancel() fires when Read returns, leaving tr holding an
+// already-cancelled context, so a well-buffered reader (which never checks
+// ctx while data is locally available — see waitAvailable) looks fine right
+// up until the first genuine buffer under-run, which then fails instantly
+// with context.Canceled instead of blocking for the swarm.
+//
+// Instead, ctx/cancel below is a context.WithCancel(context.Background())
+// created once at construction (see NewReader) and cancelled ONLY from
+// Close(). SetContext is called explicitly: with a deadline-bounded child
+// of ctx for the first read (so a dead swarm still errors out promptly),
+// then swapped back onto the long-lived ctx the moment the first byte
+// arrives, so later stalls block for the swarm — and a client disconnect
+// still unblocks a stalled read immediately via Close() cancelling ctx.
 type pinnedReader struct {
 	tr   torrent.Reader
 	e    *engine
 	idx  int
 	once sync.Once
 
+	// ctx/cancel: see the type doc above. ctx is only ever installed on tr
+	// by Read (single-goroutine caller, per torrent.Reader's "not safe for
+	// concurrent use" contract); cancel is safe to call from any goroutine,
+	// any number of times (stdlib context.CancelFunc contract).
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// started and nextRAAdj are hot-path fields accessed on every Read(); using
 	// atomics eliminates the per-Read mutex round-trip on the fast path.
 	started   atomic.Bool  // set once to true after first byte; false->true exactly once
 	deadline  time.Time    // written once at construction; read-only thereafter (no lock needed)
 	nextRAAdj atomic.Int64 // unix-nanos of next readahead recompute; monotonically advancing
+
+	closeErr error // result of the single real tr.Close() call; cached by Close's sync.Once
 }
 
 func (p *pinnedReader) Read(b []byte) (int, error) {
 	p.adjustReadahead()
-	// Fast path: once started, skip the deadline context entirely (lock-free).
+	// Fast path: once started, tr already holds the long-lived ctx (installed
+	// below on the first successful read), so reads block for the swarm
+	// instead of racing a deadline. Lock-free.
 	if p.started.Load() {
 		return p.tr.Read(b)
 	}
-	// First byte not yet received: apply the startup deadline to catch dead swarms.
-	// p.deadline is written once at construction and is read-only here.
-	ctx, cancel := context.WithDeadline(context.Background(), p.deadline)
-	defer cancel()
-	n, err := p.tr.ReadContext(ctx, b)
+	// First byte not yet received: bound this read with the startup deadline
+	// so a dead swarm errors out instead of hanging the player forever. The
+	// deadline context is a child of p.ctx so an external Close() (which
+	// cancels p.ctx) unblocks this first read immediately too.
+	deadlineCtx, cancelDeadline := context.WithDeadline(p.ctx, p.deadline)
+	p.tr.SetContext(deadlineCtx)
+	n, err := p.tr.Read(b)
 	if n > 0 {
-		p.started.Store(true) // atomic store; false->true exactly once
+		p.started.Store(true)
+		// Promote to the long-lived context BEFORE releasing the deadline
+		// one below, so tr is never left holding an already-cancelled
+		// context (that ordering is precisely what the old ReadContext-based
+		// code got wrong).
+		p.tr.SetContext(p.ctx)
 	}
+	cancelDeadline()
 	return n, err
 }
 
@@ -984,8 +1029,20 @@ func (p *pinnedReader) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (p *pinnedReader) Close() error {
-	err := p.tr.Close()
+	// Cancel unconditionally and first, before the Once: this is what
+	// unblocks a Read() stalled inside the vendored reader's waitAvailable
+	// (see the pinnedReader doc comment on SetContext). context.CancelFunc
+	// is safe to call from multiple goroutines and multiple times, so this
+	// is safe even when the request handler's deferred Close() races a
+	// disconnect-watcher goroutine's Close() to get here first.
+	p.cancel()
 	p.once.Do(func() {
+		// tr.Close() is guarded inside the Once (rather than called
+		// unconditionally on every Close() call as before) so it runs
+		// exactly once even under that same race, instead of relying on the
+		// vendored reader's own idempotency (map-delete + nil-guarded
+		// storageReader close) to make a concurrent double call harmless.
+		p.closeErr = p.tr.Close()
 		var demote bool
 		p.e.mu.Lock()
 		p.e.openReaders--
@@ -1011,7 +1068,7 @@ func (p *pinnedReader) Close() error {
 			}
 		}
 	})
-	return err
+	return p.closeErr
 }
 
 // adjustReadahead recomputes the window from the latest measured speed, at most

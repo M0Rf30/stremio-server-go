@@ -376,8 +376,11 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleMetrics serves GET /metrics in Prometheus text exposition format (v0.0.4).
-// No authentication and no CORS headers: the endpoint is intended for
-// localhost-trust scraping (e.g. a Prometheus instance on the same host).
+// No authentication, and — like every other route — it is served with the
+// permissive CORS headers ServeHTTP sets unconditionally (Access-Control-Allow-
+// Origin: *), so any web page can read it. Intended for localhost-trust
+// scraping (e.g. a Prometheus instance on the same host); do not expose the
+// listener beyond loopback without a firewall in front.
 //
 // @Summary  Prometheus-format runtime and app gauges
 // @Tags     System
@@ -523,6 +526,29 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 		return
 	}
 	defer func() { _ = rc.Close() }()
+
+	// If the client disconnects (tab closed, seek aborted) while a Read is
+	// blocked waiting on the swarm, nothing would otherwise wake it: io.Copy*
+	// below only observes rc via Read, and the deferred Close above only runs
+	// after the copy already returned. That pins e.openReaders > 0 forever,
+	// which permanently exempts this torrent from both evict and evictIdle.
+	// This watcher closes rc as soon as the request context is cancelled,
+	// which (via pinnedReader's long-lived context) unblocks a stalled Read
+	// immediately. done is closed via defer so the watcher always exits once
+	// the copy loop returns, whether or not the client ever disconnected —
+	// it never leaks. defer ordering matters: this defer is registered after
+	// the rc.Close() defer above, so on the normal (LIFO) return path done is
+	// closed first (retiring the watcher without it touching rc), and the
+	// pre-existing rc.Close() defer performs the only real close.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-r.Context().Done():
+			_ = rc.Close()
+		case <-done:
+		}
+	}()
 
 	// Static DLNA/cache headers: direct canonical-key map assignment avoids
 	// per-request key canonicalization (mirrors the CORS pattern in ServeHTTP).
