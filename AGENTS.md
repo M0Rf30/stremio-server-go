@@ -29,7 +29,7 @@ the first path segment) → `func (s *server) handleX(w, r, seg)`.
 
 Streaming (`GET /{infoHash}/{fileIdx}`): `EnsureEngine(ih)` adds the torrent →
 `Ready(ctx)` blocks for metadata → `NewReader(idx)` returns a piece-prioritized
-`io.ReadSeekCloser` → the handler honors `Range`, copies via a pooled 64 KiB
+`io.ReadSeekCloser` → the handler honors `Range`, copies via a pooled 256 KB
 buffer, and sets DLNA headers. The engine prioritizes the streamed file
 (demoting others), primes moov/header pieces, scales readahead by bandwidth, and
 runs an LRU janitor against `settings.cacheSize`.
@@ -115,9 +115,9 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 
 ## Runtime / Tooling Preferences
 
-- **Go 1.26** (the `go.mod` directive; CI uses `go-version-file: go.mod`, Docker uses `golang:1.26-alpine`). Keep the directive build-compatible across the cross-compile matrix.
+- **Go versions:** `go.mod` directive is **1.26.0**; Docker build image is **`golang:1.27-alpine`** (newer toolchain for cross-compilation efficiency). CI uses `go-version-file: go.mod`. Keep the go.mod directive build-compatible across the cross-compile matrix.
 - **`CGO_ENABLED=0`** everywhere — no native deps.
-- **golangci-lint v2** (`errcheck, errorlint, gosec, govet, ineffassign, misspell, revive, staticcheck, unconvert, unused, whitespace`). `gosec` excludes by-design rules (variable URLs/subprocess/file paths — this is a localhost media server). `_test.go` files skip `errcheck`/`gosec`/`bodyclose`/`unparam` but still face `gofmt`/`staticcheck`/`revive`.
+- **golangci-lint v2** (`bodyclose, errcheck, errorlint, gosec, govet, ineffassign, misspell, revive, staticcheck, unconvert, unused, whitespace`). `gosec` excludes by-design rules (variable URLs/subprocess/file paths — this is a localhost media server). `_test.go` files skip `errcheck`/`gosec`/`bodyclose`/`unparam` but still face `gofmt`/`staticcheck`/`revive`.
 - **Runtime deps** for full functionality: `ffmpeg`/`ffprobe` (HLS/probe/subtitles), `yt-dlp` (`/yt`). Bundled in the container image.
 - Config knobs are env vars (`STREMIO_*`, `HTTP_PORT`, `APP_PATH`, …) — see the table in `README.md`; add new ones in `main.go` and document them there.
 
