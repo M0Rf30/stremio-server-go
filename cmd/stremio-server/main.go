@@ -66,6 +66,18 @@ func envInt64(key string, def int64) int64 {
 	return def
 }
 
+// envFloat parses a non-negative float env var. Unset, unparseable, or negative
+// → def. Used for ratio-style knobs where a negative value is meaningless.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			return f
+		}
+		logging.For("config").Warn("invalid float env", "key", key, "value", v, "default", def)
+	}
+	return def
+}
+
 // envBool parses a boolean env var. Unset → def. "0", "false", "no", "off"
 // (case-insensitive) → false; any other non-empty value → true.
 func envBool(key string, def bool) bool {
@@ -179,6 +191,7 @@ func main() {
 		DHTBootstrap:      getenv("STREMIO_DHT_BOOTSTRAP", ""),
 		BTAnonymous:       envBool("STREMIO_BT_ANONYMOUS", false),
 		IdleTimeout:       time.Duration(envInt("STREMIO_TORRENT_IDLE_TIMEOUT", 300)) * time.Second, // 0 = disabled
+		MaxSeedRatio:      envFloat("STREMIO_MAX_SEED_RATIO", 0),                                    // 0 = unlimited seeding
 	}
 	if cfg.DisableWebtorrent {
 		logging.For("engine").Info("webtorrent/webrtc peers disabled")
@@ -214,6 +227,9 @@ func main() {
 		logging.For("engine").Info("idle torrent removal disabled")
 	} else {
 		logging.For("engine").Info("idle torrent removal enabled", "timeout", cfg.IdleTimeout.String())
+	}
+	if cfg.MaxSeedRatio > 0 {
+		logging.For("engine").Info("max seed ratio enabled", "max_ratio", cfg.MaxSeedRatio)
 	}
 
 	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also

@@ -77,6 +77,11 @@ type engine struct {
 	prefetched       map[int]struct{} // source file idx -> next-file boundary already prefetched (once each)
 	onceMetaPriority sync.Once        // ensures boundary-piece prioritization runs exactly once
 
+	// uploadBlocked records whether the seed-ratio enforcer has currently
+	// paused uploading for this torrent, so enforceSeedRatio only calls into
+	// anacrolix (and logs) on an actual state transition rather than every tick.
+	uploadBlocked bool
+
 	// Announce-URL cache: refreshed at most once per annoTTL to avoid acquiring
 	// the anacrolix Metainfo()/DistinctValues() locks on every Stats() call.
 	annoMu        sync.Mutex
@@ -480,7 +485,8 @@ func (m *manager) Close() error {
 }
 
 // StartJanitor launches a background goroutine that evicts least-recently-used
-// engines whenever the on-disk cache exceeds the budget returned by cacheSizeFn.
+// engines whenever the on-disk cache exceeds the budget returned by cacheSizeFn,
+// drops idle torrents, and enforces the configured maximum seed ratio.
 // The goroutine stops when Close() is called (which closes m.done).
 func (m *manager) StartJanitor(cacheSizeFn func() int64) {
 	go func() {
@@ -491,6 +497,7 @@ func (m *manager) StartJanitor(cacheSizeFn func() int64) {
 			case <-ticker.C:
 				m.evict(cacheSizeFn())
 				m.evictIdle(m.cfg.IdleTimeout)
+				m.enforceSeedRatio(m.cfg.MaxSeedRatio)
 			case <-m.done:
 				return
 			}
@@ -697,6 +704,82 @@ func (m *manager) evictIdle(idle time.Duration) {
 		m.dropAndPurge(ih, e)
 		m.mu.Unlock()
 		logging.For("engine").Info("removed idle torrent", "info_hash", ih, "idle_for", idleFor.Round(time.Second).String())
+	}
+}
+
+// uploadToggler is the slice of *torrent.Torrent the seed-ratio enforcer needs.
+// The indirection exists so the enforcement state machine can be exercised
+// without standing up a live torrent client.
+type uploadToggler interface {
+	AllowDataUpload()
+	DisallowDataUpload()
+}
+
+// seedRatioExceeded reports whether a torrent that has uploaded ul bytes and
+// downloaded dl bytes has reached maxRatio, along with the ratio itself.
+//
+// maxRatio <= 0 means unlimited. A torrent that has downloaded nothing is never
+// blocked: a zero denominator has no meaningful ratio, and pausing upload there
+// would stall the tit-for-tat exchange a fresh torrent needs to get its first
+// pieces.
+func seedRatioExceeded(ul, dl int64, maxRatio float64) (exceeded bool, ratio float64) {
+	if maxRatio <= 0 || dl <= 0 {
+		return false, 0
+	}
+	ratio = float64(ul) / float64(dl)
+	return ratio >= maxRatio, ratio
+}
+
+// applySeedRatio moves one engine to the desired upload state, calling into
+// anacrolix (and logging) only on an actual transition rather than every tick.
+// ctl is the torrent whose upload is toggled; it is nil only in tests that
+// exercise the bookkeeping alone.
+func (e *engine) applySeedRatio(ctl uploadToggler, ul, dl int64, maxRatio float64) {
+	block, ratio := seedRatioExceeded(ul, dl, maxRatio)
+
+	e.mu.Lock()
+	if e.uploadBlocked == block {
+		e.mu.Unlock()
+		return
+	}
+	e.uploadBlocked = block
+	e.mu.Unlock()
+
+	if ctl == nil {
+		return
+	}
+	if block {
+		ctl.DisallowDataUpload()
+		logging.For("engine").Info("seed ratio reached; pausing upload",
+			"info_hash", e.infoHash, "ratio", math.Round(ratio*100)/100, "max_ratio", maxRatio)
+		return
+	}
+	ctl.AllowDataUpload()
+	logging.For("engine").Info("seed ratio below cap; resuming upload",
+		"info_hash", e.infoHash, "ratio", math.Round(ratio*100)/100, "max_ratio", maxRatio)
+}
+
+// enforceSeedRatio pauses uploading for any torrent whose share ratio
+// (bytes uploaded / bytes downloaded) has reached maxRatio, and resumes it if
+// the ratio later falls back below the cap. maxRatio <= 0 disables the feature
+// and also releases any pause a previous, higher-ratio configuration applied.
+//
+// This is deliberately decoupled from evictIdle: hitting the ratio only stops
+// this torrent from uploading, it never drops the torrent or purges its cache.
+// Seeding can therefore be capped without shortening how long a torrent stays
+// resident for instant scrub/resume, which is what makes the two knobs
+// independent.
+func (m *manager) enforceSeedRatio(maxRatio float64) {
+	m.mu.RLock()
+	snap := make([]*engine, 0, len(m.engines))
+	for _, e := range m.engines {
+		snap = append(snap, e)
+	}
+	m.mu.RUnlock()
+
+	for _, e := range snap {
+		ts := e.t.Stats()
+		e.applySeedRatio(e.t, ts.BytesWrittenData.Int64(), ts.BytesReadData.Int64(), maxRatio)
 	}
 }
 
