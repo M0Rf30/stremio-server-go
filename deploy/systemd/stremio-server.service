@@ -1,0 +1,33 @@
+[Unit]
+Description=Stremio streaming server (pure-Go implementation)
+Documentation=https://github.com/M0Rf30/stremio-server-go
+After=network.target
+
+[Service]
+Type=simple
+# Packaged defaults, then the per-user override (later files win).
+EnvironmentFile=-/etc/stremio-server/stremio-server.env
+EnvironmentFile=-%h/.config/stremio-server/env
+ExecStart=/usr/bin/stremio-server
+Restart=on-failure
+RestartSec=5
+# Graceful shutdown drains HTTP for 5s before closing the torrent engine.
+TimeoutStopSec=20
+
+# Security hardening (user unit; /dev/dri stays reachable for VAAPI transcoding)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.stremio-server
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=default.target
