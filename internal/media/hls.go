@@ -276,8 +276,7 @@ func selectEncoder() hwEncoder {
 }
 
 func newHLS(selfBase string) *hlsManager {
-	base := filepath.Join(os.TempDir(), "stremio-hls")
-	_ = os.MkdirAll(base, 0o755)
+	base := newHLSBaseDir()
 	n := runtime.NumCPU()
 	if n < 1 {
 		n = 1
@@ -299,6 +298,25 @@ func newHLS(selfBase string) *hlsManager {
 	}
 	go m.reaper()
 	return m
+}
+
+// newHLSBaseDir creates and returns a fresh, unpredictable, owner-only
+// (0700) working directory for one hlsManager instance (MED-2).
+//
+// os.MkdirTemp gives each manager instance a fresh, unpredictable, 0700
+// (owner-only) directory instead of the old fixed, shared, 0755
+// "$TMPDIR/stremio-hls" — which a co-resident user on a multi-user host
+// could pre-create (or read) before this process ever started.
+func newHLSBaseDir() string {
+	base, err := os.MkdirTemp("", "stremio-hls-*")
+	if err != nil {
+		// Fall back to a per-process-unique path rather than the old
+		// predictable shared name if MkdirTemp itself fails (e.g. a
+		// read-only default temp dir).
+		base = filepath.Join(os.TempDir(), fmt.Sprintf("stremio-hls-%d", os.Getpid()))
+		_ = os.MkdirAll(base, 0o700)
+	}
+	return base
 }
 
 // localize rewrites the self-signed https loopback URL to plain http so ffmpeg
@@ -333,15 +351,21 @@ type probeMediaResult struct {
 
 // probeMedia runs a single ffprobe with -show_format -show_streams and returns
 // the media duration, every audio stream, and whether the video is high-bit-depth.
-// A 30-second timeout is applied over the provided ctx.
+// A 30-second timeout is applied over the provided ctx. mediaURL is routed
+// through the loopback relay (SEC-4) unless it matches selfBase.
 // The caller must NOT hold any session lock when calling this function.
-func probeMedia(ctx context.Context, mediaURL string) probeMediaResult {
+func probeMedia(ctx context.Context, mediaURL, selfBase string) probeMediaResult {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ffprobe",
+	inputURL, protoWL, err := relayInput(mediaURL, selfBase)
+	if err != nil {
+		return probeMediaResult{}
+	}
+	out, err := runCapped(exec.CommandContext(ctx, "ffprobe",
 		"-v", "quiet", "-print_format", "json",
+		"-protocol_whitelist", protoWL,
 		"-show_format", "-show_streams",
-		localize(mediaURL)).Output()
+		inputURL), ffprobeOutputLimit) // MED-1: bound ffprobe stdout
 	if err != nil {
 		return probeMediaResult{}
 	}
@@ -483,7 +507,7 @@ func (m *hlsManager) StartHLS(id, mediaURL string) (string, error) {
 		if hasCached && time.Now().Before(cached.expiresAt) {
 			res = cached.result
 		} else {
-			res = probeMedia(context.Background(), mediaURL)
+			res = probeMedia(context.Background(), mediaURL, m.selfBase)
 			m.mu.Lock()
 			if res.duration == 0 {
 				// Cache the negative result to short-circuit future probes.
@@ -887,11 +911,18 @@ func (m *hlsManager) extractSubtitle(ctx context.Context, s *hlsSession, k int) 
 	tmp := vttFile + ".tmp"
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
+	// SEC-4: route through the loopback relay instead of handing ffmpeg the
+	// real remote URL directly.
+	inputURL, protoWL, rerr := relayInput(s.mediaURL, m.selfBase)
+	if rerr != nil {
+		return "", fmt.Errorf("hls: subtitle extract %s: %w", filename, rerr)
+	}
 	// -map 0:s:<SubIdx> selects the k-th subtitle stream by its subtitle-stream
 	// index (not global index), matching how ffprobe numbers subtitle streams.
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error", "-y",
-		"-i", localize(s.mediaURL),
+		"-protocol_whitelist", protoWL,
+		"-i", inputURL,
 		"-map", fmt.Sprintf("0:s:%d", sub.SubIdx),
 		"-f", "webvtt",
 		tmp,
@@ -995,6 +1026,14 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	inputSeek := math.Max(0, start-10.0)
 	outputSeek := start - inputSeek
 
+	// SEC-4: route through the loopback relay instead of handing ffmpeg the
+	// real remote URL directly. Computed once and reused by both the
+	// hardware and (on fallback) software encode attempts below.
+	inputURL, protoWL, rerr := relayInput(s.mediaURL, m.selfBase)
+	if rerr != nil {
+		return "", fmt.Errorf("hls: transcode %s: %w", filename, rerr)
+	}
+
 	// run builds the full ffmpeg argument list for the given encoder and executes
 	// the transcode.  enc is either m.enc (hardware attempt) or the libx264
 	// fallback.  The function is called at most twice: HW first, SW on error.
@@ -1017,7 +1056,7 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 		if inputSeek > 0 {
 			a = append(a, "-ss", ftoa(inputSeek))
 		}
-		a = append(a, "-i", localize(s.mediaURL))
+		a = append(a, "-protocol_whitelist", protoWL, "-i", inputURL)
 		// Output seek: precise, decodes from inputSeek and discards until start.
 		if outputSeek > 0 {
 			a = append(a, "-ss", ftoa(outputSeek))
@@ -1173,8 +1212,10 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 
 // ── CloseHLS ──────────────────────────────────────────────────────────────────
 
-// CloseHLS stops the background reaper and removes all session working directories.
-// Safe to call multiple times.
+// CloseHLS stops the background reaper and removes the manager's entire base
+// working directory (created fresh per-manager by os.MkdirTemp in newHLS, so
+// removing it cannot affect any other manager or process). Safe to call
+// multiple times.
 func (m *hlsManager) CloseHLS() {
 	// Signal the reaper to stop; guard against double-close with a non-blocking
 	// drain: if stopCh is already closed the receive arm fires immediately.
@@ -1183,17 +1224,11 @@ func (m *hlsManager) CloseHLS() {
 	default:
 		close(m.stopCh)
 	}
-	var dirs []string
 	m.mu.Lock()
-	for _, s := range m.sessions {
-		dirs = append(dirs, s.dir)
-	}
 	m.sessions = map[string]*hlsSession{}
 	m.mu.Unlock()
 	// RemoveAll outside the lock: disk I/O must not stall concurrent requests.
-	for _, dir := range dirs {
-		_ = os.RemoveAll(dir)
-	}
+	_ = os.RemoveAll(m.base)
 }
 
 // reaper is the single background goroutine that evicts idle HLS sessions.

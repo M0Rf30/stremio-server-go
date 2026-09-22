@@ -223,8 +223,12 @@ func isASS(s string) bool {
 // Algorithm:
 //  1. Scan for [Events] section; read the Format: line to find field indices for
 //     Start, End, and Text (defaults: 1, 2, 9 — the standard v4.00+ order).
-//  2. For each Dialogue: line, split into exactly (textIdx+1) comma-separated
-//     parts so the Text field absorbs any commas in the subtitle text.
+//  2. For each Dialogue: line, split into exactly (maxIdx+1) comma-separated
+//     parts, where maxIdx is the highest of the three tracked indices, so every
+//     tracked index is always in bounds — a crafted Format: line can never
+//     cause an out-of-range panic. If Text isn't the highest-indexed of the
+//     three (so it isn't the part that absorbs trailing commas), the line is
+//     skipped rather than risk extracting the wrong field as subtitle text.
 //  3. Convert ASS timestamps (H:MM:SS.cc, centiseconds) to milliseconds.
 //  4. Strip ASS override tags {…} and convert soft line-breaks (\N, \n) to
 //     real newline characters.
@@ -263,7 +267,27 @@ func parseASSSubtitles(s string) []map[string]interface{} {
 		}
 	}
 
-	nFields := textIdx + 1 // split into this many parts; last absorbs any commas in Text
+	// maxIdx is the highest of the three tracked indices; splitting into
+	// maxIdx+1 parts guarantees parts[startIdx], parts[endIdx], and
+	// parts[textIdx] are always in bounds, regardless of how a crafted or
+	// unusual Format: line orders its columns (the original bug used
+	// textIdx+1 alone, which panicked whenever Start or End was listed after
+	// Text — e.g. "Format: Layer, Text, Start, End").
+	maxIdx := startIdx
+	if endIdx > maxIdx {
+		maxIdx = endIdx
+	}
+	if textIdx > maxIdx {
+		maxIdx = textIdx
+	}
+	nFields := maxIdx + 1 // split into this many parts; the last part absorbs any commas in Text
+	// textIsLast is true only when Text is the highest-indexed of the three
+	// tracked fields, i.e. the part SplitN lets absorb trailing commas is
+	// actually the Text field. When Start or End is listed after Text, that
+	// assumption breaks — the "last part absorbs commas" part would capture
+	// the wrong field — so those lines are skipped instead of emitting
+	// mis-parsed text.
+	textIsLast := textIdx == maxIdx
 
 	var tracks []map[string]interface{}
 	for _, line := range strings.Split(s, "\n") {
@@ -275,9 +299,13 @@ func parseASSSubtitles(s string) []map[string]interface{} {
 		rest := strings.TrimSpace(trimmed[9:])
 
 		// Split into exactly nFields parts so Text (last field) absorbs commas.
+		// Bounds are always safe: nFields is 1 + the highest tracked index.
 		parts := strings.SplitN(rest, ",", nFields)
 		if len(parts) < nFields {
 			continue // malformed line
+		}
+		if !textIsLast {
+			continue // Text isn't the field SplitN lets absorb commas; skip safely
 		}
 
 		start := parseASSTimestamp(strings.TrimSpace(parts[startIdx]))

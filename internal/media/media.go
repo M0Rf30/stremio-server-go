@@ -112,15 +112,21 @@ func (p *prober) Probe(streamURL string) (interface{}, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "quiet",
-		"-print_format", "json",
-		"-show_format",
-		"-show_streams",
-		streamURL,
-	)
-
-	out, err := cmd.Output()
+	// SEC-4: never hand ffprobe the real remote URL directly — it does its
+	// own DNS resolution (DNS-rebinding) and would follow redirects itself.
+	// Route it through the loopback relay instead; see relayInput.
+	inputURL, protoWL, err := relayInput(streamURL, p.baseURLLocal)
+	var out []byte
+	if err == nil {
+		out, err = runCapped(exec.CommandContext(ctx, "ffprobe",
+			"-v", "quiet",
+			"-print_format", "json",
+			"-protocol_whitelist", protoWL,
+			"-show_format",
+			"-show_streams",
+			inputURL,
+		), ffprobeOutputLimit) // MED-1: bound ffprobe stdout
+	}
 	var result map[string]interface{}
 	if err != nil {
 		err = fmt.Errorf("ffprobe: %w", err)
@@ -195,9 +201,18 @@ func (p *prober) Tracks(rawURL string) (interface{}, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ffprobe",
-		"-v", "quiet", "-print_format", "json", "-show_streams", streamURL,
-	).Output()
+
+	// SEC-4: route through the loopback relay instead of handing ffprobe the
+	// real remote URL; see relayInput / Probe().
+	var out []byte
+	inputURL, protoWL, err := relayInput(streamURL, p.baseURLLocal)
+	if err == nil {
+		out, err = runCapped(exec.CommandContext(ctx, "ffprobe",
+			"-v", "quiet", "-print_format", "json",
+			"-protocol_whitelist", protoWL,
+			"-show_streams", inputURL,
+		), ffprobeOutputLimit) // MED-1: bound ffprobe stdout
+	}
 
 	var result interface{}
 	if err != nil {

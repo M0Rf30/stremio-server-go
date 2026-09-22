@@ -465,9 +465,13 @@ func TestHLSFileTracksInFlight(t *testing.T) {
 	}
 }
 
-// TestHLSManagerBaseDirSurvivesCloseHLS is the regression test for the
-// base-dir-wipe bug: CloseHLS must remove session sub-dirs but not the base.
-func TestHLSManagerBaseDirSurvivesCloseHLS(t *testing.T) {
+// TestHLSManagerCloseHLSRemovesBaseDir is the regression test for MED-2: the
+// HLS base directory is now created per-manager by os.MkdirTemp (unique,
+// 0700, never shared with another process or user), so unlike the old fixed
+// "$TMPDIR/stremio-hls" path there is no reason to preserve it across
+// CloseHLS — removing it, session sub-dirs included, in one shot is both
+// simpler and correct.
+func TestHLSManagerCloseHLSRemovesBaseDir(t *testing.T) {
 	m := newTestHLSManager(t)
 	base := m.base
 
@@ -484,13 +488,33 @@ func TestHLSManagerBaseDirSurvivesCloseHLS(t *testing.T) {
 
 	m.CloseHLS()
 
-	// Regression: base must survive.
-	if _, err := os.Stat(base); os.IsNotExist(err) {
-		t.Error("regression: CloseHLS wiped the base dir (should only remove session sub-dirs)")
+	if _, err := os.Stat(base); !os.IsNotExist(err) {
+		t.Error("CloseHLS did not remove the per-manager base dir")
 	}
-	// Session dir must be removed.
 	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {
 		t.Error("CloseHLS did not remove session dir")
+	}
+}
+
+// TestNewHLSBaseDirIsPrivate is the regression test for MED-2: newHLSBaseDir
+// must create a fresh, unpredictable, owner-only (0700) base directory —
+// never the old fixed, world-readable "$TMPDIR/stremio-hls" path a
+// co-resident user on a multi-user host could pre-create or read. Calls
+// newHLSBaseDir directly rather than newHLS, which shells out to ffmpeg to
+// probe encoders.
+func TestNewHLSBaseDirIsPrivate(t *testing.T) {
+	base := newHLSBaseDir()
+	defer os.RemoveAll(base)
+
+	if filepath.Base(base) == "stremio-hls" {
+		t.Errorf("base dir = %q, want a randomized os.MkdirTemp name, not the old predictable one", base)
+	}
+	fi, err := os.Stat(base)
+	if err != nil {
+		t.Fatalf("stat base dir: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("base dir mode = %o, want 0700", perm)
 	}
 }
 
@@ -653,6 +677,76 @@ func TestProbeAppliesLocalize(t *testing.T) {
 	}
 	if strings.Contains(argv, "12470") {
 		t.Errorf("ffprobe argv = %q, still contains the raw un-localized :12470 URL", argv)
+	}
+}
+
+// TestProbeRoutesRemoteURLThroughRelay is the regression test for SEC-4: a
+// remote (non-selfBase) streamURL must never reach ffprobe as the literal
+// argv value — it must be rewritten to a "http://127.0.0.1:<port>/r/<token>"
+// loopback relay URL, with a narrow "-protocol_whitelist http,tcp" (the
+// relay only ever speaks plain loopback HTTP). A PATH-stub stands in for
+// ffprobe so the argv can be asserted directly, without spawning real
+// ffprobe or any network I/O.
+func TestProbeRoutesRemoteURLThroughRelay(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	stub := filepath.Join(dir, "ffprobe")
+	script := "#!/bin/sh\necho \"$@\" > \"" + argsFile + "\"\necho '{}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	p := newTestProber()
+	p.baseURLLocal = "http://127.0.0.1:11470"
+	raw := "http://93.184.216.34/videos/movie.mkv"
+
+	if _, err := p.Probe(raw); err != nil {
+		t.Fatalf("Probe with stub ffprobe: %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("stub ffprobe was never invoked: %v", err)
+	}
+	argv := string(got)
+	if strings.Contains(argv, "93.184.216.34") {
+		t.Errorf("ffprobe argv = %q, must never contain the raw remote host directly", argv)
+	}
+	if !strings.Contains(argv, "http://127.0.0.1:") || !strings.Contains(argv, "/r/") {
+		t.Errorf("ffprobe argv = %q, want a loopback relay token URL", argv)
+	}
+	if !strings.Contains(argv, "-protocol_whitelist http,tcp") {
+		t.Errorf("ffprobe argv = %q, want the narrow \"-protocol_whitelist http,tcp\" for a relayed input", argv)
+	}
+}
+
+// TestProbeCapsFfprobeOutput is the regression test for MED-1: ffprobe
+// stdout must be capped instead of buffered without bound. A PATH-stub
+// replaces ffprobe with a program that floods stdout past ffprobeOutputLimit;
+// Probe must fail with errOutputTooLarge rather than allocate an
+// unbounded amount of memory reading it all in.
+func TestProbeCapsFfprobeOutput(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "ffprobe")
+	// dd floods stdout with well over ffprobeOutputLimit (8 MiB) of zero
+	// bytes; runCapped must abort the read (and kill the process) instead of
+	// buffering all of it.
+	script := "#!/bin/sh\ndd if=/dev/zero bs=1M count=9 2>/dev/null\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	p := newTestProber()
+	p.baseURLLocal = "http://127.0.0.1:11470"
+
+	_, err := p.Probe("http://93.184.216.34/videos/movie.mkv")
+	if err == nil {
+		t.Fatal("expected an error from an oversized ffprobe output, got nil")
+	}
+	if !errors.Is(err, errOutputTooLarge) {
+		t.Errorf("err = %v, want it to wrap errOutputTooLarge", err)
 	}
 }
 
@@ -1082,6 +1176,46 @@ Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,Second\\Nline
 	if !strings.Contains(text1, "\n") {
 		t.Errorf("track 1 text = %q, want soft line break converted to newline", text1)
 	}
+}
+
+// TestParseASSSubtitlesNonCanonicalFormat is the regression test for BUG-1:
+// a Format: line whose Start/End columns come after Text (so the field that
+// SplitN lets absorb trailing commas is not actually Text) must never panic,
+// and must simply skip every Dialogue line rather than emit
+// wrongly-extracted text. A Format: line that reorders columns but still
+// keeps Text last must continue to parse correctly, absorbing commas inside
+// the subtitle text exactly as the canonical v4.00+ order does.
+func TestParseASSSubtitlesNonCanonicalFormat(t *testing.T) {
+	t.Run("Text before Start/End panics without the bounds fix", func(t *testing.T) {
+		// The exact crash repro from the review report: nFields used to be
+		// textIdx+1 (=2) here, so parts[startIdx=2] and parts[endIdx=3] read
+		// past a 2-element slice ("index out of range [2] with length 2").
+		ass := "[Events]\n" +
+			"Format: Layer, Text, Start, End\n" +
+			"Dialogue: 0,Hello World,0:00:01.00,0:00:02.00\n"
+
+		tracks := parseASSSubtitles(ass) // must not panic
+		if len(tracks) != 0 {
+			t.Errorf("expected 0 tracks (Text not last => line skipped safely), got %d: %v", len(tracks), tracks)
+		}
+	})
+
+	t.Run("reordered columns with Text last parse correctly", func(t *testing.T) {
+		ass := "[Events]\n" +
+			"Format: Start, End, Name, Text\n" +
+			"Dialogue: 0:00:01.00,0:00:02.50,Default,Hello, World\n"
+
+		tracks := parseASSSubtitles(ass)
+		if len(tracks) != 1 {
+			t.Fatalf("expected 1 track, got %d: %v", len(tracks), tracks)
+		}
+		if tracks[0]["startTime"] != 1000 || tracks[0]["endTime"] != 2500 {
+			t.Errorf("timestamps: start=%v end=%v", tracks[0]["startTime"], tracks[0]["endTime"])
+		}
+		if tracks[0]["text"] != "Hello, World" {
+			t.Errorf("text = %q, want %q (Text as the last field must still absorb the comma)", tracks[0]["text"], "Hello, World")
+		}
+	})
 }
 
 func TestParseSubtitlesASS(t *testing.T) {
