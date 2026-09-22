@@ -24,7 +24,7 @@ Not affiliated with or endorsed by Stremio.
 - **Archive streaming** - direct playback of media inside ZIP / RAR / 7z / TAR /
   TGZ containers (`/zip`, `/rar`, `/7zip`, `/tar`, `/tgz`), plus **Usenet/NZB**
   (`/nzb`, NNTP + yEnc) and **FTP/FTPS** (`/ftp`) streaming - all pure-Go.
-- **Disk-bounded cache** - LRU eviction honouring the `cacheSize` setting, plus idle-torrent removal after inactivity (`STREMIO_TORRENT_IDLE_TIMEOUT`).
+- **Disk-bounded cache** - LRU eviction honouring the `cacheSize` setting: `0` is a true "no caching" mode (every torrent with zero open readers is purged once its idle grace window elapses; a negative/unlimited value never evicts on size), plus idle-torrent removal after inactivity (`STREMIO_TORRENT_IDLE_TIMEOUT`).
 - Self-signed HTTPS on `:12470` for HTTPS web UIs (e.g. WebKitGTK shells).
 - **Metrics** - `GET /metrics` exposes Prometheus-format gauges (goroutines, heap, active torrents, HLS sessions, proxy cache) with permissive CORS headers (`Access-Control-Allow-Origin: *`); **do not expose to untrusted networks** — bind to loopback only.
 
@@ -82,6 +82,7 @@ Then point any Stremio client's **streaming server URL** at
 | Variable | Default | Purpose |
 |---|---|---|
 | `BIND_ADDRESS` | _(unset)_ | interface the HTTP/HTTPS listeners bind to. Unset (the default) binds **every** interface — on an IPv6-enabled host that includes globally routable addresses, and this API is **unauthenticated**. Set `127.0.0.1` (or `::1`) to restrict it to loopback, which is all the official Stremio desktop/web client needs. |
+| `STREMIO_ALLOWED_ORIGINS` | _(unset)_ | comma-separated extra allowed browser `Origin` values, checked on state-changing routes and `/proxy`. Each entry is `scheme://host[:port]` (exact match), `host[:port]` (matches either `http://` or `https://`), or `*.domain` (any scheme, subdomains only — the bare domain itself does not match). `*` alone restores the legacy behavior (no Origin check, `Access-Control-Allow-Origin: *` on every response, no `Vary`). Unset: requests with **no** `Origin` header (native players, curl) are always allowed with `Access-Control-Allow-Origin: *`; browser requests are allowed from the official Stremio web origins (`https://web.stremio.com`, `https://web.strem.io`, `https://app.strem.io`, `https://staging.strem.io`, `https://*.stremio.rocks`), `localhost`/`127.0.0.1`/`[::1]` on any port, this server's own interface IPs on any port, plus anything listed here. A disallowed `Origin` (including the literal `null`) gets `403 {"error":"origin not allowed"}` before the request is routed — GET and the CORS `OPTIONS` preflight alike. An allowed non-empty `Origin` gets `Access-Control-Allow-Origin: <that origin>` + `Vary: Origin` instead of `*`; its preflight also gets `Access-Control-Allow-Private-Network: true` when the request sent `Access-Control-Request-Private-Network: true`. |
 | `HTTP_PORT` | `11470` | enginefs HTTP API port |
 | `HTTPS_PORT` | `12470` | HTTPS port (`0` disables). Serves a persisted cert if present, else self-signed; with a Stremio authKey it auto-provisions and renews a browser-trusted Let's Encrypt cert via `/get-https`. |
 | `BT_LISTEN_PORT` | `0` | BitTorrent peer port (`0` = OS-assigned) |
@@ -92,11 +93,11 @@ Then point any Stremio client's **streaming server URL** at
 | `WEB_UI_LOCATION` | `https://web.stremio.com/` | redirect target for `GET /` |
 | `LOCAL_FILES_DIR` | _(unset)_ | directory scanned by the local-files addon |
 | `STREMIO_ARCHIVE_LOCAL_ROOT` | _(unset)_ | root directory under which `/{zip,rar,7zip,tar,tgz}/create` may open a **local** archive path. Unset falls back to `LOCAL_FILES_DIR`; if both are unset, local-path archive sources are disabled entirely and only `http(s)://` sources are accepted. Paths are resolved through symlinks and must stay inside the root. |
-| `STREMIO_ARCHIVE_ALLOW_PRIVATE` | _(off)_ | `1`/`true` lets `/{zip,rar,7zip,tar,tgz}/create` and `/nzb/create` fetch from private/loopback/RFC1918 URLs. Off by default (SSRF guard); the cloud-metadata address stays blocked either way. Enable only to pull archives from a LAN host. |
+| `STREMIO_ARCHIVE_ALLOW_PRIVATE` | _(off)_ | `1`/`true` lets `/{zip,rar,7zip,tar,tgz}/create` and `/nzb/create` reach private/loopback/RFC1918 hosts — including the NNTP `servers[]` connections `/nzb/create` opens and any HTTP redirect an archive/NZB fetch follows (both are re-validated at dial time, not just the initial URL). Off by default (SSRF guard); the cloud-metadata address stays blocked either way. Enable only to pull archives/NZBs from a LAN host. |
 | `STREMIO_FTP_ALLOW_PRIVATE` | _(off)_ | `1`/`true` lets `/ftp` reach private/loopback/RFC1918 hosts. Off by default (SSRF guard); the cloud-metadata address stays blocked either way. Enable to stream from a LAN NAS. |
 | `STREMIO_LOCAL_IMDB` | `on` | local-files add-on resolves filenames to IMDB ids/metadata via IMDb's suggestion API (catalog posters/titles). **Enabled by default**; set `=0`/`off` to disable — local files then keep filename titles + `local:` ids and no request is sent to IMDb. |
 | `STREMIO_HWACCEL` | _(auto)_ | `0` forces software transcode; or pin `vaapi`/`nvenc`/… |
-| `STREMIO_HTTP_LOG` | _(off)_ | `1` emits a structured access log line per request (`method`, `uri`, `status`, `duration_ms`, `bytes`, `remote`) |
+| `STREMIO_HTTP_LOG` | _(off)_ | `1` emits a structured access log line per request (`method`, `uri`, `status`, `duration_ms`, `bytes`, `remote`). Standard boolean parsing: `0`/`false`/`no`/`off` (case-insensitive) disable it, any other non-empty value enables it — unlike most other on/off knobs here this used to be "any non-empty value enables", so `STREMIO_HTTP_LOG=0` now disables logging instead of enabling it. |
 | `STREMIO_LOG_LEVEL` | `info` | log verbosity: `debug` / `info` / `warn` / `error` |
 | `STREMIO_LOG_FORMAT` | `text` | log output format: `text` (compact `time LEVEL component: msg key=value`) or `json` |
 | `STREMIO_PROXY_PASSWORD` | _(unset)_ | `api_password` required on `/proxy/*` requests |
@@ -181,6 +182,8 @@ as a plain `linux/arm64` binary under Termux.
 | `internal/types` | shared contract (structs + interfaces) |
 | `internal/engine` | anacrolix client, readers, stats, trackers, cache eviction |
 | `internal/api` | enginefs routes, streaming, proxy, casting, local-addon, youtube, archive/nzb/ftp |
+| `internal/streamproxy` | `/proxy` HLS/DASH rewrite, DRM decrypt, signed URLs, segment cache |
+| `internal/netguard` | SSRF guard: private/loopback/cloud-metadata checks + dial-time `Control` hook, shared by the proxy, archive/nzb/ftp fetches, and the media relay |
 | `internal/settings` | settings store (`server-settings.json`) |
 | `internal/media` | ffprobe, HLS transcode, subtitles, opensub hash |
 | `internal/archive` | uniform reader over zip / rar / 7zip / tar / tgz entries |
@@ -192,10 +195,30 @@ as a plain `linux/arm64` binary under Termux.
 
 ## Security
 
-This is a **localhost service with no authentication** - bind it to loopback and
-do not expose `:11470` to untrusted networks. By design it shells out to
-`ffmpeg`/`yt-dlp` and acts as an open reverse proxy (`/proxy`) for the local web
-UI; treat anything that can reach the port as fully trusted.
+This is a **localhost service with no authentication** - treat anything that
+can reach the port as fully trusted. **Recommended:** set
+`BIND_ADDRESS=127.0.0.1` — the default binds **every** interface, including
+any globally routable IPv6 address, to an unauthenticated API. Do not expose
+`:11470`/`:12470` to untrusted networks.
+
+Any website open in the user's browser can reach `http://127.0.0.1:11470`
+directly (ordinary same-origin-policy behavior — the browser allows the
+request, it just can't read a cross-origin response without CORS). To stop an
+arbitrary page from silently driving the API just because the port is
+reachable, state-changing routes and `/proxy` check the request's `Origin`
+header against an allowlist (see `STREMIO_ALLOWED_ORIGINS` above); requests
+with no `Origin` header (native players, curl, most non-browser clients) are
+unaffected.
+
+By design the server shells out to `ffmpeg`/`yt-dlp` and acts as an open
+reverse proxy (`/proxy`) for the local web UI. Remote URLs given to
+`ffmpeg`/`ffprobe` (`/probe`, `/tracks`, `/hlsv2` `mediaURL=`) are never
+dialed by the ffmpeg/yt-dlp subprocess directly — they're fetched through a
+guarded loopback relay, so the subprocess only ever talks to this server and
+the SSRF guard (private/loopback/link-local/cloud-metadata blocking,
+re-checked at dial time to defeat DNS rebinding) governs the actual fetch.
+The same dial-time guard, including redirects, covers archive/NZB downloads
+(`STREMIO_ARCHIVE_ALLOW_PRIVATE`) and FTP (`STREMIO_FTP_ALLOW_PRIVATE`).
 
 ## License
 

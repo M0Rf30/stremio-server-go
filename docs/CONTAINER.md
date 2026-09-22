@@ -1,8 +1,8 @@
 # Container Deployment
 
 The project ships a multi-stage `Dockerfile` (Podman/Docker) that compiles
-the server from source in a Go 1.24 Alpine build stage, then produces a lean
-Alpine 3.20 runtime image with `ffmpeg`, `ffprobe`, and `yt-dlp` bundled.  The
+the server from source in a Go 1.27 Alpine build stage, then produces a lean
+Alpine 3.24 runtime image with `ffmpeg`, `ffprobe`, and `yt-dlp` bundled.  The
 container runs as non-root UID 1000 and stores all persistent data (cache,
 `server-settings.json`, TLS material) under `/data`.
 

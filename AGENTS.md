@@ -7,7 +7,13 @@ closed-source streaming server (`server.js`), built on
 [`anacrolix/torrent`](https://github.com/anacrolix/torrent). It serves the exact
 **enginefs HTTP API** that `stremio-web`/`stremio-core` expect on `:11470`
 (HTTPS `:12470`), so it can be pointed at instead of the official binary. It is a
-localhost-trust service with **no authentication** by design.
+localhost-trust service with **no authentication** by design — any process
+that can reach the port is trusted. Browser-originated requests are an
+exception: state-changing routes and `/proxy` also check the request's
+`Origin` header against an allowlist (`STREMIO_ALLOWED_ORIGINS` + built-in
+Stremio web/localhost/self-IP defaults, see README) so an arbitrary page open
+in the user's browser cannot drive the API merely because the port is
+reachable.
 
 Response shapes (e.g. `stats.json`, `/settings`, `/create`) MUST stay
 byte-compatible with the official `server.js` and the strict `stremio-core`
@@ -97,7 +103,26 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
   `errors.Is(err, target)` for sentinels (never `==`) and `%w` to wrap.
 - **Env config** lives only in `main.go` via `getenv`/`envInt`/`envBool`, or a
   `LookupEnv`-based helper when empty must mean "disabled" (see `metadataURL()`,
-  `trackersURL()` — `off`/`0`/`false`/empty → disabled).
+  `trackersURL()` — `off`/`0`/`false`/empty → disabled); the parsed value is
+  threaded through `types.Config` (`STREMIO_HTTP_LOG` → `Config.HTTPLog`,
+  parsed once in `main.go` via `envBool` and passed to `api.New`, is the
+  reference example — it used to be read ad hoc as `os.Getenv(...) != ""` in
+  `internal/api`, so `STREMIO_HTTP_LOG=0` now *disables* logging like every
+  other `envBool` knob instead of enabling it). Sanctioned exceptions that
+  read `os.Getenv`/`os.LookupEnv` directly in their own package instead —
+  because the value is needed before `types.Config` exists, or must be
+  re-read per call rather than pinned at startup — and must stay that way:
+  - `internal/logging`: `STREMIO_LOG_LEVEL` / `STREMIO_LOG_FORMAT` — `Setup()`
+    runs before `main` builds `types.Config`.
+  - `internal/api/archive.go`, `internal/ftpstream/ftpstream.go`:
+    `STREMIO_ARCHIVE_ALLOW_PRIVATE` / `STREMIO_FTP_ALLOW_PRIVATE` — re-checked
+    on every fetch.
+  - `internal/api/archive.go`, `internal/api/localaddon.go`:
+    `STREMIO_ARCHIVE_LOCAL_ROOT` / `LOCAL_FILES_DIR` — local-root resolution
+    for archive and local-files sources.
+  - `internal/media/hls.go`: `STREMIO_HWACCEL` — probed lazily at first
+    transcode, not at startup.
+  Do not add a new outside-`main.go` env read without adding it to this list.
 - **Imports**: the project module goes in its **own** goimports group
   (`goimports local-prefixes: github.com/M0Rf30/stremio-server-go`); keep
   `gofmt -s` clean.

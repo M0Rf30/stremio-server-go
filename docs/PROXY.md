@@ -16,8 +16,14 @@
   allowlist** so the proxy can be exposed publicly.
 - **Segment caching + prefetch** for smoother playback.
 
-CORS is already permissive server-wide (`Access-Control-Allow-Origin: *`), so
-proxied streams play in browser clients without extra configuration.
+CORS is permissive by default for non-browser callers: any request without an
+`Origin` header (curl, native players) gets `Access-Control-Allow-Origin: *`.
+Browser-originated requests to `/proxy/*` (and other state-changing routes)
+are checked against the server-wide Origin allowlist before being routed — see
+`STREMIO_ALLOWED_ORIGINS` in the [README](../README.md#environment) — and get
+`Access-Control-Allow-Origin: <that origin>` + `Vary: Origin` back instead of
+`*`. A disallowed `Origin` (including `null`) is rejected with `403` before
+the proxy ever dials out.
 
 ## Endpoints
 
@@ -77,6 +83,14 @@ All three modes are optional and composable:
   for, so it cannot be reused to proxy a different destination.
 - **IP allowlist** (`STREMIO_PROXY_IP_ACL`) — comma-separated CIDRs; non-matching
   clients get `403`. The client IP honors `X-Forwarded-For` (first hop).
+
+Independent of the three modes above, any browser-originated request (one
+carrying an `Origin` header) to `/proxy/*` is also checked against the
+server-wide Origin allowlist (`STREMIO_ALLOWED_ORIGINS`, see the
+[README](../README.md#environment)) before any proxy logic runs — this stops
+an arbitrary web page from relaying through `/proxy` just because the port is
+reachable from the browser. Non-browser callers (no `Origin` header) are
+unaffected.
 
 When nothing is configured, the proxy is open to any caller (consistent with the
 server's localhost-trust model), but an SSRF guard still applies: the
