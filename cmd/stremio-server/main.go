@@ -93,6 +93,29 @@ func envBool(key string, def bool) bool {
 	}
 }
 
+// allowedOrigins parses STREMIO_ALLOWED_ORIGINS (Contract 2 / SEC-1): a
+// comma-separated list of extra origins the HTTP API accepts beyond the
+// built-in Stremio-web/localhost/own-IP allowlist, in addition to the
+// "scheme://host[:port]" / "host[:port]" / "*.domain" wildcard forms. A
+// value of exactly "*" restores the legacy allow-everything behavior
+// (allowAll=true) instead of being treated as an extra entry. Unset → no
+// extras, allowAll=false.
+func allowedOrigins() (extras []string, allowAll bool) {
+	raw := strings.TrimSpace(os.Getenv("STREMIO_ALLOWED_ORIGINS"))
+	if raw == "" {
+		return nil, false
+	}
+	if raw == "*" {
+		return nil, true
+	}
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			extras = append(extras, part)
+		}
+	}
+	return extras, false
+}
+
 // metadataURL resolves the Cinemeta-compatible metadata addon base URL used by
 // the /bitmagnet and /torznab add-ons to turn an IMDB id into a title. Unset →
 // the official Cinemeta. An explicit empty value or off/0/false/no/disabled
@@ -159,6 +182,7 @@ func main() {
 		logging.Fatal("cannot create app path", "err", err, "path", appPath)
 	}
 
+	allowedOriginsExtra, allowAllOrigins := allowedOrigins()
 	cfg := types.Config{
 		HTTPPort:          envInt("HTTP_PORT", 11470),
 		HTTPSPort:         envInt("HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
@@ -192,6 +216,9 @@ func main() {
 		BTAnonymous:       envBool("STREMIO_BT_ANONYMOUS", false),
 		IdleTimeout:       time.Duration(envInt("STREMIO_TORRENT_IDLE_TIMEOUT", 300)) * time.Second, // 0 = disabled
 		MaxSeedRatio:      envFloat("STREMIO_MAX_SEED_RATIO", 0),                                    // 0 = unlimited seeding
+		HTTPLog:           envBool("STREMIO_HTTP_LOG", false),                                       // structured access-log line per request
+		AllowedOrigins:    allowedOriginsExtra,                                                      // extra CORS origins (STREMIO_ALLOWED_ORIGINS)
+		AllowAllOrigins:   allowAllOrigins,                                                          // STREMIO_ALLOWED_ORIGINS="*" => legacy no-check CORS
 	}
 	if cfg.DisableWebtorrent {
 		logging.For("engine").Info("webtorrent/webrtc peers disabled")
@@ -268,15 +295,28 @@ func main() {
 	// StartJanitor is detected via structural type assertion on the concrete *manager.
 	if j, ok := em.(interface{ StartJanitor(func() int64) }); ok {
 		j.StartJanitor(func() int64 {
+			// Contract 1: nil/unknown/non-numeric => -1 (unlimited); numeric =>
+			// int64(n); a negative number is normalized to -1. engine.evict
+			// interprets <0 as unlimited, 0 as "no caching" (purge readerless
+			// engines past the grace window), >0 as a byte cap.
 			switch n := ss.Get("cacheSize").(type) {
 			case float64:
+				if n < 0 {
+					return -1
+				}
 				return int64(n)
 			case int:
+				if n < 0 {
+					return -1
+				}
 				return int64(n)
 			case int64:
+				if n < 0 {
+					return -1
+				}
 				return n
 			default:
-				return 0 // nil/unknown => unlimited
+				return -1 // nil/unknown => unlimited
 			}
 		})
 	}
@@ -344,32 +384,11 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	go func() {
-		logging.For("http").Info("listening", "version", version, "addr", baseLocal, "bind_addr", httpAddr, "app_path", appPath)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logging.Fatal("http server error", "err", err)
-		}
-	}()
-
-	// Optional pprof endpoint for diagnostics; disabled unless STREMIO_PPROF is
-	// set (e.g. STREMIO_PPROF=127.0.0.1:6060). Handlers come from net/http/pprof.
-	// The address is operator-supplied and NOT forced to loopback, so warn when
-	// it would expose heap/goroutine dumps beyond the local host.
-	// ppSrv is declared here so it can join the graceful-shutdown WaitGroup below.
-	var ppSrv *http.Server
-	if addr := os.Getenv("STREMIO_PPROF"); addr != "" {
-		ppSrv = &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
-		if !isLoopbackAddr(addr) {
-			logging.For("pprof").Warn("pprof bound to a non-loopback address; heap and goroutine dumps are exposed", "addr", addr)
-		}
-		go func() {
-			logging.For("pprof").Info("listening", "addr", addr)
-			if err := ppSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logging.For("pprof").Error("server error", "err", err)
-			}
-		}()
-	}
-
+	// HTTPS cert setup (including the certReload hook GET /get-https invokes)
+	// happens before the HTTP listener goroutine is spawned below: that
+	// handler is shared by both listeners, so installing the hook first
+	// closes the API-1 startup-window race where a very early GET /get-https
+	// on plain HTTP could observe the hook still unset.
 	var (
 		tlsSrv   *http.Server
 		provStop = make(chan struct{})
@@ -422,6 +441,32 @@ func main() {
 			// /get-https call). Hot-swaps the live cert; no restart needed.
 			go renewCertLoop(appPath, holder, provStop)
 		}
+	}
+
+	go func() {
+		logging.For("http").Info("listening", "version", version, "addr", baseLocal, "bind_addr", httpAddr, "app_path", appPath)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logging.Fatal("http server error", "err", err)
+		}
+	}()
+
+	// Optional pprof endpoint for diagnostics; disabled unless STREMIO_PPROF is
+	// set (e.g. STREMIO_PPROF=127.0.0.1:6060). Handlers come from net/http/pprof.
+	// The address is operator-supplied and NOT forced to loopback, so warn when
+	// it would expose heap/goroutine dumps beyond the local host.
+	// ppSrv is declared here so it can join the graceful-shutdown WaitGroup below.
+	var ppSrv *http.Server
+	if addr := os.Getenv("STREMIO_PPROF"); addr != "" {
+		ppSrv = &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
+		if !isLoopbackAddr(addr) {
+			logging.For("pprof").Warn("pprof bound to a non-loopback address; heap and goroutine dumps are exposed", "addr", addr)
+		}
+		go func() {
+			logging.For("pprof").Info("listening", "addr", addr)
+			if err := ppSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logging.For("pprof").Error("server error", "err", err)
+			}
+		}()
 	}
 
 	stop := make(chan os.Signal, 1)

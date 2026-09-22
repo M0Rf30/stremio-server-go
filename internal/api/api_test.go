@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/M0Rf30/stremio-server-go/internal/types"
@@ -192,6 +194,22 @@ func newHandler(t *testing.T, engines ...*fakeEngine) http.Handler {
 		HTTPPort:   11470,
 		WebUI:      "https://web.stremio.com/",
 		EnableDLNA: false,
+	}
+	return New(newFakeEM(engines...), &fakeSS{}, &fakeProber{}, cfg)
+}
+
+// newHandlerWithCfg builds an http.Handler like newHandler but lets the test
+// customize cfg (e.g. AllowedOrigins/AllowAllOrigins for origin-allowlist
+// tests, SEC-1 / Contract 2).
+func newHandlerWithCfg(t *testing.T, mutate func(*types.Config), engines ...*fakeEngine) http.Handler {
+	t.Helper()
+	cfg := types.Config{
+		HTTPPort:   11470,
+		WebUI:      "https://web.stremio.com/",
+		EnableDLNA: false,
+	}
+	if mutate != nil {
+		mutate(&cfg)
 	}
 	return New(newFakeEM(engines...), &fakeSS{}, &fakeProber{}, cfg)
 }
@@ -905,6 +923,275 @@ func TestHandlerPostSettings(t *testing.T) {
 	m := decodeJSON(t, rec.Body.Bytes())
 	if s, ok := m["success"].(bool); !ok || !s {
 		t.Errorf("POST /settings response = %v; want {\"success\":true}", m)
+	}
+}
+
+// ─── Origin allowlist (SEC-1 / Contract 2) ──────────────────────────────────
+
+func TestOriginDisallowed403(t *testing.T) {
+	h := newHandler(t)
+	for _, method := range []string{http.MethodGet, http.MethodOptions} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/heartbeat", nil)
+			req.Header.Set("Origin", "https://evil.example.com")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d; want 403", rec.Code)
+			}
+			m := decodeJSON(t, rec.Body.Bytes())
+			if m["error"] != "origin not allowed" {
+				t.Errorf(`error = %v; want "origin not allowed"`, m["error"])
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+				t.Errorf("ACAO should not be set on a rejected origin, got %q", got)
+			}
+		})
+	}
+}
+
+func TestOriginDisallowedNullOrigin(t *testing.T) {
+	h := newHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/heartbeat", nil)
+	req.Header.Set("Origin", "null")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403 for literal null origin", rec.Code)
+	}
+}
+
+func TestOriginAllowedWebStremioEchoedWithVary(t *testing.T) {
+	h := newHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/heartbeat", nil)
+	req.Header.Set("Origin", "https://web.stremio.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://web.stremio.com" {
+		t.Errorf("ACAO = %q; want echoed origin", got)
+	}
+	if got := rec.Header().Get("Vary"); got != "Origin" {
+		t.Errorf("Vary = %q; want Origin", got)
+	}
+}
+
+func TestOriginNoHeaderKeepsWildcardACAO(t *testing.T) {
+	h := newHandler(t)
+	rec := serve(t, h, http.MethodGet, "/heartbeat", nil)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin = %q; want * when no Origin header is sent", got)
+	}
+	if got := rec.Header().Get("Vary"); got != "" {
+		t.Errorf("Vary should not be set when no Origin header is sent, got %q", got)
+	}
+}
+
+func TestOriginAllowAllLegacy(t *testing.T) {
+	h := newHandlerWithCfg(t, func(c *types.Config) { c.AllowAllOrigins = true })
+	req := httptest.NewRequest(http.MethodGet, "/heartbeat", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (legacy allow-all)", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("ACAO = %q; want * in legacy mode", got)
+	}
+	if got := rec.Header().Get("Vary"); got != "" {
+		t.Errorf("Vary should not be set in legacy mode, got %q", got)
+	}
+}
+
+func TestOriginConfiguredExtraAllowed(t *testing.T) {
+	h := newHandlerWithCfg(t, func(c *types.Config) {
+		c.AllowedOrigins = []string{"https://extra.example.com"}
+	})
+	req := httptest.NewRequest(http.MethodGet, "/heartbeat", nil)
+	req.Header.Set("Origin", "https://extra.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 for configured extra origin", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://extra.example.com" {
+		t.Errorf("ACAO = %q; want echoed configured origin", got)
+	}
+}
+
+func TestOriginConfiguredWildcardAllowed(t *testing.T) {
+	h := newHandlerWithCfg(t, func(c *types.Config) {
+		c.AllowedOrigins = []string{"*.example.com"}
+	})
+	req := httptest.NewRequest(http.MethodGet, "/heartbeat", nil)
+	req.Header.Set("Origin", "https://sub.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 for wildcard-matched origin", rec.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/heartbeat", nil)
+	req2.Header.Set("Origin", "https://example.com")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusForbidden {
+		t.Errorf("bare domain should not match *.example.com wildcard, status = %d", rec2.Code)
+	}
+}
+
+func TestOriginOwnInterfaceIPAllowed(t *testing.T) {
+	ifaces := availableInterfaces()
+	if len(ifaces) == 0 {
+		t.Skip("no non-loopback interfaces available on this host")
+	}
+	ip := ifaces[0]
+	origin := "http://" + ip
+	if strings.Contains(ip, ":") {
+		origin = "http://[" + ip + "]"
+	}
+	h := newHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/heartbeat", nil)
+	req.Header.Set("Origin", origin)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 for own-IP origin %q", rec.Code, origin)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != origin {
+		t.Errorf("ACAO = %q; want echoed own-IP origin %q", got, origin)
+	}
+}
+
+func TestPreflightPrivateNetworkHeader(t *testing.T) {
+	h := newHandler(t)
+	req := httptest.NewRequest(http.MethodOptions, "/heartbeat", nil)
+	req.Header.Set("Origin", "https://web.stremio.com")
+	req.Header.Set("Access-Control-Request-Private-Network", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Private-Network"); got != "true" {
+		t.Errorf("Access-Control-Allow-Private-Network = %q; want true", got)
+	}
+}
+
+func TestPreflightNoPrivateNetworkHeaderWithoutRequest(t *testing.T) {
+	h := newHandler(t)
+	req := httptest.NewRequest(http.MethodOptions, "/heartbeat", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Access-Control-Allow-Private-Network"); got != "" {
+		t.Errorf("Access-Control-Allow-Private-Network should be unset without a request, got %q", got)
+	}
+}
+
+// ─── certReload concurrency (API-1) ─────────────────────────────────────────
+
+func TestCertReloadConcurrency(t *testing.T) {
+	s := &server{}
+	var calls int64
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			s.SetCertReloadHook(func() { atomic.AddInt64(&calls, 1) })
+		}()
+		go func() {
+			defer wg.Done()
+			if p := s.certReload.Load(); p != nil {
+				(*p)()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// ─── POST /settings validation (API-2) ──────────────────────────────────────
+
+func TestHandlerPostSettingsValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantErrSub string
+	}{
+		{"malformed json", `{"cacheSize":`, http.StatusBadRequest, "invalid JSON"},
+		{"non-object json", `"cacheSize"`, http.StatusBadRequest, "invalid JSON"},
+		{"empty body", ``, http.StatusOK, ""},
+		{"cacheSize null ok", `{"cacheSize":null}`, http.StatusOK, ""},
+		{"cacheSize number ok", `{"cacheSize":2048}`, http.StatusOK, ""},
+		{"cacheSize negative rejected", `{"cacheSize":-1}`, http.StatusBadRequest, "cacheSize"},
+		{"cacheSize string rejected", `{"cacheSize":"2GB"}`, http.StatusBadRequest, "cacheSize"},
+		{"btMaxConnections string rejected", `{"btMaxConnections":"55"}`, http.StatusBadRequest, "btMaxConnections"},
+		{"btMaxConnections negative rejected", `{"btMaxConnections":-5}`, http.StatusBadRequest, "btMaxConnections"},
+		{"btMaxConnections ok", `{"btMaxConnections":100}`, http.StatusOK, ""},
+		{"transcodeHorsepower number ok", `{"transcodeHorsepower":0.5}`, http.StatusOK, ""},
+		{"transcodeHorsepower string rejected", `{"transcodeHorsepower":"high"}`, http.StatusBadRequest, "transcodeHorsepower"},
+		{"localAddonEnabled bool ok", `{"localAddonEnabled":true}`, http.StatusOK, ""},
+		{"localAddonEnabled non-bool rejected", `{"localAddonEnabled":"yes"}`, http.StatusBadRequest, "localAddonEnabled"},
+		{"remoteHttps string ok", `{"remoteHttps":"1.2.3.4"}`, http.StatusOK, ""},
+		{"remoteHttps non-string rejected", `{"remoteHttps":5}`, http.StatusBadRequest, "remoteHttps"},
+		{"transcodeProfile null ok", `{"transcodeProfile":null}`, http.StatusOK, ""},
+		{"transcodeProfile string ok", `{"transcodeProfile":"h264"}`, http.StatusOK, ""},
+		{"transcodeProfile non-string rejected", `{"transcodeProfile":5}`, http.StatusBadRequest, "transcodeProfile"},
+		{"unknown key still merged", `{"someFutureKey":"x"}`, http.StatusOK, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandler(t)
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/settings", body)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d; want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			m := decodeJSON(t, rec.Body.Bytes())
+			switch {
+			case tc.wantStatus == http.StatusOK:
+				if s, ok := m["success"].(bool); !ok || !s {
+					t.Errorf("response = %v; want success:true", m)
+				}
+			case tc.wantErrSub != "":
+				errMsg, _ := m["error"].(string)
+				if !strings.Contains(errMsg, tc.wantErrSub) {
+					t.Errorf("error = %q; want substring %q", errMsg, tc.wantErrSub)
+				}
+			}
+		})
+	}
+}
+
+func TestHandlerPostSettingsDropsReadOnlyKeys(t *testing.T) {
+	ss := &fakeSS{}
+	cfg := types.Config{HTTPPort: 11470}
+	h := New(newFakeEM(), ss, &fakeProber{}, cfg)
+	body := `{"appPath":"/evil","cacheRoot":"/evil","serverVersion":"9.9.9","cacheSize":1024}`
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", rec.Code)
+	}
+	for _, key := range []string{"appPath", "cacheRoot", "serverVersion"} {
+		if v := ss.Get(key); v != nil {
+			t.Errorf("%s should have been dropped from the patch, got %v", key, v)
+		}
+	}
+	if v := ss.Get("cacheSize"); v != 1024.0 {
+		t.Errorf("cacheSize = %v; want 1024", v)
 	}
 }
 

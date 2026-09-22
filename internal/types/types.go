@@ -89,6 +89,20 @@ type Config struct {
 	// instant scrub/resume. Uploading resumes automatically if the ratio falls
 	// back below the cap (e.g. more data is downloaded, or the cap is raised).
 	MaxSeedRatio float64
+
+	// HTTPLog enables a structured access-log line per request (method, uri,
+	// status, duration_ms, bytes, remote); STREMIO_HTTP_LOG, default false.
+	HTTPLog bool
+	// AllowedOrigins lists extra origins the HTTP API accepts beyond the
+	// built-in Stremio-web/localhost/own-IP allowlist (STREMIO_ALLOWED_ORIGINS,
+	// comma-separated). Entries are either an exact "scheme://host[:port]" /
+	// "host[:port]" origin, or a "*.domain" host wildcard. Ignored when
+	// AllowAllOrigins is true.
+	AllowedOrigins []string
+	// AllowAllOrigins restores the legacy no-Origin-check behavior (every
+	// response gets Access-Control-Allow-Origin: *) when
+	// STREMIO_ALLOWED_ORIGINS is exactly "*". Default false.
+	AllowAllOrigins bool
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.

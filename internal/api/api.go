@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -71,14 +73,18 @@ var videoMimes = map[string]string{
 }
 
 type server struct {
-	em          types.EngineManager
-	ss          types.SettingsStore
-	prober      types.MediaProber
-	cfg         types.Config
-	logReq      bool
-	accessLog   *slog.Logger
-	sp          *streamproxy.Handler
-	certReload  func() // hot-swap the live HTTPS cert after /get-https writes new files (wired by cmd)
+	em        types.EngineManager
+	ss        types.SettingsStore
+	prober    types.MediaProber
+	cfg       types.Config
+	logReq    bool
+	accessLog *slog.Logger
+	sp        *streamproxy.Handler
+	// certReload hot-swaps the live HTTPS cert after /get-https writes new
+	// files (wired by cmd). atomic.Pointer because it is set once from main's
+	// startup goroutine but read from every request goroutine — GET
+	// /get-https can race that write on a freshly started process (API-1).
+	certReload  atomic.Pointer[func()]
 	proxyClient *http.Client
 	blobClient  *http.Client
 }
@@ -112,7 +118,7 @@ func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProbe
 		ss:          ss,
 		prober:      prober,
 		cfg:         cfg,
-		logReq:      os.Getenv("STREMIO_HTTP_LOG") != "",
+		logReq:      cfg.HTTPLog,
 		accessLog:   logging.For("http"),
 		sp:          streamproxy.New(buildStreamProxyConfig(cfg, pc)),
 		proxyClient: pc,
@@ -128,6 +134,103 @@ var (
 	corsExposeHeaders = []string{"Content-Range, Accept-Ranges, Content-Length, Content-Type"}
 )
 
+// builtinAllowedOrigins are the official stremio-web deployments, always
+// allowed regardless of STREMIO_ALLOWED_ORIGINS (SEC-1 / Contract 2).
+var builtinAllowedOrigins = []string{
+	"https://web.stremio.com",
+	"https://web.strem.io",
+	"https://app.strem.io",
+	"https://staging.strem.io",
+}
+
+// stremioRocksSuffix matches any https://*.stremio.rocks subdomain (staging /
+// preview deployments), mirroring the built-in wildcard entry in Contract 2.
+const stremioRocksSuffix = ".stremio.rocks"
+
+// originHostAllowed reports whether host (already lower-cased, no port, no
+// IPv6 brackets — i.e. url.URL.Hostname()) is localhost, a loopback literal,
+// or one of this server's own interface addresses. Allowed under http(s) on
+// any port, matching Contract 2's "the server's own origins" clause.
+func originHostAllowed(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	for _, ip := range availableInterfaces() {
+		if strings.EqualFold(ip, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// originEntryMatches reports whether a single STREMIO_ALLOWED_ORIGINS entry
+// matches the request Origin. entry, normOrigin and host are already
+// lower-cased by the caller. An entry may be:
+//   - "*"                    — matches any origin.
+//   - "scheme://host[:port]" — exact match against normOrigin.
+//   - "host[:port]"          — matches host, any http/https scheme.
+//   - "*.domain"             — matches any subdomain of domain, any scheme.
+func originEntryMatches(entry, normOrigin, host string) bool {
+	entry = strings.TrimSuffix(strings.TrimSpace(entry), "/")
+	switch {
+	case entry == "":
+		return false
+	case entry == "*":
+		return true
+	case strings.Contains(entry, "://"):
+		return entry == normOrigin
+	case strings.HasPrefix(entry, "*."):
+		domain := entry[1:] // leading "." + domain
+		return len(host) > len(domain) && strings.HasSuffix(host, domain)
+	default:
+		return entry == host
+	}
+}
+
+// originAllowed implements the Contract 2 allowlist. A request with no Origin
+// header (native players, curl, same-process fetches) is always allowed;
+// cfg.AllowAllOrigins (STREMIO_ALLOWED_ORIGINS="*") restores the legacy
+// allow-everything behavior; otherwise the origin must match the built-in
+// Stremio-web/localhost/own-IP allowlist or a configured extra. The literal
+// "null" origin (sandboxed iframes, file:// pages) is always rejected here
+// since url.Parse leaves it with no Host.
+func originAllowed(cfg types.Config, origin string) bool {
+	if cfg.AllowAllOrigins {
+		return true
+	}
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if originHostAllowed(host) {
+		return true
+	}
+	normOrigin := scheme + "://" + strings.ToLower(u.Host)
+	for _, b := range builtinAllowedOrigins {
+		if strings.ToLower(b) == normOrigin {
+			return true
+		}
+	}
+	if scheme == "https" && len(host) > len(stremioRocksSuffix) && strings.HasSuffix(host, stremioRocksSuffix) {
+		return true
+	}
+	for _, entry := range cfg.AllowedOrigins {
+		if originEntryMatches(strings.ToLower(entry), normOrigin, host) {
+			return true
+		}
+	}
+	return false
+}
+
 // Shared, immutable streaming header values — pre-canonicalized keys to avoid
 // per-request key canonicalization (mirrors CORS pattern above).
 // textproto.CanonicalMIMEHeaderKey("transferMode.dlna.org")    = "Transfermode.dlna.org"
@@ -139,15 +242,31 @@ var (
 	streamContentFeatures = []string{"DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"}
 )
 
-// ServeHTTP applies CORS, handles preflight, and dispatches to the router.
+// ServeHTTP enforces the Origin allowlist (SEC-1 / Contract 2), applies CORS,
+// handles preflight, and dispatches to the router. A disallowed Origin is
+// rejected with 403 before any routing — including the OPTIONS preflight —
+// so a hostile page can never reach a state-changing route.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if !originAllowed(s.cfg, origin) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "origin not allowed"})
+		return
+	}
 	hdr := w.Header()
-	hdr["Access-Control-Allow-Origin"] = corsAllowOrigin
+	if s.cfg.AllowAllOrigins || origin == "" {
+		hdr["Access-Control-Allow-Origin"] = corsAllowOrigin
+	} else {
+		hdr.Set("Access-Control-Allow-Origin", origin)
+		hdr.Add("Vary", "Origin")
+	}
 	hdr["Access-Control-Expose-Headers"] = corsExposeHeaders
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Range, Content-Type, Accept, Authorization")
-		w.Header().Set("Access-Control-Max-Age", "1728000")
+		hdr.Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		hdr.Set("Access-Control-Allow-Headers", "Range, Content-Type, Accept, Authorization")
+		hdr.Set("Access-Control-Max-Age", "1728000")
+		if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+			hdr.Set("Access-Control-Allow-Private-Network", "true")
+		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -956,6 +1075,84 @@ func (s *server) handleStreamSubtitles(w http.ResponseWriter, r *http.Request, i
 
 // ---- info / settings ------------------------------------------------------
 
+// settingsPinnedNumericKeys are settings whose value must be a non-negative
+// JSON number when present in a POST /settings patch (API-2). cacheSize is
+// handled separately since it also accepts null (unlimited).
+var settingsPinnedNumericKeys = []string{
+	"btMaxConnections",
+	"btHandshakeTimeout",
+	"btRequestTimeout",
+	"btDownloadSpeedSoftLimit",
+	"btDownloadSpeedHardLimit",
+	"btMinPeersForStable",
+	"transcodeMaxBitRate",
+	"transcodeConcurrency",
+	"transcodeTrackConcurrency",
+	"transcodeMaxWidth",
+}
+
+// settingsBoolKeys are settings whose value must be a JSON boolean when
+// present in a POST /settings patch (API-2).
+var settingsBoolKeys = []string{
+	"localAddonEnabled",
+	"transcodeHardwareAccel",
+	"proxyStreamsEnabled",
+	"seedingEnabled",
+	"autoUpdateEnabled",
+}
+
+// settingsReadOnlyKeys are server-computed fields a client patch must never
+// override. Present but silently dropped rather than rejected, since
+// stremio-web round-trips the full GET /settings values object on save.
+var settingsReadOnlyKeys = []string{"appPath", "cacheRoot", "serverVersion"}
+
+// validateSettingsPatch type-checks the known keys of a POST /settings body
+// (API-2). Unknown keys are left untouched — stremio-web sends extras this
+// server doesn't model — and settingsReadOnlyKeys are the caller's
+// responsibility to strip once validation succeeds. Returns "" when patch is
+// acceptable, otherwise a message naming the offending key.
+func validateSettingsPatch(patch map[string]any) string {
+	if v, ok := patch["cacheSize"]; ok && v != nil {
+		if n, isNum := v.(float64); !isNum || n < 0 {
+			return "cacheSize must be null or a non-negative number"
+		}
+	}
+	for _, key := range settingsPinnedNumericKeys {
+		v, ok := patch[key]
+		if !ok {
+			continue
+		}
+		if n, isNum := v.(float64); !isNum || n < 0 {
+			return key + " must be a non-negative number"
+		}
+	}
+	if v, ok := patch["transcodeHorsepower"]; ok {
+		if _, isNum := v.(float64); !isNum {
+			return "transcodeHorsepower must be a number"
+		}
+	}
+	for _, key := range settingsBoolKeys {
+		v, ok := patch[key]
+		if !ok {
+			continue
+		}
+		if _, isBool := v.(bool); !isBool {
+			return key + " must be a boolean"
+		}
+	}
+	if v, ok := patch["remoteHttps"]; ok {
+		if _, isStr := v.(string); !isStr {
+			return "remoteHttps must be a string"
+		}
+	}
+	if v, ok := patch["transcodeProfile"]; ok && v != nil {
+		if _, isStr := v.(string); !isStr {
+			return "transcodeProfile must be a string or null"
+		}
+	}
+	return ""
+}
+
 // @Summary  Get or update server settings
 // @Tags     Settings
 // @Accept   json
@@ -967,9 +1164,19 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var patch map[string]any
 		if r.Body != nil {
-			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&patch)
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&patch); err != nil && !errors.Is(err, io.EOF) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body: " + err.Error()})
+				return
+			}
 		}
 		if patch != nil {
+			if msg := validateSettingsPatch(patch); msg != "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
+				return
+			}
+			for _, key := range settingsReadOnlyKeys {
+				delete(patch, key)
+			}
 			s.ss.Extend(patch)
 			if err := s.ss.Save(); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -1271,18 +1478,6 @@ func hexDecode(s string) ([]byte, error) {
 	return hex.DecodeString(strings.TrimSpace(s))
 }
 
-func httpGet(u string) ([]byte, error) {
-	resp, err := getClient.Get(u)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: status %d", u, resp.StatusCode)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-}
-
 func mimeByName(name string) string {
 	// Find the dot first on the original string, then lowercase only the
 	// extension — avoids lowercasing the entire filename path (smaller alloc).
@@ -1469,20 +1664,6 @@ var streamBufPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, 256<<10)
 		return &buf
-	},
-}
-
-// getClient is shared across all httpGet calls so TCP connections are reused.
-// DialContext blocks the cloud-metadata address (169.254.169.254) for all
-// /create-style outbound fetches (archive/nzb), matching proxyClient/
-// blobClient above and ftpstream's httpGuardedClient.
-var getClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: 10 * time.Second,
-			Control: netguard.DialControl(false),
-		}).DialContext,
 	},
 }
 

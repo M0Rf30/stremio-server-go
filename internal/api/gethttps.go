@@ -60,8 +60,8 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 
 	// Hot-swap the live HTTPS listener so the freshly installed cert takes effect
 	// immediately, with no restart. No-op until cmd wires the reload hook.
-	if s.certReload != nil {
-		s.certReload()
+	if p := s.certReload.Load(); p != nil {
+		(*p)()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -73,4 +73,4 @@ func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 
 // SetCertReloadHook registers a callback invoked after /get-https installs a new
 // certificate, so the running HTTPS listener can hot-swap it without a restart.
-func (s *server) SetCertReloadHook(fn func()) { s.certReload = fn }
+func (s *server) SetCertReloadHook(fn func()) { s.certReload.Store(&fn) }

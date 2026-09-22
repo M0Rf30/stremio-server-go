@@ -373,10 +373,11 @@ func TestSetCertReloadHook(t *testing.T) {
 	s := &server{}
 	called := false
 	s.SetCertReloadHook(func() { called = true })
-	if s.certReload == nil {
+	p := s.certReload.Load()
+	if p == nil {
 		t.Fatal("certReload should be non-nil after SetCertReloadHook")
 	}
-	s.certReload()
+	(*p)()
 	if !called {
 		t.Error("hook was not called")
 	}
