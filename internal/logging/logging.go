@@ -14,6 +14,7 @@
 package logging
 
 import (
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -24,9 +25,15 @@ import (
 const componentKey = "component"
 
 // Setup configures the process-wide slog default logger from the environment.
-// It is safe to call once, early in startup, before any logging occurs.
-func Setup() {
-	slog.SetDefault(slog.New(newHandler(os.Stderr, levelFromEnv(), formatFromEnv())))
+// It is safe to call once, early in startup, before any logging occurs, and
+// safe to call again on a later restart (e.g. library mode's Start after a
+// prior Stop) — it always installs a brand-new handler over the given writer.
+// w == nil defaults to os.Stderr.
+func Setup(w io.Writer) {
+	if w == nil {
+		w = os.Stderr
+	}
+	slog.SetDefault(slog.New(newHandler(w, levelFromEnv(), formatFromEnv())))
 }
 
 // For returns a logger tagged with the given component name. The component is
@@ -34,13 +41,6 @@ func Setup() {
 // the JSON handler.
 func For(component string) *slog.Logger {
 	return slog.Default().With(componentKey, component)
-}
-
-// Fatal logs msg at error level with the given key=value args, then exits the
-// process with status 1. It is the structured replacement for log.Fatalf.
-func Fatal(msg string, args ...any) {
-	slog.Default().Error(msg, args...)
-	os.Exit(1)
 }
 
 func levelFromEnv() slog.Level {
@@ -71,7 +71,7 @@ func formatFromEnv() format {
 }
 
 // newHandler builds the slog.Handler for the requested format and level.
-func newHandler(w *os.File, level slog.Level, f format) slog.Handler {
+func newHandler(w io.Writer, level slog.Level, f format) slog.Handler {
 	if f == formatJSON {
 		return slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
 	}
