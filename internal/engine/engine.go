@@ -1008,7 +1008,6 @@ func (e *engine) warmMoov(idx int) {
 	}
 	f := files[idx]
 	const minWarmSize int64 = 16 << 20 // ignore subtitles/samples/tiny files
-	const tailWindow int64 = 8 << 20   // covers the moov atom of typical videos
 	if f.Length() < minWarmSize {
 		return
 	}
@@ -1020,8 +1019,8 @@ func (e *engine) warmMoov(idx int) {
 		}
 		r := f.NewReader()
 		defer func() { _ = r.Close() }()
-		r.SetReadahead(tailWindow)
-		off := f.Length() - tailWindow
+		r.SetReadahead(tailWindowBytes)
+		off := f.Length() - tailWindowBytes
 		if off < 0 {
 			off = 0
 		}
@@ -1591,14 +1590,84 @@ func applyBoundaryPriorities(e *engine) {
 	})
 }
 
-// primeBoundary raises piece priority on the first and last boundaryPieces pieces
-// of file idx — the container header (MP4 moov atom / codec-init box) and trailer
-// — so the player can parse the file and begin playback long before it is fully
-// downloaded. It runs at most once per file (guarded by e.primed) and requires
-// metadata to be available. Unlike the one-shot GuessFileIdx priming, this is also
-// called from NewReader for the file the client actually requested — essential for
-// multi-file torrents/packs where the played file is not the largest one, whose
-// header would otherwise never be prioritized and playback would never start.
+// Boundary priming windows: byte ranges (not fixed piece counts) at the head
+// and tail of the streamed file — see primeBoundary for why these are
+// narrow (≈1 piece each at the default 16 MiB piece length) rather than the
+// previous fixed 8-piece windows. tailWindowBytes also bounds warmMoov's
+// dedicated tail read, so the two mechanisms agree on how much trailer data
+// "the moov" means.
+const (
+	headWindowBytes int64 = 4 << 20 // 4 MiB: reaches ftyp/moov (faststart) or codec-init box
+	tailWindowBytes int64 = 8 << 20 // 8 MiB: covers moov-at-end MP4 / MKV Cues+Tags trailer
+)
+
+// piecesForBytes returns the number of pieceLen-sized pieces needed to cover
+// n bytes, rounded up, floored at 1 (n<=0 or pieceLen<=0 also yields 1 —
+// defensive; real torrents have positive lengths once metadata is ready).
+func piecesForBytes(n, pieceLen int64) int {
+	if pieceLen <= 0 || n <= 0 {
+		return 1
+	}
+	p := int((n + pieceLen - 1) / pieceLen)
+	if p < 1 {
+		p = 1
+	}
+	return p
+}
+
+// primeBoundaryRange computes the piece sub-ranges primeBoundary marks
+// PiecePriorityNow: [begin,headEnd) covers headBytes at the front of the
+// file's piece range [begin,end), and [tailBegin,end) covers tailBytes at
+// the back. The two ranges may overlap on files with fewer than
+// piecesForBytes(headBytes)+piecesForBytes(tailBytes) total pieces —
+// harmless, since re-applying PiecePriorityNow to an already-Now piece is
+// idempotent. Pulled out as a pure function so the piece math is
+// unit-testable without a live torrent.Torrent.
+func primeBoundaryRange(begin, end int, pieceLen, headBytes, tailBytes int64) (headEnd, tailBegin int) {
+	if end <= begin {
+		return begin, begin
+	}
+	headEnd = begin + piecesForBytes(headBytes, pieceLen)
+	if headEnd > end {
+		headEnd = end
+	}
+	tailBegin = end - piecesForBytes(tailBytes, pieceLen)
+	if tailBegin < begin {
+		tailBegin = begin
+	}
+	return headEnd, tailBegin
+}
+
+// primeBoundary raises piece priority on the pieces covering the first
+// headWindowBytes and last tailWindowBytes of file idx — the container
+// header (MP4 moov atom / codec-init box) and trailer — so the player can
+// parse the file and begin playback long before it is fully downloaded. It
+// runs at most once per file (guarded by e.primed) and requires metadata to
+// be available. Unlike the one-shot GuessFileIdx priming, this is also
+// called from NewReader for the file the client actually requested —
+// essential for multi-file torrents/packs where the played file is not the
+// largest one, whose header would otherwise never be prioritized and
+// playback would never start.
+//
+// Deliberately byte-windowed (≈1 piece head + ≈1 piece tail at the default
+// 16 MiB piece length) instead of a fixed piece count, and deliberately NOT
+// extended to further head pieces: anacrolix's Piece.purePriority() (see
+// piece.go in the module cache) already raises the reader's OWN current
+// piece to PiecePriorityNow and its whole live readahead window to
+// PiecePriorityReadahead automatically (Torrent.updateReaderPieces, driven
+// by pinnedReader's growing SetReadahead calls) — see
+// internal/request-strategy/order.go, which orders same-priority pieces
+// partial -> rarest -> index with no further tie-break. The previous 8-piece
+// head window (up to ~128 MiB at 16 MiB pieces) put many explicitly-pinned
+// Now pieces at the SAME priority tier as the reader's current piece; on a
+// thin swarm the tie-break could serve one of those instead, starving the
+// actual read and stalling playback (Kodi/Rivulet's curllowspeedtime=20s
+// then aborts). Priming only the true header/trailer bytes keeps just those
+// two small windows at Now, so the reader's current piece never has to share
+// the top priority tier with unrelated pinned pieces; everything else in the
+// head is left to the reader's own dynamically-growing readahead window
+// (already Readahead priority, strictly below Now) instead of being pinned
+// here at Now.
 func (e *engine) primeBoundary(idx int) {
 	if idx < 0 || !e.hasInfo() {
 		return
@@ -1621,18 +1690,21 @@ func (e *engine) primeBoundary(idx int) {
 	f := files[idx]
 	begin := f.BeginPieceIndex()
 	end := f.EndPieceIndex() // exclusive
-	const boundaryPieces = 8 // ~8 pieces × piece_length ≈ several MiB
-	for i := begin; i < begin+boundaryPieces && i < end; i++ {
+	info := e.t.Info()
+	if info == nil {
+		return
+	}
+	headEnd, tailBegin := primeBoundaryRange(begin, end, info.PieceLength, headWindowBytes, tailWindowBytes)
+	for i := begin; i < headEnd; i++ {
 		e.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
 	}
-	tailStart := end - boundaryPieces
-	if tailStart < begin {
-		tailStart = begin // file has fewer than 2×boundaryPieces pieces
-	}
-	for i := tailStart; i < end; i++ {
+	for i := tailBegin; i < end; i++ {
 		e.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
 	}
-	logging.For("engine").Debug("boundary-prioritized pieces", "info_hash", e.infoHash, "file_idx", idx, "begin", begin, "end", end, "head", min(boundaryPieces, end-begin), "tail", min(boundaryPieces, end-tailStart))
+	logging.For("engine").Debug("boundary-prioritized pieces", "info_hash", e.infoHash, "file_idx", idx,
+		"begin", begin, "end", end,
+		"head_bytes", headWindowBytes, "head_pieces", headEnd-begin,
+		"tail_bytes", tailWindowBytes, "tail_pieces", end-tailBegin)
 }
 
 // peerBudget derives the anacrolix per-torrent connection budget from a single
