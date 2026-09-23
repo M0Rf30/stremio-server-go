@@ -191,21 +191,28 @@ archives:
   - id: default
     ids:
       - stremio-server
-      - stremio-server-android
-      - stremio-server-android-arm
-      - stremio-server-android-lib
-      - stremio-server-android-arm-lib
     formats: tar.gz
     format_overrides:
       - goos: windows
         formats: zip
-    name_template: >-
+    name_template: &archive_name >-
       stremio-server_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
+  # Android archives carry two artifacts (executable + libstremio-server.so);
+  # goreleaser requires a constant binary count per archive group, so they
+  # get their own group with the same naming.
+  - id: android
+    ids:
+      - stremio-server-android
+      - stremio-server-android-arm
+      - stremio-server-android-lib
+      - stremio-server-android-arm-lib
+    formats: tar.gz
+    name_template: *archive_name
 
 checksum:
   name_template: "checksums.txt"
