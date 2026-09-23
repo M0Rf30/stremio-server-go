@@ -215,6 +215,25 @@ against bionic's real resolver instead (`-ldflags=-checklinkname=0` is also
 needed for `github.com/wlynxg/anet` on Go 1.23+). `android/arm64` also runs
 as a plain `linux/arm64` binary under Termux.
 
+### Library mode (`libstremio-server.so`)
+
+Android 10+ denies `exec()` of files an app downloaded into its own data
+directory (SELinux W^X for targetSdk ≥ 29, i.e. Kodi 19+), but still allows
+`dlopen()` of them. `cmd/libstremio` therefore builds the same server with
+`-buildmode=c-shared` for `android/{arm64,armv7}` (`make lib-android`; shipped
+inside the Android release archives next to the executable). Exports:
+
+```c
+int   ServerStart(char* logPath, char* envJSON); /* blocks until stopped; 0 ok, 1 init error, 2 already running */
+int   ServerStop(void);                          /* graceful, safe when idle */
+char* ServerVersion(void);                       /* static, do not free */
+```
+
+`envJSON` is an object of the same environment variables the executable reads.
+Start may be called again after Stop. The library never installs signal
+handlers or calls `os.Exit`; Go cannot unload it (golang/go#11100), so load it
+once per process. `scripts/libstremio_smoke.py` exercises it through ctypes.
+
 ## Layout
 
 | Path | Responsibility |
