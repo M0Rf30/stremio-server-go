@@ -122,6 +122,62 @@ builds:
     goarm:
       - "7"
 
+  # libstremio-server.so (arm64) — c-shared build of the exact same server
+  # for SELinux-enforcing Android hosts where a Kodi addon's shell can
+  # dlopen() a .so dropped next to its own native libs but is blocked from
+  # exec()'ing a bundled executable (see cmd/libstremio). Shipped inside the
+  # same archive as stremio-server-android (below), next to the executable.
+  #
+  # Same CC/CXX/-static-libstdc++ requirement as stremio-server-android
+  # above, but deliberately WITHOUT -pie: cmd/link already passes -shared
+  # for buildmode=c-shared, and some gcc/clang frontends misinterpret
+  # "-shared -pie" together and pull in the executable startup object
+  # (Scrt1.o, which wants a `main` symbol a .so doesn't export as an entry
+  # point), failing the link. -pie is an executable-only concern; a shared
+  # object is already position-independent code.
+  - id: stremio-server-android-lib
+    main: ./cmd/libstremio
+    binary: libstremio-server
+    buildmode: c-shared
+    env:
+      - CGO_ENABLED=1
+      - CC={{ .Env.ANDROID_ARM64_CC }}
+      - CXX={{ .Env.ANDROID_ARM64_CXX }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -checklinkname=0
+      - -linkmode=external
+      - '-extldflags "-lm -static-libstdc++"'
+    goos:
+      - android
+    goarch:
+      - arm64
+
+  # libstremio-server.so (32-bit armv7) — same rationale as
+  # stremio-server-android-lib above, matching stremio-server-android-arm's
+  # target ABI.
+  - id: stremio-server-android-arm-lib
+    main: ./cmd/libstremio
+    binary: libstremio-server
+    buildmode: c-shared
+    env:
+      - CGO_ENABLED=1
+      - CC={{ .Env.ANDROID_ARM_CC }}
+      - CXX={{ .Env.ANDROID_ARM_CXX }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -checklinkname=0
+      - -linkmode=external
+      - '-extldflags "-lm -static-libstdc++"'
+    goos:
+      - android
+    goarch:
+      - arm
+    goarm:
+      - "7"
+
 upx:
   # Linux only: macOS Gatekeeper rejects upx-packed Mach-O, and upx on
   # android can break the loader.
@@ -137,6 +193,8 @@ archives:
       - stremio-server
       - stremio-server-android
       - stremio-server-android-arm
+      - stremio-server-android-lib
+      - stremio-server-android-arm-lib
     formats: tar.gz
     format_overrides:
       - goos: windows
