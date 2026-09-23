@@ -465,7 +465,8 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 				logging.For(name).Error("recovered from panic during shutdown", "panic", r)
 			}
 		}()
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// ctx is already cancelled here; drain on a detached deadline.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if err := s.Shutdown(sctx); err != nil {
 			logging.For(name).Error("shutdown error", "err", err)
