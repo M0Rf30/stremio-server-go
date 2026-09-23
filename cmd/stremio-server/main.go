@@ -358,6 +358,48 @@ func main() {
 		})
 	}
 
+	// Wire the live peer-discovery soft limit from settings, same structural-
+	// assertion pattern as SetLimitFn above.
+	//   • btDownloadSpeedSoftLimit: 0 = disabled; positive = bytes/sec threshold
+	//     above which peer discovery pauses once btMinPeersForStable peers are
+	//     already connected (official semantics: NOT a throughput cap — see
+	//     engine.SetSoftLimitFn).
+	//   • btMinPeersForStable: minimum connected peers required before the
+	//     soft limit is allowed to pause discovery.
+	if l, ok := em.(interface {
+		SetSoftLimitFn(func() (int64, int))
+	}); ok {
+		l.SetSoftLimitFn(func() (int64, int) {
+			var soft int64
+			switch n := ss.Get("btDownloadSpeedSoftLimit").(type) {
+			case float64:
+				if n > 0 {
+					soft = int64(n)
+				}
+			case int:
+				if n > 0 {
+					soft = int64(n)
+				}
+			case int64:
+				if n > 0 {
+					soft = n
+				}
+			}
+
+			minPeers := 0
+			switch n := ss.Get("btMinPeersForStable").(type) {
+			case float64:
+				minPeers = int(n)
+			case int:
+				minPeers = n
+			case int64:
+				minPeers = int(n)
+			}
+
+			return soft, minPeers
+		})
+	}
+
 	baseLocal := fmt.Sprintf("http://127.0.0.1:%d", cfg.HTTPPort)
 	prober := media.New(baseLocal)
 

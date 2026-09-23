@@ -77,6 +77,14 @@ type engine struct {
 	prefetched       map[int]struct{} // source file idx -> next-file boundary already prefetched (once each)
 	onceMetaPriority sync.Once        // ensures boundary-piece prioritization runs exactly once
 
+	// Soft-limit peer-discovery pause state (see manager.SetSoftLimitFn /
+	// enforceSoftLimit). softSample is a dedicated bandwidth checkpoint,
+	// independent of `last` (used by the public Stats() speed calc), so the
+	// 5 s enforcement tick gets an accurate delta regardless of how often
+	// Stats() is polled by clients.
+	softSample speedSample
+	softPaused bool
+
 	// uploadBlocked records whether the seed-ratio enforcer has currently
 	// paused uploading for this torrent, so enforceSeedRatio only calls into
 	// anacrolix (and logs) on an actual state transition rather than every tick.
@@ -153,6 +161,20 @@ type manager struct {
 	done      chan struct{}      // closed by Close() to stop background goroutines
 	closeOnce sync.Once          // ensures done is closed exactly once (idempotent Close)
 	limitOnce sync.Once          // ensures SetLimitFn goroutine is started at most once
+
+	// limitMu guards limitFn and softLimitFn below, read once per tick by the
+	// shared background goroutine started by SetLimitFn/SetSoftLimitFn (see
+	// limitOnce/startLimitLoop).
+	limitMu     sync.Mutex
+	limitFn     func() (downBytesPerSec, upBytesPerSec int64)
+	softLimitFn func() (softLimitBytesPerSec int64, minPeersForStable int)
+
+	// establishedConnsPerTorrent is the configured per-torrent connection
+	// budget (see peerBudget / cc.EstablishedConnsPerTorrent in New). It is
+	// the value the soft-limit enforcer (enforceSoftLimit) restores a
+	// torrent to once its download speed drops back below
+	// btDownloadSpeedSoftLimit.
+	establishedConnsPerTorrent int
 
 	// refetching dedupes in-flight VerifyData re-downloads of evicted in-RAM
 	// pieces, keyed by refetchKey. Only exercised when the in-RAM cache is on.
@@ -309,14 +331,15 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	}
 
 	m := &manager{
-		client:      client,
-		cfg:         cfg,
-		downLimiter: downLimiter,
-		upLimiter:   upLimiter,
-		engines:     make(map[string]*engine),
-		done:        done,
-		memStorage:  memStorageCloser,
-		purging:     make(map[string]chan struct{}),
+		client:                     client,
+		cfg:                        cfg,
+		downLimiter:                downLimiter,
+		upLimiter:                  upLimiter,
+		engines:                    make(map[string]*engine),
+		done:                       done,
+		memStorage:                 memStorageCloser,
+		purging:                    make(map[string]chan struct{}),
+		establishedConnsPerTorrent: est,
 	}
 	// Wire the evicted-piece re-download hook now that the manager (and its
 	// engine map) exists. No torrents are added until EnsureEngine, so this is
@@ -560,30 +583,79 @@ func (m *manager) StartJanitor(cacheSizeFn func() int64) {
 	}()
 }
 
+// applyRateLimit sets limiter's rate/burst from n bytes/sec (0 or negative
+// means unlimited). Burst must be at least as large as the biggest single
+// Read/Write the underlying layer performs: for download that's ~1 MiB
+// (HTTP/2 frame); for upload the peer-request chunk is 16 KiB. Both get
+// generous headroom.
+func applyRateLimit(limiter *rate.Limiter, n int64, isUpload bool) {
+	if n <= 0 {
+		// 0 or negative → unlimited
+		limiter.SetLimit(rate.Inf)
+		limiter.SetBurst(1 << 22) // 4 MiB
+		return
+	}
+	limiter.SetLimit(rate.Limit(n))
+	burst := int(min(max(n, 1<<20), math.MaxInt32))
+	if isUpload {
+		burst = int(min(max(n, 1<<17), math.MaxInt32)) // 128 KiB floor for upload
+	}
+	limiter.SetBurst(burst)
+}
+
 // SetLimitFn wires live download/upload bandwidth limits from a settings getter.
 // fn returns (downBytesPerSec, upBytesPerSec); 0 = unlimited, positive = cap in bytes/sec.
 // For upload, callers should return 1 to indicate "effectively disabled" when seeding
 // is turned off — this keeps the burst valid while making actual seeding negligible.
-// A background goroutine (stopped on Close) polls fn every 5 s and adjusts the
-// rate.Limiter instances that were baked into the anacrolix ClientConfig at startup.
+// Applied on the same 5 s background goroutine as SetSoftLimitFn (started at
+// most once by whichever setter runs first — see startLimitLoop/limitOnce).
 func (m *manager) SetLimitFn(fn func() (downBytesPerSec, upBytesPerSec int64)) {
-	applyLimit := func(limiter *rate.Limiter, n int64, isUpload bool) {
-		if n <= 0 {
-			// 0 or negative → unlimited
-			limiter.SetLimit(rate.Inf)
-			limiter.SetBurst(1 << 22) // 4 MiB
-		} else {
-			limiter.SetLimit(rate.Limit(n))
-			// Burst must be at least as large as the biggest single Read/Write the
-			// underlying layer performs. For download that's ~1 MiB (HTTP/2 frame);
-			// for upload the peer-request chunk is 16 KiB. Provide headroom.
-			burst := int(min(max(n, 1<<20), math.MaxInt32))
-			if isUpload {
-				burst = int(min(max(n, 1<<17), math.MaxInt32)) // 128 KiB floor for upload
-			}
-			limiter.SetBurst(burst)
-		}
-	}
+	m.limitMu.Lock()
+	m.limitFn = fn
+	m.limitMu.Unlock()
+	m.startLimitLoop()
+}
+
+// SetSoftLimitFn wires the live peer-discovery soft-limit decision from a
+// settings getter. fn returns (btDownloadSpeedSoftLimit bytes/sec,
+// btMinPeersForStable); softLimitBytesPerSec<=0 disables the feature (and
+// releases any pause a previously-set, positive limit applied).
+//
+// Official semantics (blog.stremio.com/modify-bittorrent-settings):
+// btDownloadSpeedSoftLimit is NOT a throughput cap — that's
+// btDownloadSpeedHardLimit (SetLimitFn), a hard bytes/sec ceiling enforced by
+// the rate limiter. The soft limit instead stops the client from searching
+// for *additional* peers once a torrent is already downloading at or above
+// the soft limit AND has at least btMinPeersForStable peers connected: the
+// existing peers are proven enough to sustain that speed, so spending more
+// CPU/bandwidth on DHT/tracker/PEX discovery for that torrent is wasted. It
+// resumes discovery the moment speed drops back below the limit (e.g. a peer
+// disconnects).
+//
+// anacrolix/torrent has no direct "pause new peer search" toggle — DHT
+// announces and tracker scrapes are client-wide, not per-torrent, and
+// Torrent.AllowDataDownload/DisallowDataDownload gate *accepting piece
+// data*, not peer acquisition (the wrong knob: it would stall the transfer
+// instead of just capping discovery). The closest safe, per-torrent knob is
+// Torrent.SetMaxEstablishedConns: wantIncomingConns/wantOutgoingConns (and
+// therefore openNewConns) gate purely on `len(conns) < maxEstablishedConns`,
+// so clamping it to the torrent's current established connection count stops
+// new peers from being taken on without dropping any already-open
+// connection; raising it back to the configured per-torrent budget
+// (establishedConnsPerTorrent, from peerBudget) resumes discovery. See
+// engine.enforceSoftLimit.
+func (m *manager) SetSoftLimitFn(fn func() (softLimitBytesPerSec int64, minPeersForStable int)) {
+	m.limitMu.Lock()
+	m.softLimitFn = fn
+	m.limitMu.Unlock()
+	m.startLimitLoop()
+}
+
+// startLimitLoop launches the shared 5 s background goroutine (stopped on
+// Close) that applies both the bandwidth rate limits (SetLimitFn) and the
+// peer-discovery soft limit (SetSoftLimitFn), whichever are set. Idempotent:
+// only the first call, from whichever setter runs first, starts it.
+func (m *manager) startLimitLoop() {
 	m.limitOnce.Do(func() {
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
@@ -591,15 +663,104 @@ func (m *manager) SetLimitFn(fn func() (downBytesPerSec, upBytesPerSec int64)) {
 			for {
 				select {
 				case <-ticker.C:
-					down, up := fn()
-					applyLimit(m.downLimiter, down, false)
-					applyLimit(m.upLimiter, up, true)
+					m.applyLimits()
 				case <-m.done:
 					return
 				}
 			}
 		}()
 	})
+}
+
+// applyLimits runs one tick of both live-settings passes: global bandwidth
+// rate limits, and, per live torrent, the peer-discovery soft limit.
+func (m *manager) applyLimits() {
+	m.limitMu.Lock()
+	limitFn := m.limitFn
+	softLimitFn := m.softLimitFn
+	m.limitMu.Unlock()
+
+	if limitFn != nil {
+		down, up := limitFn()
+		applyRateLimit(m.downLimiter, down, false)
+		applyRateLimit(m.upLimiter, up, true)
+	}
+
+	if softLimitFn != nil {
+		soft, minPeers := softLimitFn()
+		m.mu.RLock()
+		engines := make([]*engine, 0, len(m.engines))
+		for _, e := range m.engines {
+			engines = append(engines, e)
+		}
+		m.mu.RUnlock()
+		for _, e := range engines {
+			e.enforceSoftLimit(soft, minPeers, m.establishedConnsPerTorrent)
+		}
+	}
+}
+
+// softLimitDecision reports whether peer discovery should be paused for a
+// torrent currently downloading at speedBytesPerSec with connectedPeers
+// established connections, given the configured soft limit and the minimum
+// peer count for the "stable" threshold. See SetSoftLimitFn for the full
+// semantics. softLimitBytesPerSec<=0 always returns false (feature off).
+func softLimitDecision(speedBytesPerSec float64, softLimitBytesPerSec int64, connectedPeers, minPeersForStable int) bool {
+	if softLimitBytesPerSec <= 0 {
+		return false
+	}
+	return speedBytesPerSec >= float64(softLimitBytesPerSec) && connectedPeers >= minPeersForStable
+}
+
+// enforceSoftLimit applies one tick of the btDownloadSpeedSoftLimit decision
+// (see manager.SetSoftLimitFn) to this torrent: pauses peer discovery
+// (clamping SetMaxEstablishedConns to the current connection count) once the
+// torrent is already sustaining softLimitBytesPerSec with minPeers peers
+// connected, and restores establishedConnsPerTorrent (the configured budget)
+// once it drops back below. Only calls into anacrolix on an actual state
+// transition (mirrors applySeedRatio), so a steady-state torrent isn't
+// re-clamped every 5 s.
+func (e *engine) enforceSoftLimit(softLimitBytesPerSec int64, minPeers, establishedConnsPerTorrent int) {
+	ts := e.t.Stats()
+	dl := ts.BytesReadData.Int64()
+	now := time.Now()
+
+	e.mu.Lock()
+	var speed float64
+	if !e.softSample.at.IsZero() {
+		if dt := now.Sub(e.softSample.at).Seconds(); dt > 0 {
+			speed = float64(dl-e.softSample.downloaded) / dt
+		}
+	}
+	e.softSample = speedSample{at: now, downloaded: dl}
+	wasPaused := e.softPaused
+	e.mu.Unlock()
+
+	if speed < 0 {
+		speed = 0
+	}
+	connectedPeers := ts.ActivePeers
+	wantPaused := softLimitDecision(speed, softLimitBytesPerSec, connectedPeers, minPeers)
+	if wantPaused == wasPaused {
+		return
+	}
+
+	if wantPaused {
+		e.t.SetMaxEstablishedConns(connectedPeers)
+		logging.For("engine").Debug("soft-limit: pausing peer discovery", "info_hash", e.infoHash,
+			"speed_bytes", int64(speed), "peers", connectedPeers, "soft_limit_bytes", softLimitBytesPerSec)
+	} else {
+		if establishedConnsPerTorrent <= 0 {
+			establishedConnsPerTorrent = 50 // matches peerBudget's own default fallback
+		}
+		e.t.SetMaxEstablishedConns(establishedConnsPerTorrent)
+		logging.For("engine").Debug("soft-limit: resuming peer discovery", "info_hash", e.infoHash,
+			"speed_bytes", int64(speed), "peers", connectedPeers, "max_conns", establishedConnsPerTorrent)
+	}
+
+	e.mu.Lock()
+	e.softPaused = wantPaused
+	e.mu.Unlock()
 }
 
 // evict enforces the cache budget returned by cacheSizeFn. Contract:
