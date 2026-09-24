@@ -60,6 +60,11 @@ jobs:
         run: CGO_ENABLED=0 go build -v ./...
       - name: Test
         run: go test -p 1 -race ./...
+      # 32-bit guard: android/arm and linux/arm must use classic file I/O, or
+      # torrents with files of 4 GiB or more cannot be written (see
+      # internal/earlyenv). GOARCH=386 runs natively on the amd64 runner.
+      - name: Test (32-bit)
+        run: GOARCH=386 CGO_ENABLED=0 go test ./internal/earlyenv/ ./internal/engine/
 
   build:
     name: Cross-build ${{ matrix.goos }}/${{ matrix.goarch }}

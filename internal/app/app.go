@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/M0Rf30/stremio-server-go/internal/api"
+	"github.com/M0Rf30/stremio-server-go/internal/earlyenv"
 	"github.com/M0Rf30/stremio-server-go/internal/engine"
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/media"
@@ -70,6 +71,9 @@ func safeGo(component string, fn func()) {
 // defaults to os.Stderr.
 func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	logging.Setup(logw)
+	if earlyenv.Applied {
+		logging.For("engine").Info("32-bit build: using classic file I/O for torrent storage (mmap cannot map files of 4 GiB or more)")
+	}
 
 	lookup := cfg.Lookup
 	if lookup == nil {
