@@ -32,11 +32,11 @@ import (
 func newTestHLSManager(t *testing.T) *hlsManager {
 	t.Helper()
 	return &hlsManager{
-		base:         t.TempDir(),
-		sessions:     map[string]*hlsSession{},
-		probeCache:   map[string]probeCacheEntry{},
-		transcodeSem: make(chan struct{}, 1),
-		stopCh:       make(chan struct{}),
+		base:       t.TempDir(),
+		cfg:        DefaultHLSConfig().normalize(1),
+		sessions:   map[string]*hlsSession{},
+		probeCache: map[string]probeCacheEntry{},
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -341,7 +341,7 @@ func TestHLSManagerEvictIdle(t *testing.T) {
 	dirExpired := filepath.Join(m.base, "expired")
 	_ = os.MkdirAll(dirExpired, 0o755)
 	sessExpired := &hlsSession{dir: dirExpired, segLocks: map[string]*sync.Mutex{}}
-	sessExpired.lastAccess.Store(time.Now().Add(-2 * sessionTTL).UnixNano())
+	sessExpired.lastAccess.Store(time.Now().Add(-2 * m.cfg.SessionTTL).UnixNano())
 
 	// Fresh session: just accessed.
 	dirFresh := filepath.Join(m.base, "fresh")
@@ -392,7 +392,7 @@ func TestHLSManagerEvictIdleSkipsInFlight(t *testing.T) {
 	sess := &hlsSession{dir: dir, segLocks: map[string]*sync.Mutex{}}
 	// lastAccess is already well past sessionTTL, as it would be for a real
 	// segment transcode that has been running for minutes.
-	sess.lastAccess.Store(time.Now().Add(-2 * sessionTTL).UnixNano())
+	sess.lastAccess.Store(time.Now().Add(-2 * m.cfg.SessionTTL).UnixNano())
 	sess.inFlight.Add(1) // simulates an HLSFile call still executing
 
 	m.mu.Lock()
@@ -503,7 +503,7 @@ func TestHLSManagerCloseHLSRemovesBaseDir(t *testing.T) {
 // newHLSBaseDir directly rather than newHLS, which shells out to ffmpeg to
 // probe encoders.
 func TestNewHLSBaseDirIsPrivate(t *testing.T) {
-	base := newHLSBaseDir()
+	base := newHLSBaseDir("")
 	defer os.RemoveAll(base)
 
 	if filepath.Base(base) == "stremio-hls" {

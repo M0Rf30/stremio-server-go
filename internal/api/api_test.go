@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
@@ -191,9 +192,10 @@ func testEngine() *fakeEngine {
 func newHandler(t *testing.T, engines ...*fakeEngine) http.Handler {
 	t.Helper()
 	cfg := types.Config{
-		HTTPPort:   11470,
-		WebUI:      "https://web.stremio.com/",
-		EnableDLNA: false,
+		HTTPPort:           11470,
+		WebUI:              "https://web.stremio.com/",
+		EnableDLNA:         false,
+		CreateMetadataWait: 90 * time.Second,
 	}
 	return New(newFakeEM(engines...), &fakeSS{}, &fakeProber{}, cfg)
 }
@@ -204,9 +206,10 @@ func newHandler(t *testing.T, engines ...*fakeEngine) http.Handler {
 func newHandlerWithCfg(t *testing.T, mutate func(*types.Config), engines ...*fakeEngine) http.Handler {
 	t.Helper()
 	cfg := types.Config{
-		HTTPPort:   11470,
-		WebUI:      "https://web.stremio.com/",
-		EnableDLNA: false,
+		HTTPPort:           11470,
+		WebUI:              "https://web.stremio.com/",
+		EnableDLNA:         false,
+		CreateMetadataWait: 90 * time.Second,
 	}
 	if mutate != nil {
 		mutate(&cfg)

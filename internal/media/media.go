@@ -72,14 +72,18 @@ type prober struct {
 	tracksCache map[string]tracksCacheEntry
 }
 
-// New returns a MediaProber backed by system ffprobe/ffmpeg.
-// baseURLLocal should include scheme and host with no trailing slash
-// (e.g. "http://127.0.0.1:11470").
-func New(baseURLLocal string) types.MediaProber {
+// New returns a MediaProber backed by system ffprobe/ffmpeg. baseURLLocal
+// should include scheme and host with no trailing slash (e.g.
+// "http://127.0.0.1:11470"). cfg configures the HLS transcode manager
+// (issue #20; DefaultHLSConfig() reproduces the historical hardcoded
+// defaults). settings is consulted for live /settings overrides at HLS
+// session-creation time — see HLSConfig and effectiveSessionConfig; pass nil
+// to skip /settings integration entirely.
+func New(baseURLLocal string, cfg HLSConfig, settings SettingsSource) types.MediaProber {
 	base := strings.TrimRight(baseURLLocal, "/")
 	return &prober{
 		baseURLLocal: base,
-		hls:          newHLS(base),
+		hls:          newHLS(base, cfg, settings),
 		probeCache:   make(map[string]probeResultEntry), // must be non-nil before first write
 		tracksCache:  make(map[string]tracksCacheEntry), // must be non-nil before first write
 	}

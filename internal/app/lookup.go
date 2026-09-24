@@ -11,8 +11,10 @@ package app
 
 import (
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
@@ -89,6 +91,59 @@ func envBool(lookup Lookup, key string, def bool) bool {
 	default:
 		return true
 	}
+}
+
+// envDuration parses a duration env var. Accepts either a Go duration string
+// (time.ParseDuration, e.g. "90s", "5m30s") or a bare non-negative integer
+// interpreted as whole seconds — matching every historical *_TIMEOUT-style
+// knob in this file (STREMIO_TORRENT_IDLE_TIMEOUT, etc.), which were plain
+// seconds long before any duration-string knob existed. Unset/empty → def.
+// Unparseable or negative → def, with a warning logged.
+func envDuration(lookup Lookup, key string, def time.Duration) time.Duration {
+	v, ok := lookup(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def
+	}
+	v = strings.TrimSpace(v)
+	if d, err := time.ParseDuration(v); err == nil {
+		if d < 0 {
+			logging.For("config").Warn("negative duration env", "key", key, "value", v, "default", def)
+			return def
+		}
+		return d
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		if n < 0 {
+			logging.For("config").Warn("negative duration env", "key", key, "value", v, "default", def)
+			return def
+		}
+		return time.Duration(n) * time.Second
+	}
+	logging.For("config").Warn("invalid duration env", "key", key, "value", v, "default", def)
+	return def
+}
+
+// ffmpegBitrateRe matches the bitrate syntax ffmpeg's -b:v/-maxrate/-bufsize
+// options accept: an integer or decimal number with an optional k/K/m/M/g/G
+// (SI, decimal) suffix, e.g. "8M", "800k", "8000000".
+var ffmpegBitrateRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?[kKmMgG]?$`)
+
+// envBitrate parses an ffmpeg-style bitrate env var (see ffmpegBitrateRe).
+// Unset/empty → def. A value that doesn't match ffmpeg's own bitrate syntax
+// is rejected (with a warning) and def is kept, since it would otherwise
+// only fail much later as an opaque ffmpeg exit-code-1 on the first segment
+// transcode.
+func envBitrate(lookup Lookup, key, def string) string {
+	v, ok := lookup(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def
+	}
+	v = strings.TrimSpace(v)
+	if !ffmpegBitrateRe.MatchString(v) {
+		logging.For("config").Warn("invalid bitrate env", "key", key, "value", v, "default", def)
+		return def
+	}
+	return v
 }
 
 // allowedOrigins parses STREMIO_ALLOWED_ORIGINS (Contract 2 / SEC-1): a

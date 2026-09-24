@@ -103,6 +103,13 @@ type Config struct {
 	// response gets Access-Control-Allow-Origin: *) when
 	// STREMIO_ALLOWED_ORIGINS is exactly "*". Default false.
 	AllowAllOrigins bool
+
+	// CreateMetadataWait bounds how long /create, /{infoHash}/create, and
+	// /{infoHash}/{fileIdx} wait for a newly-added torrent's metadata
+	// (Engine.Ready) before returning 504. STREMIO_CREATE_METADATA_TIMEOUT;
+	// default 90s. Slow-starting torrents/debrid links may need a longer
+	// window than the default.
+	CreateMetadataWait time.Duration
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.
