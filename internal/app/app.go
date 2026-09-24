@@ -134,6 +134,9 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		HTTPLog:           envBool(lookup, "STREMIO_HTTP_LOG", false),                                       // structured access-log line per request
 		AllowedOrigins:    allowedOriginsExtra,                                                              // extra CORS origins (STREMIO_ALLOWED_ORIGINS)
 		AllowAllOrigins:   allowAllOrigins,                                                                  // STREMIO_ALLOWED_ORIGINS="*" => legacy no-check CORS
+		// CreateMetadataWait bounds /create, /{infoHash}/create, and
+		// /{infoHash}/{fileIdx}'s wait for a torrent's metadata (issue #20).
+		CreateMetadataWait: envDuration(lookup, "STREMIO_CREATE_METADATA_TIMEOUT", 90*time.Second),
 	}
 	if tcfg.DisableWebtorrent {
 		logging.For("engine").Info("webtorrent/webrtc peers disabled")
@@ -321,8 +324,46 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		})
 	}
 
-	baseLocal := fmt.Sprintf("http://127.0.0.1:%d", tcfg.HTTPPort)
-	prober := media.New(baseLocal)
+	// BIND_ADDRESS restricts which network interface(s) the HTTP/HTTPS
+	// listeners accept connections on. Empty (default) preserves the
+	// historical all-interfaces behaviour (net.JoinHostPort("", port) ==
+	// ":<port>", i.e. 0.0.0.0 + ::) — not a breaking change. This server has
+	// no authentication by design, so operators on a multi-homed or
+	// publicly-routable host should set this to a loopback or LAN-only
+	// address (e.g. BIND_ADDRESS=127.0.0.1).
+	bindAddr := getenv(lookup, "BIND_ADDRESS", "")
+	wildcardBind := isWildcardBindHost(bindAddr)
+	if wildcardBind {
+		logging.For("http").Warn("no BIND_ADDRESS set; the unauthenticated API is reachable from every network interface", "bind_address", bindAddr)
+	}
+	httpAddr := net.JoinHostPort(bindAddr, strconv.Itoa(tcfg.HTTPPort))
+
+	// Self URL vs BIND_ADDRESS (issue #20): ffmpeg/ffprobe (HLS transcode,
+	// probe, /yt, /proxy self-fetch) always reach this server through
+	// baseLocal, a loopback URL. When BIND_ADDRESS pins the main listener to
+	// a specific non-loopback, non-wildcard interface, nothing listens on
+	// loopback anymore and those self-requests would fail outright. Start a
+	// dedicated loopback listener on 127.0.0.1:HTTP_PORT — same handler,
+	// same ctx-driven shutdown, same recover wrapper as every other listener
+	// below (see loopbackSrv/shutOne) — so ffmpeg/ffprobe keep working; if
+	// that bind itself fails, fall back to reaching the server via the
+	// configured bind address instead and warn loudly. Wildcard/loopback
+	// binds are unaffected — loopback is already reachable either way.
+	loopbackNeeded := !wildcardBind && !isLoopbackAddr(net.JoinHostPort(bindAddr, "0"))
+	var loopbackLn net.Listener
+	selfHost := "127.0.0.1"
+	if loopbackNeeded {
+		loopbackAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(tcfg.HTTPPort))
+		ln, lerr := net.Listen("tcp", loopbackAddr)
+		if lerr != nil {
+			logging.For("http").Warn("BIND_ADDRESS is a non-loopback address and the fallback loopback listener failed to bind; ffmpeg/ffprobe self-requests will use the bind address instead", "bind_address", bindAddr, "loopback_addr", loopbackAddr, "err", lerr)
+			selfHost = bindAddr
+		} else {
+			loopbackLn = ln
+		}
+	}
+	baseLocal := fmt.Sprintf("http://%s", net.JoinHostPort(selfHost, strconv.Itoa(tcfg.HTTPPort)))
+	prober := media.New(baseLocal, hlsConfig(lookup), ss)
 	// prober owns a per-instance background reaper goroutine (and a working
 	// directory) created fresh by media.New on every Run call; close it via
 	// structural assertion on Run exit so a restart never leaks either one.
@@ -332,18 +373,23 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 
 	handler := api.New(em, ss, prober, tcfg)
 
-	// BIND_ADDRESS restricts which network interface(s) the HTTP/HTTPS
-	// listeners accept connections on. Empty (default) preserves the
-	// historical all-interfaces behaviour (net.JoinHostPort("", port) ==
-	// ":<port>", i.e. 0.0.0.0 + ::) — not a breaking change. This server has
-	// no authentication by design, so operators on a multi-homed or
-	// publicly-routable host should set this to a loopback or LAN-only
-	// address (e.g. BIND_ADDRESS=127.0.0.1).
-	bindAddr := getenv(lookup, "BIND_ADDRESS", "")
-	if isWildcardBindHost(bindAddr) {
-		logging.For("http").Warn("no BIND_ADDRESS set; the unauthenticated API is reachable from every network interface", "bind_address", bindAddr)
+	// loopbackSrv serves the fallback loopback listener obtained above, when
+	// one was needed and bound successfully.
+	var loopbackSrv *http.Server
+	if loopbackLn != nil {
+		loopbackSrv = &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		safeGo("http-loopback", func() {
+			logging.For("http-loopback").Info("listening (loopback fallback for BIND_ADDRESS self-requests)", "addr", loopbackLn.Addr().String())
+			if err := loopbackSrv.Serve(loopbackLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logging.For("http-loopback").Error("server error", "err", err)
+			}
+		})
 	}
-	httpAddr := net.JoinHostPort(bindAddr, strconv.Itoa(tcfg.HTTPPort))
 
 	srv := &http.Server{
 		Addr:              httpAddr,
@@ -474,6 +520,10 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	}
 	shutWg.Add(1)
 	go shutOne(srv, "http")
+	if loopbackSrv != nil {
+		shutWg.Add(1)
+		go shutOne(loopbackSrv, "http-loopback")
+	}
 	if tlsSrv != nil {
 		shutWg.Add(1)
 		go shutOne(tlsSrv, "https")
@@ -545,4 +595,57 @@ func isLoopbackAddr(addr string) bool {
 		}
 	}
 	return true
+}
+
+// hlsConfig resolves media.HLSConfig from the process environment (issue
+// #20). Every field mirrors a previously-hardcoded internal/media constant;
+// media.DefaultHLSConfig() values are kept whenever the corresponding env
+// var is unset, so unconfigured output stays byte-identical to before these
+// knobs existed. Live /settings overrides (transcodeMaxBitRate,
+// transcodeMaxWidth, transcodeConcurrency, transcodeHardwareAccel,
+// transcodeProfile) are applied downstream by internal/media at HLS
+// session-creation time — see media.HLSConfig and effectiveSessionConfig.
+func hlsConfig(lookup Lookup) media.HLSConfig {
+	d := media.DefaultHLSConfig()
+	sessionTTL := envDuration(lookup, "STREMIO_HLS_SESSION_TTL", d.SessionTTL)
+	maxWidth := envInt(lookup, "STREMIO_TRANSCODE_MAX_WIDTH", d.MaxWidth)
+	if maxWidth < 0 {
+		logging.For("config").Warn("negative STREMIO_TRANSCODE_MAX_WIDTH", "value", maxWidth, "default", d.MaxWidth)
+		maxWidth = d.MaxWidth
+	}
+	maxHeight := envInt(lookup, "STREMIO_TRANSCODE_MAX_HEIGHT", d.MaxHeight)
+	if maxHeight < 0 {
+		logging.For("config").Warn("negative STREMIO_TRANSCODE_MAX_HEIGHT", "value", maxHeight, "default", d.MaxHeight)
+		maxHeight = d.MaxHeight
+	}
+	return media.HLSConfig{
+		SessionTTL:     sessionTTL,
+		ReaperInterval: envDuration(lookup, "STREMIO_HLS_REAPER_INTERVAL", media.DefaultReaperInterval(sessionTTL)),
+		NegProbeTTL:    envDuration(lookup, "STREMIO_HLS_NEG_PROBE_TTL", d.NegProbeTTL),
+		PosProbeTTL:    envDuration(lookup, "STREMIO_HLS_POS_PROBE_TTL", d.PosProbeTTL),
+		MaxSessions:    envInt(lookup, "STREMIO_HLS_MAX_SESSIONS", d.MaxSessions),
+		WorkDir:        getenv(lookup, "STREMIO_HLS_WORK_DIR", d.WorkDir),
+
+		VideoBitrate: envBitrate(lookup, "STREMIO_TRANSCODE_VIDEO_BITRATE", d.VideoBitrate),
+		VideoMaxrate: envBitrate(lookup, "STREMIO_TRANSCODE_MAXRATE", d.VideoMaxrate),
+		VideoBufsize: envBitrate(lookup, "STREMIO_TRANSCODE_BUFSIZE", d.VideoBufsize),
+		MaxWidth:     maxWidth,
+		MaxHeight:    maxHeight,
+
+		VAAPIQP:     envInt(lookup, "STREMIO_TRANSCODE_VAAPI_QP", d.VAAPIQP),
+		NVENCPreset: getenv(lookup, "STREMIO_TRANSCODE_NVENC_PRESET", d.NVENCPreset),
+		X264Preset:  getenv(lookup, "STREMIO_TRANSCODE_X264_PRESET", d.X264Preset),
+		X264CRF:     envInt(lookup, "STREMIO_TRANSCODE_X264_CRF", d.X264CRF),
+
+		AudioChannels: envInt(lookup, "STREMIO_TRANSCODE_AUDIO_CHANNELS", d.AudioChannels),
+		AudioBitrate:  envBitrate(lookup, "STREMIO_TRANSCODE_AUDIO_BITRATE", d.AudioBitrate),
+
+		// 0 (unset) resolves to runtime.NumCPU() inside newHLS/HLSConfig.normalize.
+		SegmentConcurrency: envInt(lookup, "STREMIO_TRANSCODE_CONCURRENCY", 0),
+		VAAPIDevice:        getenv(lookup, "STREMIO_HLS_VAAPI_DEVICE", d.VAAPIDevice),
+
+		SegmentTimeout:  envDuration(lookup, "STREMIO_HLS_SEGMENT_TIMEOUT", d.SegmentTimeout),
+		SubtitleTimeout: envDuration(lookup, "STREMIO_HLS_SUBTITLE_TIMEOUT", d.SubtitleTimeout),
+		ProbeTimeout:    envDuration(lookup, "STREMIO_HLS_PROBE_TIMEOUT", d.ProbeTimeout),
+	}
 }

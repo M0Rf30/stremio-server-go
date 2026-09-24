@@ -614,7 +614,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	ctx, cancel := withTimeout(r, 90*time.Second)
+	ctx, cancel := withTimeout(r, s.cfg.CreateMetadataWait)
 	defer cancel()
 	if err := eng.Ready(ctx); err != nil {
 		http.Error(w, "timed out waiting for metadata: "+err.Error(), http.StatusGatewayTimeout)
@@ -876,7 +876,7 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request, ih string)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	ctx, cancel := withTimeout(r, 90*time.Second)
+	ctx, cancel := withTimeout(r, s.cfg.CreateMetadataWait)
 	defer cancel()
 	if err := eng.Ready(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusGatewayTimeout)
@@ -965,7 +965,7 @@ func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	ctx, cancel := withTimeout(r, 90*time.Second)
+	ctx, cancel := withTimeout(r, s.cfg.CreateMetadataWait)
 	defer cancel()
 	if err := eng.Ready(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusGatewayTimeout)
