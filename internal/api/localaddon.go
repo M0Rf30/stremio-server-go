@@ -76,12 +76,15 @@ var videoExtsLocal = map[string]bool{
 
 // localMeta describes one scanned video file.
 type localMeta struct {
-	ID       string // primary Stremio id: "tt<imdb>" when resolved, else "local:<sha256hex>"
-	LocalHex string // SHA-256 hex of abs path — stable internal key for cache lookup
-	Name     string // parsed clean title (from filename) or raw stem
-	Path     string // absolute path
-	Type     string // movie | series | other
-	Poster   string // IMDB poster URL; empty until resolved
+	ID        string // primary Stremio id: "tt<imdb>" when resolved, else "local:<sha256hex>"
+	LocalHex  string // SHA-256 hex of abs path — stable internal key for cache lookup
+	Name      string // parsed clean title (from filename) or raw stem
+	Path      string // absolute path
+	Type      string // movie | series | other
+	Poster    string // IMDB poster URL; empty until resolved
+	SeriesKey string // normalized parsed series title; empty for non-series content
+	Season    int
+	Episode   int
 }
 
 // — Filename parsing (mirrors reference server/src/local_addon/parser.rs) —
@@ -103,9 +106,154 @@ var (
 
 // parsedFilename holds the results of filename analysis.
 type parsedFilename struct {
-	name  string // clean title
-	year  int    // 0 if not found
-	ctype string // "movie" | "series" | "other"
+	name    string // clean title
+	year    int    // 0 if not found
+	ctype   string // "movie" | "series" | "other"
+	season  int
+	episode int
+}
+
+func normalizeSeriesKey(name string) string {
+	return strings.ToLower(strings.Join(strings.Fields(name), " "))
+}
+
+func localSeriesID(seriesKey string) string {
+	h := sha256.Sum256([]byte("series:" + seriesKey))
+	return "local:" + hex.EncodeToString(h[:8])
+}
+
+func localSeriesKeyForID(items []localMeta, id string) (string, bool) {
+	for _, m := range items {
+		if m.Type != "series" || m.SeriesKey == "" {
+			continue
+		}
+		if m.ID == id || localSeriesID(m.SeriesKey) == id {
+			return m.SeriesKey, true
+		}
+	}
+	return "", false
+}
+
+func preferredSeriesMeta(items []localMeta, seriesKey string) (localMeta, bool) {
+	var fallback localMeta
+	found := false
+
+	for _, m := range items {
+		if m.Type != "series" || m.SeriesKey != seriesKey {
+			continue
+		}
+		if !found {
+			fallback = m
+			found = true
+		}
+		if strings.HasPrefix(m.ID, "tt") {
+			return m, true
+		}
+	}
+
+	return fallback, found
+}
+
+func dedupeLocalMetas(items []localMeta, catType string) []localMeta {
+	seen := make(map[string]int)
+	out := make([]localMeta, 0, len(items))
+
+	for _, m := range items {
+		if m.Type != catType {
+			continue
+		}
+
+		key := m.ID
+		if m.Type == "series" && m.SeriesKey != "" {
+			key = "series:" + m.SeriesKey
+		}
+
+		if idx, ok := seen[key]; ok {
+			if m.Type == "series" &&
+				strings.HasPrefix(m.ID, "tt") &&
+				!strings.HasPrefix(out[idx].ID, "tt") {
+				out[idx] = m
+			}
+			continue
+		}
+
+		seen[key] = len(out)
+		out = append(out, m)
+	}
+
+	return out
+}
+
+func localSeriesVideos(items []localMeta, id string) []map[string]any {
+	seriesKey, ok := localSeriesKeyForID(items, id)
+	if !ok {
+		return []map[string]any{}
+	}
+
+	videoBaseID := localSeriesID(seriesKey)
+	if preferred, ok := preferredSeriesMeta(items, seriesKey); ok && strings.HasPrefix(preferred.ID, "tt") {
+		videoBaseID = preferred.ID
+	}
+
+	videos := make([]map[string]any, 0)
+	seen := make(map[[2]int]struct{})
+
+	for _, ep := range items {
+		if ep.Type != "series" ||
+			ep.SeriesKey != seriesKey ||
+			ep.Season <= 0 ||
+			ep.Episode <= 0 {
+			continue
+		}
+
+		episodeKey := [2]int{ep.Season, ep.Episode}
+		if _, ok := seen[episodeKey]; ok {
+			continue
+		}
+		seen[episodeKey] = struct{}{}
+
+		videos = append(videos, map[string]any{
+			"id":      fmt.Sprintf("%s:%d:%d", videoBaseID, ep.Season, ep.Episode),
+			"title":   fmt.Sprintf("S%02dE%02d", ep.Season, ep.Episode),
+			"season":  ep.Season,
+			"episode": ep.Episode,
+		})
+	}
+
+	return videos
+}
+
+func localSeriesEpisode(items []localMeta, id string) (localMeta, bool) {
+	parts := strings.Split(id, ":")
+	if len(parts) < 3 {
+		return localMeta{}, false
+	}
+
+	season, err := strconv.Atoi(parts[len(parts)-2])
+	if err != nil {
+		return localMeta{}, false
+	}
+	episode, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return localMeta{}, false
+	}
+
+	baseID := strings.Join(parts[:len(parts)-2], ":")
+	seriesKey, ok := localSeriesKeyForID(items, baseID)
+	if !ok {
+		return localMeta{}, false
+	}
+
+	for _, m := range items {
+		if m.Type == "series" &&
+			m.SeriesKey == seriesKey &&
+			m.Season == season &&
+			m.Episode == episode {
+			return m, true
+		}
+	}
+
+	return localMeta{}, false
 }
 
 // parseFilenameToMeta extracts title, year, and content type from a video
@@ -117,12 +265,16 @@ func parseFilenameToMeta(stem string) parsedFilename {
 	p.ctype = "other"
 
 	// Series detection: SxxExx or 1x02.
-	if m := reFileSeason.FindStringIndex(s); m != nil {
+	if m := reFileSeason.FindStringSubmatchIndex(s); m != nil {
 		p.ctype = "series"
 		p.name = strings.TrimSpace(s[:m[0]])
-	} else if m := reFileAlt.FindStringIndex(s); m != nil {
+		p.season, _ = strconv.Atoi(s[m[2]:m[3]])
+		p.episode, _ = strconv.Atoi(s[m[4]:m[5]])
+	} else if m := reFileAlt.FindStringSubmatchIndex(s); m != nil {
 		p.ctype = "series"
 		p.name = strings.TrimSpace(s[:m[0]])
+		p.season, _ = strconv.Atoi(s[m[2]:m[3]])
+		p.episode, _ = strconv.Atoi(s[m[4]:m[5]])
 	}
 
 	// Extract year.
@@ -466,12 +618,9 @@ func (s *server) localAddonManifest(w http.ResponseWriter, r *http.Request) {
 // localAddonCatalog returns {metas:[{id,type,name,poster?}]} for catType.
 // Entries use tt ids when IMDB-resolved (with poster), else local: ids.
 func (s *server) localAddonCatalog(w http.ResponseWriter, r *http.Request, catType, _ string) {
-	items := scanLocalFilesCached()
+	items := dedupeLocalMetas(scanLocalFilesCached(), catType)
 	metas := make([]map[string]any, 0, len(items))
 	for _, m := range items {
-		if m.Type != catType {
-			continue
-		}
 		entry := map[string]any{
 			"id":   m.ID,
 			"type": m.Type,
@@ -500,7 +649,20 @@ func (s *server) localAddonMeta(w http.ResponseWriter, r *http.Request, _, id st
 		if m.Poster != "" {
 			entry["poster"] = m.Poster
 		}
+		if m.Type == "series" {
+			entry["videos"] = localSeriesVideos(items, resolvedID)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"meta": entry})
+	}
+
+	// Resolve series metadata through the IMDb-independent grouping key so a
+	// partially resolved show still returns one series meta. A resolved IMDb id
+	// is preferred when any episode in the group has one.
+	if seriesKey, ok := localSeriesKeyForID(items, id); ok {
+		if m, ok := preferredSeriesMeta(items, seriesKey); ok {
+			emit(m, m.ID)
+			return
+		}
 	}
 
 	// Direct match: works for both local: and tt ids already in the scan list.
@@ -548,6 +710,19 @@ func (s *server) localAddonStream(w http.ResponseWriter, r *http.Request, _, id 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"streams": []any{stream},
 		})
+	}
+
+	// Series episode IDs use:
+	//   <meta-id>:<season>:<episode>
+	// e.g. tt1234567:1:3 or local:<series-hash>:1:3.
+	if strings.Count(id, ":") >= 2 {
+		if m, ok := localSeriesEpisode(items, id); ok {
+			makeStream(m)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"streams": []any{}})
+		return
 	}
 
 	// Direct match.
@@ -661,6 +836,11 @@ func scanLocalFiles() []localMeta {
 		entry, resolved := imdbByLocal[hex]
 		imdbCacheMu.RUnlock()
 
+		seriesKey := ""
+		if parsed.ctype == "series" {
+			seriesKey = normalizeSeriesKey(parsed.name)
+		}
+
 		var id, poster string
 		if resolved && entry.TTID != "" {
 			id = entry.TTID
@@ -670,7 +850,11 @@ func scanLocalFiles() []localMeta {
 			ttToPath[entry.TTID] = abs
 			ttPathMu.Unlock()
 		} else {
-			id = "local:" + hex
+			if parsed.ctype == "series" && seriesKey != "" {
+				id = localSeriesID(seriesKey)
+			} else {
+				id = "local:" + hex
+			}
 			// Trigger background IMDB resolution if not already in flight.
 			ensureIMDBResolved(hex, parsed.name, parsed.year, parsed.ctype, abs)
 		}
@@ -681,12 +865,15 @@ func scanLocalFiles() []localMeta {
 		}
 
 		items = append(items, localMeta{
-			ID:       id,
-			LocalHex: hex,
-			Name:     name,
-			Path:     abs,
-			Type:     parsed.ctype,
-			Poster:   poster,
+			ID:        id,
+			LocalHex:  hex,
+			Name:      name,
+			Path:      abs,
+			Type:      parsed.ctype,
+			Poster:    poster,
+			SeriesKey: seriesKey,
+			Season:    parsed.season,
+			Episode:   parsed.episode,
 		})
 		return nil
 	})
