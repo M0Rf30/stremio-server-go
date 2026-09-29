@@ -165,6 +165,9 @@ type persistedProbe struct {
 	VideoEnd float64        `json:"videoEnd,omitempty"`
 	IsTS     bool           `json:"isTS,omitempty"`
 	Color    persistedColor `json:"color,omitempty"`
+	// SeekIndexed selects the input-seek pre-roll (see segPreRollPlan). A
+	// record without it restores with the full margin, as before.
+	SeekIndexed bool `json:"seekIndexed,omitempty"`
 }
 
 func configToPersisted(tc sessionConfig) persistedConfig {
@@ -257,14 +260,25 @@ func (m *hlsManager) sessionConfig(c persistedConfig) (sessionConfig, error) {
 // contain segments from both today. Including the encoder would throw away
 // hours of pre-transcoded work just because, say, a GPU driver failed to
 // load after a reboot, while ruling out nothing a live session can't hit.
-func (m *hlsManager) outputFingerprint(tc sessionConfig) string {
-	return fmt.Sprintf(
+//
+// pre is the session's pre-roll plan (segPreRollPlan). The first attempt's
+// pre-roll decides which source frames a segment starts decoding from, so
+// a restored session whose pre-roll changed (STREMIO_HLS_SEEK_PREROLL, for
+// an indexed container) is re-transcoded rather than mixing segments. It
+// is appended only when it differs from the full margin, so the
+// fingerprint of every session at the default is unchanged.
+func (m *hlsManager) outputFingerprint(tc sessionConfig, pre preRollPlan) string {
+	fp := fmt.Sprintf(
 		"v%d seg=%s gop=%d b:v=%s maxrate=%s bufsize=%s max=%dx%d x264=%s crf=%d nvenc=%s qsv=%s vaapi_qp=%d ac=%d b:a=%s",
 		sessionFormatVersion, ftoa(segDur), videoGOP,
 		tc.videoBitrate, tc.videoMaxrate, tc.videoBufsize, tc.maxWidth, tc.maxHeight,
 		tc.x264Preset, m.cfg.X264CRF, tc.nvencPreset, tc.qsvPreset, m.cfg.VAAPIQP,
 		m.cfg.AudioChannels, m.cfg.AudioBitrate,
 	)
+	if pre.first != fullPreRoll {
+		fp += " preroll=" + ftoa(pre.first)
+	}
+	return fp
 }
 
 // newHLSBase picks the manager's base working directory. persist is true only
@@ -344,7 +358,7 @@ func (m *hlsManager) persistSession(id string, s *hlsSession) {
 		Version:     sessionFormatVersion,
 		ID:          id,
 		MediaURL:    s.mediaURL,
-		Fingerprint: m.outputFingerprint(s.tc),
+		Fingerprint: m.outputFingerprint(s.tc, m.segPreRollPlan(s.isTS, s.seekIndexed)),
 		Config:      configToPersisted(s.tc),
 		Probe: persistedProbe{
 			Duration:        s.duration,
@@ -357,6 +371,7 @@ func (m *hlsManager) persistSession(id string, s *hlsSession) {
 			VideoEnd:        s.videoEnd,
 			IsTS:            s.isTS,
 			Color:           toPersistedColor(s.color),
+			SeekIndexed:     s.seekIndexed,
 		},
 		TTL: time.Duration(s.ttl.Load()),
 	}
@@ -572,7 +587,7 @@ func (m *hlsManager) loadPersisted() {
 			discard("discarding persisted HLS session: invalid config", "err", err)
 			continue
 		}
-		if fp := m.outputFingerprint(tc); rec.Fingerprint != fp {
+		if fp := m.outputFingerprint(tc, m.segPreRollPlan(rec.Probe.IsTS, rec.Probe.SeekIndexed)); rec.Fingerprint != fp {
 			discard("discarding persisted HLS session: transcode settings changed", "was", rec.Fingerprint, "now", fp)
 			continue
 		}
@@ -599,6 +614,7 @@ func (m *hlsManager) loadPersisted() {
 			hasVideo:        rec.Probe.HasVideo,
 			videoEnd:        rec.Probe.VideoEnd,
 			isTS:            rec.Probe.IsTS,
+			seekIndexed:     rec.Probe.SeekIndexed,
 			color:           rec.Probe.Color.toVideoColor(),
 			segLocks:        map[string]*sync.Mutex{},
 			playlistData:    map[string]struct{}{},

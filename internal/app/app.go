@@ -665,5 +665,7 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		SegmentTimeout:  envDuration(lookup, "STREMIO_HLS_SEGMENT_TIMEOUT", d.SegmentTimeout),
 		SubtitleTimeout: envDuration(lookup, "STREMIO_HLS_SUBTITLE_TIMEOUT", d.SubtitleTimeout),
 		ProbeTimeout:    envDuration(lookup, "STREMIO_HLS_PROBE_TIMEOUT", d.ProbeTimeout),
+
+		SeekPreroll: seekPreroll(lookup, d.SeekPreroll),
 	}
 }

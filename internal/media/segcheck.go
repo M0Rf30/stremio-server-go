@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -107,11 +108,76 @@ func judgeSegment(got tsCounts, want segExpect) segVerdict {
 	return segVerdict{}
 }
 
-// segPreRolls are the input-seek pre-rolls (seconds before the segment
-// start) transcodeChecked may use, in order. The first is the historical
-// 10s; the second is only tried for MPEG-TS input whose segment came out
-// with no or late video (see transcodeChecked).
-var segPreRolls = []float64{10, 30}
+// Input-seek pre-rolls, in seconds before the segment start.
+const (
+	// fullPreRoll is the historical margin, used for every container
+	// without a frame-accurate input seek, and for indexed ones unless
+	// HLSConfig.SeekPreroll shrinks it.
+	fullPreRoll = 10.0
+	// tsRetryPreRoll is the retry for MPEG-TS input whose segment came out
+	// with no or late video (see transcodeChecked).
+	tsRetryPreRoll = 30.0
+)
+
+// seekIndexedFormats are the ffprobe format_name families whose input seek
+// lands on the keyframe at or before the target (they carry a seek index),
+// so with ffmpeg's default -accurate_seek the decode is frame-accurate
+// without a pre-roll margin. This is an allowlist: MPEG-TS (including
+// .m2ts), HLS (unindexed MPEG-TS underneath), FLV, raw elementary streams
+// and anything unknown keep the full margin.
+var seekIndexedFormats = []string{"matroska", "webm", "mov", "mp4"}
+
+// isSeekIndexed reports whether formatName (ffprobe's format_name) names
+// one of seekIndexedFormats. ffprobe reports a demuxer's comma-joined
+// family ("matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2"), so each element is
+// compared whole: a plain substring match would also accept unindexed
+// demuxers such as "ipmovie" and "wc3movie".
+func isSeekIndexed(formatName string) bool {
+	for _, name := range strings.Split(formatName, ",") {
+		if slices.Contains(seekIndexedFormats, strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// preRollPlan is the pre-roll of a segment's first attempt and of its
+// optional retry (0: no retry; see transcodeChecked).
+type preRollPlan struct {
+	first, retry float64
+}
+
+// segPreRollPlan picks a session's pre-rolls from its container:
+//
+//   - indexed (isSeekIndexed) with HLSConfig.SeekPreroll below the full
+//     margin: that pre-roll first, and the full margin as the retry, the
+//     backstop for a broken or missing index (e.g. a partial download). A
+//     segment whose video is legitimately late (variable-frame-rate
+//     content holding one frame for seconds) is retried too, and, like any
+//     suspicious segment, on every request: that is the cost of the
+//     backstop.
+//   - MPEG-TS: the full margin, then tsRetryPreRoll.
+//   - everything else, including indexed at the default: the full margin,
+//     no retry. This and the MPEG-TS plan are exactly today's behaviour.
+func (m *hlsManager) segPreRollPlan(isTS, seekIndexed bool) preRollPlan {
+	if seekIndexed {
+		if p := m.indexedPreRoll(); p < fullPreRoll {
+			return preRollPlan{first: p, retry: fullPreRoll}
+		}
+	}
+	if isTS {
+		return preRollPlan{first: fullPreRoll, retry: tsRetryPreRoll}
+	}
+	return preRollPlan{first: fullPreRoll}
+}
+
+// indexedPreRoll is HLSConfig.SeekPreroll in seconds (SeekPrerollNone → 0).
+func (m *hlsManager) indexedPreRoll() float64 {
+	if m.cfg.SeekPreroll <= 0 {
+		return 0
+	}
+	return m.cfg.SeekPreroll.Seconds()
+}
 
 // transcodeChecked runs encode (one ffmpeg transcode into the given path,
 // returning the input-failure marker seen on its stderr, if any) and
@@ -124,16 +190,18 @@ var segPreRolls = []float64{10, 30}
 //   - clean segment: (path, "", nil) — cache it.
 //   - suspicious segment: (path, reason, nil) — serve it, don't cache it.
 //
-// A suspicious first attempt (written to paths[0]) is re-encoded once into
-// paths[1] with the longer pre-roll only when its video is missing or late,
-// the input is MPEG-TS (where a seek can land after the keyframe the
-// segment needs), no input failure was logged (re-reading a truncated
+// A suspicious first attempt (written to paths[0], with pre.first) is
+// re-encoded once into paths[1] with pre.retry only when its video is
+// missing or late, the plan has a longer retry pre-roll (MPEG-TS, where a
+// seek can land after the keyframe the segment needs, or an indexed
+// container with a shrunk pre-roll, whose index may be broken; see
+// segPreRollPlan), no input failure was logged (re-reading a truncated
 // source does not help), the longer pre-roll moves the input seek (start >
-// first pre-roll) and ctx is still live. The retry's output replaces the
+// pre.first) and ctx is still live. The retry's output replaces the
 // first only if it is clean; if the retry fails, times out or is still
 // suspicious, the first attempt's output is served, so a retry never turns
 // a servable segment into an error. The file not served is removed.
-func transcodeChecked(ctx context.Context, name string, start float64, isTS bool, paths [2]string,
+func transcodeChecked(ctx context.Context, name string, start float64, pre preRollPlan, paths [2]string,
 	encode func(preRoll float64, out string) (inputErr string, err error),
 	inspect func(path string) (segVerdict, error),
 ) (string, string, error) {
@@ -151,7 +219,7 @@ func transcodeChecked(ctx context.Context, name string, start float64, isTS bool
 		}
 		return v, nil
 	}
-	v, err := attempt(segPreRolls[0], paths[0])
+	v, err := attempt(pre.first, paths[0])
 	if err != nil {
 		return "", "", err
 	}
@@ -159,13 +227,13 @@ func transcodeChecked(ctx context.Context, name string, start float64, isTS bool
 		return paths[0], "", nil
 	}
 	retry := "not applicable"
-	if v.videoMissing && isTS && start > segPreRolls[0] && ctx.Err() == nil {
-		v2, err := attempt(segPreRolls[1], paths[1])
+	if v.videoMissing && pre.retry > pre.first && start > pre.first && ctx.Err() == nil {
+		v2, err := attempt(pre.retry, paths[1])
 		switch {
 		case err == nil && v2.reason == "":
 			_ = os.Remove(paths[0])
 			logging.For("media").Info("hls segment repaired with a longer pre-roll",
-				"segment", name, "first_attempt", v.reason, "pre_roll", segPreRolls[1])
+				"segment", name, "first_attempt", v.reason, "pre_roll", pre.retry)
 			return paths[1], "", nil
 		case err != nil:
 			retry = "failed: " + err.Error()

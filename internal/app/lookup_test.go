@@ -180,6 +180,7 @@ func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 		"STREMIO_HLS_SEGMENT_TIMEOUT":      "60s",
 		"STREMIO_HLS_SUBTITLE_TIMEOUT":     "45s",
 		"STREMIO_HLS_PROBE_TIMEOUT":        "15s",
+		"STREMIO_HLS_SEEK_PREROLL":         "3",
 	}
 	got := hlsConfig(MapLookup(env))
 	want := media.HLSConfig{
@@ -209,6 +210,7 @@ func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 		SegmentTimeout:     60 * time.Second,
 		SubtitleTimeout:    45 * time.Second,
 		ProbeTimeout:       15 * time.Second,
+		SeekPreroll:        3 * time.Second,
 	}
 	if got != want {
 		t.Errorf("hlsConfig(full env) = %+v,\nwant %+v", got, want)
@@ -286,5 +288,32 @@ func TestHLSConfigCreateMetadataWaitViaTypesConfig(t *testing.T) {
 	lookup := MapLookup(map[string]string{"STREMIO_CREATE_METADATA_TIMEOUT": "45"})
 	if got := envDuration(lookup, "STREMIO_CREATE_METADATA_TIMEOUT", 90*time.Second); got != 45*time.Second {
 		t.Errorf("STREMIO_CREATE_METADATA_TIMEOUT = %s, want 45s", got)
+	}
+}
+
+func TestHLSConfigSeekPreroll(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want time.Duration
+	}{
+		{"unset", map[string]string{}, 10 * time.Second},
+		{"empty", map[string]string{"STREMIO_HLS_SEEK_PREROLL": ""}, 10 * time.Second},
+		{"zero seconds disables", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "0"}, media.SeekPrerollNone},
+		{"zero duration disables", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "0s"}, media.SeekPrerollNone},
+		{"plain seconds", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "2"}, 2 * time.Second},
+		{"duration string", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "2500ms"}, 2500 * time.Millisecond},
+		{"negative seconds", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "-3"}, 10 * time.Second},
+		{"negative duration", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "-3s"}, 10 * time.Second},
+		{"invalid", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "soon"}, 10 * time.Second},
+		{"at the default", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "10"}, media.MaxSeekPreroll},
+		{"above the default clamped", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "30"}, media.MaxSeekPreroll},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hlsConfig(MapLookup(c.env)).SeekPreroll; got != c.want {
+				t.Errorf("SeekPreroll = %s, want %s", got, c.want)
+			}
+		})
 	}
 }

@@ -51,6 +51,7 @@ func TestDefaultHLSConfigMatchesHistoricalConstants(t *testing.T) {
 		"SegmentTimeout": d.SegmentTimeout == 120*time.Second,
 		"SubtitleTTL":    d.SubtitleTimeout == 120*time.Second,
 		"ProbeTimeout":   d.ProbeTimeout == 30*time.Second,
+		"SeekPreroll":    d.SeekPreroll == 10*time.Second,
 	}
 	for name, ok := range cases {
 		if !ok {

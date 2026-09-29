@@ -79,7 +79,34 @@ type HLSConfig struct {
 	SegmentTimeout  time.Duration // per-segment transcode (STREMIO_HLS_SEGMENT_TIMEOUT)
 	SubtitleTimeout time.Duration // subtitle extraction (STREMIO_HLS_SUBTITLE_TIMEOUT)
 	ProbeTimeout    time.Duration // ffprobe combined probe (STREMIO_HLS_PROBE_TIMEOUT)
+
+	// --- seeking ---
+	// SeekPreroll is the input-seek pre-roll transcodeSegment decodes ahead
+	// of each segment's start for sources in an indexed container (Matroska,
+	// MP4; see seekIndexed), where ffmpeg's input seek is already
+	// frame-accurate when re-encoding (STREMIO_HLS_SEEK_PREROLL). It can
+	// only shrink the margin: every other source (MPEG-TS, HLS, FLV, raw
+	// streams, anything unrecognised) keeps the full defaultSeekPreroll,
+	// because its input seek can start decoding at the keyframe *after* the
+	// seek point (see segPreRollPlan).
+	//
+	// Follows net.Dialer.KeepAlive's convention so a zero-value HLSConfig
+	// still means "all defaults": 0 = default (10s, today's margin for every
+	// container), negative (SeekPrerollNone) = no pre-roll, i.e. a pure
+	// input seek. normalize clamps values above MaxSeekPreroll and truncates
+	// the rest to whole milliseconds.
+	SeekPreroll time.Duration
 }
+
+// SeekPrerollNone is the HLSConfig.SeekPreroll value meaning "no pre-roll"
+// (pure input seek). A literal 0 cannot carry that meaning because 0 is the
+// zero-value "unset, use the default" marker every other HLSConfig field
+// uses.
+const SeekPrerollNone time.Duration = -1
+
+// MaxSeekPreroll caps HLSConfig.SeekPreroll at the default margin: the knob
+// only ever shrinks the pre-roll for indexed containers.
+const MaxSeekPreroll = defaultSeekPreroll
 
 // Historical compile-time defaults, kept as named constants so
 // DefaultHLSConfig and the default-compatibility check in
@@ -104,6 +131,7 @@ const (
 	defaultSegmentTimeout = 120 * time.Second
 	defaultSubtitleTTL    = 120 * time.Second
 	defaultProbeTimeout   = 30 * time.Second
+	defaultSeekPreroll    = 10 * time.Second
 
 	// legacyMaxrateBps is defaultVideoMaxrate ("8M") parsed to bits/second.
 	// Compared against verbatim in deriveBandwidthCodecs to detect the fully
@@ -150,6 +178,7 @@ func DefaultHLSConfig() HLSConfig {
 		SegmentTimeout:     defaultSegmentTimeout,
 		SubtitleTimeout:    defaultSubtitleTTL,
 		ProbeTimeout:       defaultProbeTimeout,
+		SeekPreroll:        defaultSeekPreroll,
 	}
 }
 
@@ -240,6 +269,20 @@ func (c HLSConfig) normalize(numCPU int) HLSConfig {
 	}
 	if c.ProbeTimeout <= 0 {
 		c.ProbeTimeout = d.ProbeTimeout
+	}
+	switch {
+	case c.SeekPreroll == 0:
+		c.SeekPreroll = d.SeekPreroll
+	case c.SeekPreroll < 0:
+		c.SeekPreroll = SeekPrerollNone // canonicalize any negative value
+	case c.SeekPreroll > MaxSeekPreroll:
+		c.SeekPreroll = MaxSeekPreroll
+	default:
+		// ffmpeg's -ss (and outputFingerprint) carry milliseconds; a
+		// positive value below 1ms is no pre-roll.
+		if c.SeekPreroll = c.SeekPreroll.Truncate(time.Millisecond); c.SeekPreroll == 0 {
+			c.SeekPreroll = SeekPrerollNone
+		}
 	}
 	if c.Tonemap != "" && !IsTonemapAlgorithm(c.Tonemap) {
 		c.Tonemap = "" // unknown algorithm from a library caller: stay off

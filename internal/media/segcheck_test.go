@@ -289,10 +289,14 @@ func TestTranscodeChecked(t *testing.T) {
 		inputErr  string // stderr marker reported by this encode
 		verdict   segVerdict
 	}
+	ts := preRollPlan{first: fullPreRoll, retry: tsRetryPreRoll}
+	full := preRollPlan{first: fullPreRoll}
+	shrunk := preRollPlan{first: 2, retry: fullPreRoll}
+	none := preRollPlan{first: 0, retry: fullPreRoll}
 	cases := []struct {
 		name       string
 		start      float64
-		isTS       bool
+		pre        preRollPlan
 		steps      []step // one per attempt
 		inspectErr error
 		cancel     bool // cancel ctx after the first inspect
@@ -301,39 +305,58 @@ func TestTranscodeChecked(t *testing.T) {
 		wantReason string // "" = cache; else substring of the reason
 		wantErr    error
 	}{
-		{name: "clean", start: 56, isTS: true, steps: []step{{verdict: ok}},
+		{name: "clean", start: 56, pre: ts, steps: []step{{verdict: ok}},
 			wantRolls: []float64{10}},
-		{name: "VFR/no video in MKV: served uncached, no retry", start: 56, steps: []step{{verdict: noVideo}},
+		{name: "VFR/no video in MKV: served uncached, no retry", start: 56, pre: full, steps: []step{{verdict: noVideo}},
 			wantRolls: []float64{10}, wantReason: "no video"},
-		{name: "TS late video: retried, retry output cached", start: 56, isTS: true,
+		{name: "TS late video: retried, retry output cached", start: 56, pre: ts,
 			steps:     []step{{verdict: noVideo}, {verdict: ok}},
 			wantRolls: []float64{10, 30}, wantServed: 1},
-		{name: "TS late video twice: first output served uncached", start: 56, isTS: true,
+		{name: "TS late video twice: first output served uncached", start: 56, pre: ts,
 			steps:     []step{{verdict: noVideo}, {verdict: noVideo}},
 			wantRolls: []float64{10, 30}, wantReason: "no video"},
-		{name: "retry fails (timeout): first output served uncached, no error", start: 56, isTS: true,
+		{name: "retry fails (timeout): first output served uncached, no error", start: 56, pre: ts,
 			steps:     []step{{verdict: noVideo}, {encodeErr: killed}},
 			wantRolls: []float64{10, 30}, wantReason: "no video"},
-		{name: "retry logs an input error: first output served uncached", start: 56, isTS: true,
+		{name: "retry logs an input error: first output served uncached", start: 56, pre: ts,
 			steps:     []step{{verdict: noVideo}, {inputErr: "Stream ends prematurely", verdict: ok}},
 			wantRolls: []float64{10, 30}, wantReason: "no video"},
-		{name: "TS but the seek cannot move", start: 8, isTS: true, steps: []step{{verdict: noVideo}},
+		{name: "TS but the seek cannot move", start: 8, pre: ts, steps: []step{{verdict: noVideo}},
 			wantRolls: []float64{10}, wantReason: "no video"},
-		{name: "TS at exactly the pre-roll", start: 10, isTS: true, steps: []step{{verdict: noVideo}},
+		{name: "TS at exactly the pre-roll", start: 10, pre: ts, steps: []step{{verdict: noVideo}},
 			wantRolls: []float64{10}, wantReason: "no video"},
-		{name: "truncation marker: served uncached, no retry", start: 56, isTS: true,
+		{name: "truncation marker: served uncached, no retry", start: 56, pre: ts,
 			steps:     []step{{inputErr: "Stream ends prematurely", verdict: noVideo}},
 			wantRolls: []float64{10}, wantReason: "Stream ends prematurely"},
-		{name: "truncation marker on a full-looking segment", start: 56,
+		{name: "truncation marker on a full-looking segment", start: 56, pre: full,
 			steps:     []step{{inputErr: "Error during demuxing", verdict: ok}},
 			wantRolls: []float64{10}, wantReason: "Error during demuxing"},
-		{name: "missing audio is not retried", start: 56, isTS: true, steps: []step{{verdict: noAudio}},
+		{name: "missing audio is not retried", start: 56, pre: ts, steps: []step{{verdict: noAudio}},
 			wantRolls: []float64{10}, wantReason: "no audio"},
-		{name: "no retry after cancellation", start: 56, isTS: true, steps: []step{{verdict: noVideo}}, cancel: true,
+		{name: "no retry after cancellation", start: 56, pre: ts, steps: []step{{verdict: noVideo}}, cancel: true,
 			wantRolls: []float64{10}, wantReason: "no video"},
-		{name: "ffmpeg error returned, not inspected", start: 56, isTS: true, steps: []step{{encodeErr: ffErr}},
+		{name: "ffmpeg error returned, not inspected", start: 56, pre: ts, steps: []step{{encodeErr: ffErr}},
 			wantRolls: []float64{10}, wantServed: -1, wantErr: ffErr},
-		{name: "unusable output is an error", start: 56, isTS: true, steps: []step{{}}, inspectErr: errBadSegment,
+		// Indexed containers with a shrunk pre-roll: the full margin is the
+		// backstop for a broken or missing index.
+		{name: "indexed 2s late video: retried at 10s, retry cached", start: 56, pre: shrunk,
+			steps:     []step{{verdict: noVideo}, {verdict: ok}},
+			wantRolls: []float64{2, 10}, wantServed: 1},
+		{name: "indexed 2s still late: first output served uncached", start: 56, pre: shrunk,
+			steps:     []step{{verdict: noVideo}, {verdict: noVideo}},
+			wantRolls: []float64{2, 10}, wantReason: "no video"},
+		{name: "indexed no pre-roll: retried at 10s", start: 4, pre: none,
+			steps:     []step{{verdict: noVideo}, {verdict: ok}},
+			wantRolls: []float64{0, 10}, wantServed: 1},
+		{name: "indexed no pre-roll at seg0: the seek cannot move", start: 0, pre: none,
+			steps: []step{{verdict: noVideo}}, wantRolls: []float64{0}, wantReason: "no video"},
+		{name: "indexed 2s at exactly the pre-roll", start: 2, pre: shrunk,
+			steps: []step{{verdict: noVideo}}, wantRolls: []float64{2}, wantReason: "no video"},
+		{name: "indexed 2s clean", start: 56, pre: shrunk, steps: []step{{verdict: ok}},
+			wantRolls: []float64{2}},
+		{name: "indexed 2s missing audio is not retried", start: 56, pre: shrunk,
+			steps: []step{{verdict: noAudio}}, wantRolls: []float64{2}, wantReason: "no audio"},
+		{name: "unusable output is an error", start: 56, pre: ts, steps: []step{{}}, inspectErr: errBadSegment,
 			wantRolls: []float64{10}, wantServed: -1, wantErr: errBadSegment},
 	}
 	for _, tc := range cases {
@@ -368,7 +391,7 @@ func TestTranscodeChecked(t *testing.T) {
 				}
 				return tc.steps[attempt[path]].verdict, nil
 			}
-			served, reason, err := transcodeChecked(ctx, "seg14.ts", tc.start, tc.isTS, paths, encode, inspect)
+			served, reason, err := transcodeChecked(ctx, "seg14.ts", tc.start, tc.pre, paths, encode, inspect)
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
 					t.Errorf("err = %v, want %v", err, tc.wantErr)
@@ -529,7 +552,7 @@ func TestParseStreamDuration(t *testing.T) {
 // TestProbeMediaVideoFields checks that probeMedia derives hasVideo and
 // videoEnd from the first video stream only, treats attached cover art as
 // "no video" (so audio files with embedded artwork are never expected to
-// produce video), and flags MPEG-TS input. A PATH-shim stands in for
+// produce video), and flags MPEG-TS input and indexed containers. A PATH-shim stands in for
 // ffprobe (a /bin/sh script, hence skipped on Windows).
 func TestProbeMediaVideoFields(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -542,13 +565,15 @@ func TestProbeMediaVideoFields(t *testing.T) {
 		wantVideo bool
 		wantEnd   float64
 		wantTS    bool
+		wantIndex bool
 	}{
-		{"mpegts video", "mpegts", `{"index":0,"codec_type":"video","duration":"90.000000"},{"index":1,"codec_type":"audio"}`, true, 90, true},
-		{"matroska DURATION tag", "matroska,webm", `{"index":0,"codec_type":"video","duration":"N/A","tags":{"DURATION":"00:01:00.000000000"}},{"index":1,"codec_type":"audio"}`, true, 60, false},
-		{"unknown video duration", "mov,mp4,m4a,3gp,3g2,mj2", `{"index":0,"codec_type":"video"}`, true, 0, false},
-		{"audio only", "mp3", `{"index":0,"codec_type":"audio"}`, false, 0, false},
-		{"mp3 with cover art", "mp3", `{"index":0,"codec_type":"audio"},{"index":1,"codec_type":"video","duration":"30.5","disposition":{"attached_pic":1}}`, false, 0, false},
-		{"second video stream ignored", "matroska,webm", `{"index":0,"codec_type":"video","duration":"50"},{"index":1,"codec_type":"video","duration":"1","disposition":{"attached_pic":1}}`, true, 50, false},
+		{"mpegts video", "mpegts", `{"index":0,"codec_type":"video","duration":"90.000000"},{"index":1,"codec_type":"audio"}`, true, 90, true, false},
+		{"matroska DURATION tag", "matroska,webm", `{"index":0,"codec_type":"video","duration":"N/A","tags":{"DURATION":"00:01:00.000000000"}},{"index":1,"codec_type":"audio"}`, true, 60, false, true},
+		{"unknown video duration", "mov,mp4,m4a,3gp,3g2,mj2", `{"index":0,"codec_type":"video"}`, true, 0, false, true},
+		{"hls input", "hls", `{"index":0,"codec_type":"video"},{"index":1,"codec_type":"audio"}`, true, 0, false, false},
+		{"audio only", "mp3", `{"index":0,"codec_type":"audio"}`, false, 0, false, false},
+		{"mp3 with cover art", "mp3", `{"index":0,"codec_type":"audio"},{"index":1,"codec_type":"video","duration":"30.5","disposition":{"attached_pic":1}}`, false, 0, false, false},
+		{"second video stream ignored", "matroska,webm", `{"index":0,"codec_type":"video","duration":"50"},{"index":1,"codec_type":"video","duration":"1","disposition":{"attached_pic":1}}`, true, 50, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -567,6 +592,9 @@ func TestProbeMediaVideoFields(t *testing.T) {
 			if res.hasVideo != tc.wantVideo || res.videoEnd != tc.wantEnd || res.isTS != tc.wantTS {
 				t.Errorf("hasVideo, videoEnd, isTS = %v, %v, %v; want %v, %v, %v",
 					res.hasVideo, res.videoEnd, res.isTS, tc.wantVideo, tc.wantEnd, tc.wantTS)
+			}
+			if res.seekIndexed != tc.wantIndex {
+				t.Errorf("seekIndexed = %v, want %v", res.seekIndexed, tc.wantIndex)
 			}
 		})
 	}

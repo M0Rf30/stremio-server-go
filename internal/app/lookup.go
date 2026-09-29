@@ -124,6 +124,26 @@ func envDuration(lookup Lookup, key string, def time.Duration) time.Duration {
 	return def
 }
 
+// seekPreroll resolves STREMIO_HLS_SEEK_PREROLL (seconds or a Go duration,
+// via envDuration) into media.HLSConfig.SeekPreroll, the pre-roll used for
+// indexed containers only. Unset, unparseable or negative → def (envDuration
+// warns). An explicit 0 is translated to media.SeekPrerollNone, because a
+// literal 0 in HLSConfig means "unset, use the default". Values above
+// media.MaxSeekPreroll (the default) are clamped with a warning: the knob
+// only shrinks the margin.
+func seekPreroll(lookup Lookup, def time.Duration) time.Duration {
+	const key = "STREMIO_HLS_SEEK_PREROLL"
+	d := envDuration(lookup, key, def)
+	switch {
+	case d == 0:
+		return media.SeekPrerollNone
+	case d > media.MaxSeekPreroll:
+		logging.For("config").Warn("seek pre-roll env above the default margin, clamping", "key", key, "value", d, "max", media.MaxSeekPreroll)
+		return media.MaxSeekPreroll
+	}
+	return d
+}
+
 // ffmpegBitrateRe matches the bitrate syntax ffmpeg's -b:v/-maxrate/-bufsize
 // options accept: an integer or decimal number with an optional k/K/m/M/g/G
 // (SI, decimal) suffix, e.g. "8M", "800k", "8000000".

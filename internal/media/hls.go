@@ -87,6 +87,7 @@ type hlsSession struct {
 	hasVideo        bool                   // first video stream is real video (not absent / cover art)
 	videoEnd        float64                // where that video stream ends, seconds; 0 if unknown
 	isTS            bool                   // source container is MPEG-TS
+	seekIndexed     bool                   // source container's input seek is frame-accurate (see isSeekIndexed)
 	color           videoColor             // probed colour metadata of the first video stream (HDR detection)
 	segLocks        map[string]*sync.Mutex // keyed by segment filename
 	lastAccess      atomic.Int64           // unix nanoseconds; updated on each StartHLS/HLSFile call
@@ -455,10 +456,12 @@ type probeMediaResult struct {
 	// hasVideo is true when the first video stream (the one -map 0:v:0
 	// selects) is real video rather than attached cover art; videoEnd is
 	// that stream's duration (0 if unknown); isTS is true for MPEG-TS input.
-	// All three feed segment validation (see segExpectation).
-	hasVideo bool
-	videoEnd float64
-	isTS     bool
+	// All three feed segment validation (see segExpectation). seekIndexed
+	// selects the input-seek pre-roll (see isSeekIndexed, segPreRollPlan).
+	hasVideo    bool
+	videoEnd    float64
+	isTS        bool
+	seekIndexed bool
 }
 
 // probeMedia runs a single ffprobe with -show_format -show_streams and returns
@@ -600,6 +603,7 @@ func parseProbeOutput(out []byte) probeMediaResult {
 		duration: d, audioStreams: audio, subtitleStreams: subs, highBitDepth: highBit,
 		width: width, height: height, hasVideo: hasVideo, videoEnd: videoEnd,
 		isTS: strings.Contains(r.Format.FormatName, "mpegts"), color: color,
+		seekIndexed: isSeekIndexed(r.Format.FormatName),
 	}
 }
 
@@ -773,6 +777,7 @@ func (m *hlsManager) StartHLS(id, mediaURL string, opts types.HLSSessionOptions)
 			s.hasVideo = res.hasVideo
 			s.videoEnd = res.videoEnd
 			s.isTS = res.isTS
+			s.seekIndexed = res.seekIndexed
 			s.color = res.color
 		}
 		s.mu.Unlock()
@@ -1334,7 +1339,8 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	sessionDur := s.duration
 	highBitDepth := s.highBitDepth
 	srcWidth, srcHeight := s.srcWidth, s.srcHeight
-	hasVideo, videoEnd, isTS := s.hasVideo, s.videoEnd, s.isTS
+	hasVideo, videoEnd := s.hasVideo, s.videoEnd
+	preRolls := m.segPreRollPlan(s.isTS, s.seekIndexed)
 	hasAudio := len(s.audioStreams) > 0
 	color := s.color
 	tc := s.tc
@@ -1404,103 +1410,28 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	dctx, dcancel := context.WithTimeout(ctx, deadline)
 	defer dcancel()
 
-	// run builds the full ffmpeg argument list for the given encoder and
-	// input-seek pre-roll and executes the transcode.  enc is either m.enc
-	// (hardware attempt) or the libx264 fallback.  It returns the first
-	// input-failure marker seen on ffmpeg's stderr (see inputErrMarkers).
+	job := segmentJob{
+		kind:         kind,
+		audioIdx:     audioIdx,
+		inputURL:     inputURL,
+		protoWL:      protoWL,
+		start:        start,
+		dur:          dur,
+		highBitDepth: highBitDepth,
+		outW:         outW,
+		outH:         outH,
+		scaled:       scaled,
+		tc:           tc,
+		tm:           tm,
+	}
+	// run executes one transcode with the given encoder and input-seek
+	// pre-roll (argv from buildSegmentArgs). enc is either m.enc (hardware
+	// attempt) or the libx264 fallback. It returns the first input-failure
+	// marker seen on ffmpeg's stderr (see inputErrMarkers).
 	run := func(enc hwEncoder, preRoll float64, out string) (string, error) {
-		// Hybrid seeking: fast keyframe seek to (start-preRoll) before -i,
-		// then accurate output seek for the residual after -i.  This is much
-		// faster than pure output seeking for mid-file segments while still
-		// landing on the correct frame, provided a keyframe falls inside the
-		// pre-roll window; the output -ss discards the gap.
-		inputSeek := math.Max(0, start-preRoll)
-		outputSeek := start - inputSeek
-		// Per-attempt tone-map plan: trimStart tracks this attempt's own
-		// outputSeek, since preRoll (and so outputSeek) can differ between
-		// the first attempt and a longer-pre-roll retry (see transcodeChecked).
-		rtm := tm
-		if rtm.enabled() {
-			rtm.trimStart = outputSeek
-		}
-
-		a := []string{"-hide_banner", "-loglevel", "error", "-y"}
-
-		// Input robustness: re-generate missing timestamps; cap probe overhead.
-		a = append(a, "-fflags", "+genpts",
-			"-analyzeduration", "2000000", "-probesize", "2000000")
-
-		// Pre-input device flags (VAAPI: global -vaapi_device must precede -i).
-		// We never add -hwaccel / -hwaccel_device flags: SW decode is always used
-		// (avoids driver compatibility issues with unusual input codecs/formats).
-		if enc.codec == "h264_vaapi" && enc.driDevice != "" {
-			a = append(a, "-vaapi_device", enc.driDevice)
-		}
-
-		// Hybrid seek: coarse input seek (keyframe-aligned) before -i, then
-		// fine output seek for the residual after -i.
-		if inputSeek > 0 {
-			a = append(a, "-ss", ftoa(inputSeek))
-		}
-		a = append(a, "-protocol_whitelist", protoWL, "-i", inputURL)
-		// Output seek: precise, decodes from inputSeek and discards until start.
-		if outputSeek > 0 {
-			a = append(a, "-ss", ftoa(outputSeek))
-		}
-
-		// Stream mapping.
-		switch kind {
-		case segMuxed:
-			// ? makes each stream optional so video-only files don't error.
-			a = append(a, "-map", "0:v:0?", "-map", "0:a:0?")
-		case segVideoOnly:
-			a = append(a, "-map", "0:v:0", "-an")
-		case segAudioOnly:
-			// audioIdx is 0-based among audio streams; 0:a:k selects the k-th audio.
-			a = append(a, "-map", fmt.Sprintf("0:a:%d", audioIdx), "-vn")
-		}
-
-		// ── Video encoding (segMuxed and segVideoOnly) ────────────────────────
-		if kind != segAudioOnly {
-			a = append(a, videoEncodeArgs(enc.codec, highBitDepth, outW, outH, scaled, tc, m.cfg, rtm)...)
-		}
-
-		// ── Audio encoding (segMuxed and segAudioOnly) ────────────────────────
-		// aresample=async=1:first_pts=0 realigns audio to presentation timestamps
-		// after a seek; apad pads short final segments to prevent under-runs.
-		switch kind {
-		case segMuxed:
-			a = append(a,
-				"-c:a", "aac", "-ac", strconv.Itoa(m.cfg.AudioChannels), "-b:a", m.cfg.AudioBitrate,
-				"-af", "aresample=async=1:first_pts=0,apad",
-				"-sn", // drop subtitle streams from the output
-			)
-		case segAudioOnly:
-			a = append(a,
-				"-c:a", "aac", "-ac", strconv.Itoa(m.cfg.AudioChannels), "-b:a", m.cfg.AudioBitrate,
-				"-af", "aresample=async=1:first_pts=0,apad",
-			)
-		}
-
-		// ── Output mux ────────────────────────────────────────────────────────
-		// -output_ts_offset: set the PTS/DTS of the first packet to its position
-		//   in the full timeline so the player does not restart at 0.
-		// -muxdelay 0:       suppress mpegts muxer buffering jitter.
-		// -mpegts_copyts 1:  preserve codec timestamps verbatim in the container.
-		// -t dur (output):   CRITICAL for audio paths — terminates the apad filter
-		//   which would otherwise pad indefinitely in audio-only segments (no video
-		//   reference to signal EOF). Also acts as a safety ceiling for all paths.
-		a = append(a,
-			"-output_ts_offset", ftoa(start),
-			"-muxdelay", "0",
-			"-t", ftoa(dur),
-			"-mpegts_copyts", "1",
-			"-f", "mpegts", out,
-		)
-
 		ctx, cancel := context.WithTimeout(dctx, m.cfg.SegmentTimeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "ffmpeg", a...)
+		cmd := exec.CommandContext(ctx, "ffmpeg", m.buildSegmentArgs(job, enc, preRoll, out)...)
 		var watch stderrWatch
 		cmd.Stderr = &watch
 		err := cmd.Run()
@@ -1536,7 +1467,7 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	// output survives a failed or timed-out retry.
 	want := segExpectation(kind, hasVideo, videoEnd, hasAudio, start, dur)
 	retryTmp := segFile + ".retry.tmp.ts"
-	out, reason, err := transcodeChecked(dctx, filename, start, isTS, [2]string{tmp, retryTmp}, encode,
+	out, reason, err := transcodeChecked(dctx, filename, start, preRolls, [2]string{tmp, retryTmp}, encode,
 		func(path string) (segVerdict, error) { return inspectSegment(path, want) })
 	if err != nil {
 		_ = os.Remove(tmp)
@@ -1547,6 +1478,124 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 		return "", fmt.Errorf("hls: transcode %s: %w", filename, err)
 	}
 	return s.installSegment(filename, out, reason)
+}
+
+// segmentJob carries the per-segment inputs of buildSegmentArgs, resolved
+// once by transcodeSegment and shared by every attempt at the segment (the
+// hardware encode, the libx264 fallback and the longer-pre-roll retry).
+type segmentJob struct {
+	kind              segKind
+	audioIdx          int
+	inputURL, protoWL string
+	start, dur        float64
+	highBitDepth      bool
+	outW, outH        int
+	scaled            bool
+	tc                sessionConfig
+	tm                tonemapPlan // trimStart is set per attempt from preRoll
+}
+
+// hybridSeek splits a segment's start into the coarse input seek (-ss
+// before -i: a fast demuxer seek) and the precise output seek for the
+// residual (-ss after -i: decodes from inputSeek and discards frames until
+// start). It is much faster than pure output seeking for mid-file segments
+// while still landing on the correct frame, provided decoding starts from a
+// keyframe at or before start: preRoll (seconds) is the margin that
+// guarantees it where the input seek alone doesn't (see segPreRollPlan).
+func hybridSeek(start, preRoll float64) (inputSeek, outputSeek float64) {
+	inputSeek = math.Max(0, start-math.Max(0, preRoll))
+	return inputSeek, start - inputSeek
+}
+
+// buildSegmentArgs builds the full ffmpeg argument list for one attempt at
+// a segment: enc is m.enc (hardware attempt) or the libx264 fallback,
+// preRoll the input-seek margin for this attempt, out the output file.
+// Pure (no I/O), so the exact argv is unit-testable.
+func (m *hlsManager) buildSegmentArgs(j segmentJob, enc hwEncoder, preRoll float64, out string) []string {
+	kind, audioIdx, start, dur := j.kind, j.audioIdx, j.start, j.dur
+	inputSeek, outputSeek := hybridSeek(start, preRoll)
+	// Per-attempt tone-map plan: trimStart tracks this attempt's own
+	// outputSeek, since preRoll (and so outputSeek) can differ between
+	// the first attempt and a longer-pre-roll retry (see transcodeChecked).
+	rtm := j.tm
+	if rtm.enabled() {
+		rtm.trimStart = outputSeek
+	}
+
+	a := []string{"-hide_banner", "-loglevel", "error", "-y"}
+
+	// Input robustness: re-generate missing timestamps; cap probe overhead.
+	a = append(a, "-fflags", "+genpts",
+		"-analyzeduration", "2000000", "-probesize", "2000000")
+
+	// Pre-input device flags (VAAPI: global -vaapi_device must precede -i).
+	// We never add -hwaccel / -hwaccel_device flags: SW decode is always used
+	// (avoids driver compatibility issues with unusual input codecs/formats).
+	if enc.codec == "h264_vaapi" && enc.driDevice != "" {
+		a = append(a, "-vaapi_device", enc.driDevice)
+	}
+
+	// Hybrid seek: coarse input seek (keyframe-aligned) before -i, then
+	// fine output seek for the residual after -i.
+	if inputSeek > 0 {
+		a = append(a, "-ss", ftoa(inputSeek))
+	}
+	a = append(a, "-protocol_whitelist", j.protoWL, "-i", j.inputURL)
+	// Output seek: precise, decodes from inputSeek and discards until start.
+	if outputSeek > 0 {
+		a = append(a, "-ss", ftoa(outputSeek))
+	}
+
+	// Stream mapping.
+	switch kind {
+	case segMuxed:
+		// ? makes each stream optional so video-only files don't error.
+		a = append(a, "-map", "0:v:0?", "-map", "0:a:0?")
+	case segVideoOnly:
+		a = append(a, "-map", "0:v:0", "-an")
+	case segAudioOnly:
+		// audioIdx is 0-based among audio streams; 0:a:k selects the k-th audio.
+		a = append(a, "-map", fmt.Sprintf("0:a:%d", audioIdx), "-vn")
+	}
+
+	// ── Video encoding (segMuxed and segVideoOnly) ────────────────────────
+	if kind != segAudioOnly {
+		a = append(a, videoEncodeArgs(enc.codec, j.highBitDepth, j.outW, j.outH, j.scaled, j.tc, m.cfg, rtm)...)
+	}
+
+	// ── Audio encoding (segMuxed and segAudioOnly) ────────────────────────
+	// aresample=async=1:first_pts=0 realigns audio to presentation timestamps
+	// after a seek; apad pads short final segments to prevent under-runs.
+	switch kind {
+	case segMuxed:
+		a = append(a,
+			"-c:a", "aac", "-ac", strconv.Itoa(m.cfg.AudioChannels), "-b:a", m.cfg.AudioBitrate,
+			"-af", "aresample=async=1:first_pts=0,apad",
+			"-sn", // drop subtitle streams from the output
+		)
+	case segAudioOnly:
+		a = append(a,
+			"-c:a", "aac", "-ac", strconv.Itoa(m.cfg.AudioChannels), "-b:a", m.cfg.AudioBitrate,
+			"-af", "aresample=async=1:first_pts=0,apad",
+		)
+	}
+
+	// ── Output mux ────────────────────────────────────────────────────────
+	// -output_ts_offset: set the PTS/DTS of the first packet to its position
+	//   in the full timeline so the player does not restart at 0.
+	// -muxdelay 0:       suppress mpegts muxer buffering jitter.
+	// -mpegts_copyts 1:  preserve codec timestamps verbatim in the container.
+	// -t dur (output):   CRITICAL for audio paths — terminates the apad filter
+	//   which would otherwise pad indefinitely in audio-only segments (no video
+	//   reference to signal EOF). Also acts as a safety ceiling for all paths.
+	a = append(a,
+		"-output_ts_offset", ftoa(start),
+		"-muxdelay", "0",
+		"-t", ftoa(dur),
+		"-mpegts_copyts", "1",
+		"-f", "mpegts", out,
+	)
+	return a
 }
 
 // provSeq numbers provisional (served-but-uncached) segment files so

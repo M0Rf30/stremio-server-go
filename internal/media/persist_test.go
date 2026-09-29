@@ -62,6 +62,13 @@ func newTestPersistManager(t *testing.T, workDir string, cfg HLSConfig, settings
 // session.json, exactly as StartHLS does after a successful probe.
 func seedPersistedSession(t *testing.T, m *hlsManager, id string, lastAccess time.Time) string {
 	t.Helper()
+	return seedPersistedSessionWith(t, m, id, lastAccess, nil)
+}
+
+// seedPersistedSessionWith is seedPersistedSession with mut applied to the
+// session before it is persisted.
+func seedPersistedSessionWith(t *testing.T, m *hlsManager, id string, lastAccess time.Time, mut func(*hlsSession)) string {
+	t.Helper()
 	dir := filepath.Join(m.base, id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -73,6 +80,9 @@ func seedPersistedSession(t *testing.T, m *hlsManager, id string, lastAccess tim
 		segLocks:     map[string]*sync.Mutex{},
 		playlistData: map[string]struct{}{},
 		tc:           m.effectiveSessionConfig(sessionOverrides{}),
+	}
+	if mut != nil {
+		mut(s)
 	}
 	s.lastAccess.Store(lastAccess.UnixNano())
 	m.mu.Lock()
@@ -461,7 +471,7 @@ func TestHLSPersistCorruptSessionRemoved(t *testing.T) {
 				maxHeight: rec.Config.MaxHeight, x264Preset: rec.Config.X264Preset,
 				nvencPreset: rec.Config.NVENCPreset, qsvPreset: rec.Config.QSVPreset,
 			}
-			rec.Fingerprint = m1.outputFingerprint(tc)
+			rec.Fingerprint = m1.outputFingerprint(tc, m1.segPreRollPlan(rec.Probe.IsTS, rec.Probe.SeekIndexed))
 		}
 		b, _ := json.Marshal(rec)
 		return b
@@ -570,6 +580,58 @@ func TestHLSPersistFingerprintMismatchRemoved(t *testing.T) {
 				assertGone(t, dir)
 				if m2.Sessions() != 0 {
 					t.Errorf("mismatched session restored")
+				}
+			}
+		})
+	}
+}
+
+// TestHLSPersistSeekPreroll: a changed STREMIO_HLS_SEEK_PREROLL discards
+// restored sessions in an indexed container (their segments start decoding
+// from different frames) and keeps every other session; an unchanged one
+// keeps them all, and the container class survives the round trip.
+func TestHLSPersistSeekPreroll(t *testing.T) {
+	indexed := func(s *hlsSession) { s.seekIndexed = true }
+	ts := func(s *hlsSession) { s.isTS = true }
+	cases := []struct {
+		name         string
+		was, now     time.Duration
+		keepIndexed  bool
+		keepTSOrElse bool
+	}{
+		{"unchanged default", 0, 0, true, true},
+		{"unchanged 2s", 2 * time.Second, 2 * time.Second, true, true},
+		{"default to 2s", 0, 2 * time.Second, false, true},
+		{"2s to default", 2 * time.Second, 0, false, true},
+		{"2s to none", 2 * time.Second, SeekPrerollNone, false, true},
+		{"default to 10s", 0, 10 * time.Second, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			work := t.TempDir()
+			m1 := newTestPersistManager(t, work, HLSConfig{SeekPreroll: tc.was}, nil)
+			dirIdx := seedPersistedSessionWith(t, m1, "mkv", time.Now(), indexed)
+			dirTS := seedPersistedSessionWith(t, m1, "ts", time.Now(), ts)
+			dirOther := seedPersistedSession(t, m1, "other", time.Now())
+			m1.CloseHLS()
+			m2 := newTestPersistManager(t, work, HLSConfig{SeekPreroll: tc.now}, nil)
+			check := func(dir string, keep bool) {
+				t.Helper()
+				if keep {
+					assertExists(t, dir)
+				} else {
+					assertGone(t, dir)
+				}
+			}
+			check(dirIdx, tc.keepIndexed)
+			check(dirTS, tc.keepTSOrElse)
+			check(dirOther, tc.keepTSOrElse)
+			if tc.keepIndexed {
+				m2.mu.Lock()
+				s := m2.sessions["mkv"]
+				m2.mu.Unlock()
+				if s == nil || !s.seekIndexed || s.isTS {
+					t.Errorf("restored indexed session lost its container class: %+v", s)
 				}
 			}
 		})
