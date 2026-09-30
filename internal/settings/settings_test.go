@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/M0Rf30/stremio-server-go/internal/settings"
@@ -165,6 +166,9 @@ func TestSaveFailureCleansUpTemp(t *testing.T) {
 		{
 			name: "read-only directory blocks temp file creation",
 			setup: func(t *testing.T, dir string) {
+				if runtime.GOOS == "windows" {
+					t.Skip("a read-only directory does not block file creation on Windows")
+				}
 				if err := os.Chmod(dir, 0o500); err != nil {
 					t.Fatal(err)
 				}

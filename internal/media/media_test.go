@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -505,6 +506,9 @@ func TestHLSManagerCloseHLSRemovesBaseDir(t *testing.T) {
 // newHLSBaseDir directly rather than newHLS, which shells out to ffmpeg to
 // probe encoders.
 func TestNewHLSBaseDirIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
 	base := newHLSBaseDir("")
 	defer os.RemoveAll(base)
 
@@ -651,6 +655,9 @@ func TestTracksCacheHardCap(t *testing.T) {
 // be asserted directly from the argv it was invoked with, without spawning
 // real ffprobe or any network I/O.
 func TestProbeAppliesLocalize(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH-shim ffprobe stub is a /bin/sh script")
+	}
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "args.txt")
 	stub := filepath.Join(dir, "ffprobe")
@@ -690,6 +697,9 @@ func TestProbeAppliesLocalize(t *testing.T) {
 // ffprobe so the argv can be asserted directly, without spawning real
 // ffprobe or any network I/O.
 func TestProbeRoutesRemoteURLThroughRelay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH-shim ffprobe stub is a /bin/sh script")
+	}
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "args.txt")
 	stub := filepath.Join(dir, "ffprobe")
@@ -729,6 +739,9 @@ func TestProbeRoutesRemoteURLThroughRelay(t *testing.T) {
 // Probe must fail with errOutputTooLarge rather than allocate an
 // unbounded amount of memory reading it all in.
 func TestProbeCapsFfprobeOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH-shim ffprobe stub is a /bin/sh script")
+	}
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "ffprobe")
 	// dd floods stdout with well over ffprobeOutputLimit (8 MiB) of zero

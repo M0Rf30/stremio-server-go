@@ -116,6 +116,11 @@ type memStorage struct {
 	// iterates this set exclusively, avoiding in-flight pieces entirely.
 	completeSet map[*memPiece]struct{}
 
+	// tick is the recency clock: every read and completion takes the next
+	// value. A counter, not wall time, because a coarse clock (Windows) gives
+	// consecutive accesses the same timestamp and makes the victim arbitrary.
+	tick atomic.Int64
+
 	// refetch, when set by the manager, forces anacrolix to re-download a piece
 	// whose bytes were evicted. refetchBackoff briefly throttles the evicted-read
 	// path so anacrolix's reader.readAt retry loop cannot recurse into a stack
@@ -200,7 +205,7 @@ func (s *memStorage) dropLocked(mp *memPiece) {
 // evictLocked frees COMPLETE pieces until used+need fits within capacity, or
 // no evictable piece remains. Victim selection iterates completeSet only —
 // in-flight (incomplete) pieces are never visited, eliminating the former O(n)
-// LRU scan. The piece with the smallest lastUsed (unix-nanos, updated after each
+// LRU scan. The piece with the smallest lastUsed (store tick, updated after each
 // successful ReadAt) is the victim, preserving read-recency ordering.
 // Caller holds s.mu (write lock).
 func (s *memStorage) evictLocked(need int64, keep *memPiece) {
@@ -273,7 +278,7 @@ type memPiece struct {
 	data     []byte // nil when not resident (never written or evicted)
 	complete bool   // hash-verified by anacrolix and still resident
 
-	// lastUsed records the unix-nanos timestamp of the most recent successful
+	// lastUsed records the store tick of the most recent successful
 	// ReadAt on this piece, updated atomically without holding s.mu. evictLocked
 	// uses it to pick the least-recently-read complete piece as the eviction victim.
 	lastUsed atomic.Int64
@@ -320,7 +325,7 @@ func (mp *memPiece) ReadAt(b []byte, off int64) (int, error) {
 		// Update recency outside the lock: concurrent reads proceed in parallel
 		// and eviction uses lastUsed, not LRU MoveToFront. A tiny lag between the
 		// copy and the stamp is acceptable for eviction ordering.
-		mp.lastUsed.Store(time.Now().UnixNano())
+		mp.lastUsed.Store(s.tick.Add(1))
 		if int64(n) < int64(len(b)) {
 			// Filled to the end of the piece without satisfying the whole request.
 			return n, io.EOF
@@ -370,8 +375,8 @@ func (mp *memPiece) MarkComplete() error {
 	}
 	mp.complete = true
 	// Stamp recency so this piece starts with a fair lastUsed for eviction;
-	// older pieces (with smaller timestamps) will be evicted first.
-	mp.lastUsed.Store(time.Now().UnixNano())
+	// older pieces (with smaller ticks) will be evicted first.
+	mp.lastUsed.Store(s.tick.Add(1))
 	s.completeSet[mp] = struct{}{}
 	s.evictLocked(0, mp)
 	return nil

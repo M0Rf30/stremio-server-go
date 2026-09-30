@@ -151,10 +151,10 @@ type manager struct {
 	downLimiter *rate.Limiter // shared pointer in cc.DownloadRateLimiter; updated by SetLimitFn
 	upLimiter   *rate.Limiter // shared pointer in cc.UploadRateLimiter; updated by SetLimitFn
 
-	// memStorage is non-nil only when the opt-in in-RAM piece cache is active
-	// (Config.MemoryCacheSize > 0). anacrolix does not Close a user-provided
-	// DefaultStorage, so the manager owns closing it (see Close).
-	memStorage io.Closer
+	// storage is the piece storage backend handed to anacrolix as
+	// DefaultStorage. anacrolix does not Close a user-provided DefaultStorage,
+	// so the manager owns closing it (see Close).
+	storage io.Closer
 
 	mu        sync.RWMutex
 	engines   map[string]*engine // keyed by lower-cased infoHash
@@ -278,19 +278,21 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	// Storage backend. Default (MemoryCacheSize == 0): file storage partitioned
 	// by info-hash so torrents don't collide on disk. Opt-in: a bounded in-RAM
 	// backend that never writes piece data to disk (mobile/Termux/low-disk/
-	// HuggingFace). The mem backend is a ClientImplCloser; anacrolix only closes
+	// HuggingFace). Both backends are ClientImplClosers; anacrolix only closes
 	// the default storage it creates itself, never a provided one, so the manager
 	// closes it (see Close).
-	var memStorageCloser io.Closer
+	var storageCloser io.Closer
 	var memStore *memStorage
 	if cfg.MemoryCacheSize > 0 {
 		ms := newMemStorage(cfg.MemoryCacheSize)
 		cc.DefaultStorage = ms
-		memStorageCloser = ms
+		storageCloser = ms
 		memStore = ms
 		logging.For("engine").Info("in-RAM piece cache enabled; piece data not written to disk", "bytes", cfg.MemoryCacheSize)
 	} else {
-		cc.DefaultStorage = storage.NewFileByInfoHash(cfg.CacheRoot)
+		fs := storage.NewFileByInfoHash(cfg.CacheRoot)
+		cc.DefaultStorage = fs
+		storageCloser = fs
 		logging.For("engine").Info("disk piece cache", "path", cfg.CacheRoot)
 	}
 
@@ -307,6 +309,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 	// Censorship resistance / anonymity (all default = anacrolix default behavior)
 	applyBTEncryption(cc, cfg.BTEncryption)
 	if err := applyBTProxy(cc, cfg.BTProxy); err != nil {
+		_ = storageCloser.Close()
 		return nil, fmt.Errorf("engine: bt proxy: %w", err)
 	}
 	applyDHTBootstrap(cc, cfg.DHTBootstrap)
@@ -317,6 +320,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 
 	client, err := torrent.NewClient(cc)
 	if err != nil {
+		_ = storageCloser.Close()
 		return nil, fmt.Errorf("engine: create torrent client: %w", err)
 	}
 
@@ -337,7 +341,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		upLimiter:                  upLimiter,
 		engines:                    make(map[string]*engine),
 		done:                       done,
-		memStorage:                 memStorageCloser,
+		storage:                    storageCloser,
 		purging:                    make(map[string]chan struct{}),
 		establishedConnsPerTorrent: est,
 	}
@@ -554,9 +558,9 @@ func (m *manager) AllStats() map[string]*types.Stats {
 func (m *manager) Close() error {
 	m.closeOnce.Do(func() { close(m.done) })
 	m.client.Close()
-	if m.memStorage != nil {
-		if err := m.memStorage.Close(); err != nil {
-			logging.For("engine").Error("closing in-RAM piece cache", "err", err)
+	if m.storage != nil {
+		if err := m.storage.Close(); err != nil {
+			logging.For("engine").Error("closing piece storage", "err", err)
 		}
 	}
 	return nil
