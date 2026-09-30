@@ -66,6 +66,24 @@ jobs:
       - name: Test (32-bit)
         run: GOARCH=386 CGO_ENABLED=0 go test ./internal/earlyenv/ ./internal/engine/
 
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      # Check out with LF endings so fixtures and golden files match Linux.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # No -race: it needs cgo and a mingw toolchain, and the Linux job
+      # already covers races. This job catches Windows-specific file
+      # handling (open handles, permissions, paths).
+      - name: Test
+        run: go test -p 1 ./...
+
   build:
     name: Cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
