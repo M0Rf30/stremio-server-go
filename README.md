@@ -99,7 +99,7 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_LOCAL_IMDB` | `on` | local-files add-on resolves filenames to IMDB ids/metadata via IMDb's suggestion API (catalog posters/titles). **Enabled by default**; set `=0`/`off` to disable — local files then keep filename titles + `local:` ids and no request is sent to IMDb. |
 | `STREMIO_LOCAL_FILES_PUBLIC_URL` | _(unset)_ | externally reachable base URL of this server (e.g. `http://192.168.1.50:11470`, trailing `/` trimmed). When set, local-files add-on streams are returned as `<base>/local-addon/file/<hash>` (HEAD + byte ranges) instead of same-host `file://` URLs, so remote Stremio clients can play them, and that endpoint is enabled. Only files already indexed from `LOCAL_FILES_DIR` are reachable, by opaque hash — but **any host that can reach the port can then download them**; unset (default) keeps `file://` URLs and the endpoint returns `404`. |
 | `STREMIO_HWACCEL` | _(auto)_ | `0` forces software transcode; or pin `vaapi`/`nvenc`/… |
-| `STREMIO_HLS_SESSION_TTL` | `60` | seconds (or a Go duration string, e.g. `2m`) an HLS transcode session may sit idle before the reaper evicts it and frees its segment cache. A paused player that comes back after this window sees `unknown session` and must re-request the master playlist. `0` disables idle eviction: sessions (and their segment caches) are kept until `DELETE /hlsv2/{id}` or shutdown, and still count toward `STREMIO_HLS_MAX_SESSIONS`. Negative or invalid values fall back to `60`; note that `0` itself also fell back to `60` before this meaning was introduced. |
+| `STREMIO_HLS_SESSION_TTL` | `60` | seconds (or a Go duration string, e.g. `2m`) an HLS transcode session may sit idle before the reaper evicts it and frees its segment cache. A paused player that comes back after this window sees `unknown session` and must re-request the master playlist. `0` disables idle eviction: sessions (and their segment caches) are kept until `DELETE /hlsv2/{id}` or shutdown (across restarts, with `STREMIO_HLS_PERSIST`), and still count toward `STREMIO_HLS_MAX_SESSIONS`. Negative or invalid values fall back to `60`; note that `0` itself also fell back to `60` before this meaning was introduced. |
 | `STREMIO_HLS_REAPER_INTERVAL` | _(derived)_ | seconds (or a duration string) between HLS idle-session sweeps. Defaults to `min(30s, STREMIO_HLS_SESSION_TTL/2)` so a shorter TTL is still reaped promptly; set explicitly to override the derived value. |
 | `STREMIO_HLS_NEG_PROBE_TTL` | `300` (`5m`) | seconds (or a duration string) a failed/zero-duration `ffprobe` result is cached, to avoid hammering a broken URL (e.g. a torrent with no peers yet) with repeated probes. |
 | `STREMIO_HLS_POS_PROBE_TTL` | `600` (`10m`) | seconds (or a duration string) a successful `ffprobe` result is cached, so duplicate HLS sessions for the same URL skip re-probing. |
@@ -256,9 +256,12 @@ ahead and still have it after a restart, crash or update.
   default `60`, a session is evicted a minute after its last use and
   discarded by any restart longer than a minute, which makes persistence
   nearly useless. Set it to cover the gap between pre-transcoding and
-  watching (e.g. `12h`). A warning is logged if it's left at the default.
+  watching (e.g. `12h`), or set it to `0` to keep sessions until they're
+  deleted. A warning is logged if it's left at the default.
 - **On start**, each session is restored without re-probing and its
-  existing segments are served from disk. Sessions idle past the TTL,
+  existing segments are served from disk. Sessions idle past their TTL
+  (a per-session `ttl` if they have one, otherwise
+  `STREMIO_HLS_SESSION_TTL`, and never when that is `0`),
   unreadable or invalid ones, and ones whose segments no longer match the
   current process-wide encoder settings (`STREMIO_TRANSCODE_X264_CRF`,
   `_VAAPI_QP`, `_AUDIO_BITRATE`, `_AUDIO_CHANNELS`) are deleted, as are

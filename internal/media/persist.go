@@ -296,7 +296,7 @@ func newHLSBase(cfg HLSConfig) (base string, persist bool, lock io.Closer) {
 			log.Warn("HLS persist dir unusable; HLS sessions will not persist across restarts", "work_dir", cfg.WorkDir, "err", err)
 		} else {
 			log.Info("HLS sessions persist across restarts", "dir", dir)
-			if cfg.SessionTTL == defaultSessionTTL {
+			if cfg.SessionTTL == defaultSessionTTL && !cfg.DisableIdleEviction {
 				log.Warn("STREMIO_HLS_PERSIST is on but STREMIO_HLS_SESSION_TTL is still the default; persisted sessions are evicted a minute after last use and discarded by any restart longer than that — raise it (e.g. 12h)", "session_ttl", cfg.SessionTTL)
 			}
 			return dir, true, lk
@@ -517,7 +517,10 @@ func validatePersistedURL(raw, selfBase string) error {
 //     validatePersistedURL deletes the session directory;
 //   - a stored fingerprint that differs from what this process computes for
 //     the session's own config deletes it (old segments would mix outputs);
-//   - a lastAccess older than SessionTTL deletes it (the reaper would have);
+//   - a lastAccess older than its idle TTL deletes it (the reaper would
+//     have): the session's own ttl override if it has one, else SessionTTL,
+//     or never when DisableIdleEviction is set and it has no ttl of its own;
+//     a stored ttl outside the range an override accepts deletes it too;
 //   - otherwise *.tmp* partial files from an interrupted transcode, subtitle
 //     extraction, or session.json write are removed and the session is kept.
 //
@@ -595,7 +598,20 @@ func (m *hlsManager) loadPersisted() {
 		if lastAccess.After(now) {
 			lastAccess = now // clock went backwards; don't let it live forever
 		}
-		if lastAccess.Before(cutoff) {
+		if rec.TTL != 0 && (rec.TTL < minOverrideTTL || rec.TTL > maxOverrideTTL) {
+			discard("discarding persisted HLS session: invalid ttl", "ttl", rec.TTL)
+			continue
+		}
+		// Same rule as evictIdle: the session's own ttl if it has one, else
+		// SessionTTL, and no idle cutoff at all when idle eviction is
+		// disabled (STREMIO_HLS_SESSION_TTL=0) and it has no ttl of its own.
+		switch {
+		case rec.TTL > 0:
+			if lastAccess.Before(now.Add(-rec.TTL)) {
+				discard("discarding persisted HLS session: idle past its ttl", "last_access", rec.LastAccess, "ttl", rec.TTL)
+				continue
+			}
+		case !m.cfg.DisableIdleEviction && lastAccess.Before(cutoff):
 			discard("discarding persisted HLS session: idle past session TTL", "last_access", rec.LastAccess)
 			continue
 		}

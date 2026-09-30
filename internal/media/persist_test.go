@@ -892,3 +892,66 @@ func TestHLSPersistConcurrentWithReaper(t *testing.T) {
 		t.Errorf("restored %d sessions, want %d", n, len(ids))
 	}
 }
+
+// TestHLSPersistRestoreHonoursSessionTTL: on load a session is judged by the
+// idle TTL the reaper would apply to it, i.e. its own ttl override when it
+// has one, not the global SessionTTL.
+func TestHLSPersistRestoreHonoursSessionTTL(t *testing.T) {
+	work := t.TempDir()
+	cfg := HLSConfig{SessionTTL: time.Hour}
+	m1 := newTestPersistManager(t, work, cfg, nil)
+	idle := time.Now().Add(-2 * time.Hour)
+	long := seedPersistedSessionWith(t, m1, "long", idle, func(s *hlsSession) { s.ttl.Store(int64(3 * time.Hour)) })
+	short := seedPersistedSessionWith(t, m1, "short", idle, func(s *hlsSession) { s.ttl.Store(int64(90 * time.Minute)) })
+	plain := seedPersistedSession(t, m1, "plain", idle)
+	bad := seedPersistedSessionWith(t, m1, "bad", time.Now(), func(s *hlsSession) { s.ttl.Store(int64(time.Second)) })
+	m1.CloseHLS()
+
+	// A ttl shorter than the global TTL wins too: it is not max(ttl, global).
+	work2 := t.TempDir()
+	m3 := newTestPersistManager(t, work2, HLSConfig{SessionTTL: 3 * time.Hour}, nil)
+	shorter := seedPersistedSessionWith(t, m3, "shorter", idle, func(s *hlsSession) { s.ttl.Store(int64(90 * time.Minute)) })
+	m3.CloseHLS()
+	newTestPersistManager(t, work2, HLSConfig{SessionTTL: 3 * time.Hour}, nil)
+	assertGone(t, shorter)
+
+	m2 := newTestPersistManager(t, work, cfg, nil)
+	assertExists(t, long)
+	assertGone(t, short)
+	assertGone(t, plain)
+	assertGone(t, bad) // below the 60s floor an override accepts
+	m2.mu.Lock()
+	got := m2.sessions["long"]
+	m2.mu.Unlock()
+	if got == nil {
+		t.Fatal("session with a 3h ttl override was not restored")
+	}
+	if ttl := time.Duration(got.ttl.Load()); ttl != 3*time.Hour {
+		t.Errorf("restored ttl = %s, want 3h", ttl)
+	}
+}
+
+// TestHLSPersistIdleEvictionDisabled: with STREMIO_HLS_SESSION_TTL=0
+// (DisableIdleEviction) persisted sessions are not discarded on load for
+// being idle, unless they carry their own ttl, and the default-TTL warning
+// (normalize turns the 0 into the 60s default) is not logged.
+func TestHLSPersistIdleEvictionDisabled(t *testing.T) {
+	work := t.TempDir()
+	logs := captureLogs(t)
+	cfg := HLSConfig{DisableIdleEviction: true}
+	m1 := newTestPersistManager(t, work, cfg, nil)
+	idle := time.Now().Add(-24 * time.Hour)
+	old := seedPersistedSession(t, m1, "old", idle)
+	own := seedPersistedSessionWith(t, m1, "own", idle, func(s *hlsSession) { s.ttl.Store(int64(time.Hour)) })
+	m1.CloseHLS()
+
+	m2 := newTestPersistManager(t, work, cfg, nil)
+	assertExists(t, old)
+	assertGone(t, own) // a per-session ttl still applies, as in evictIdle
+	if n := m2.Sessions(); n != 1 {
+		t.Errorf("Sessions() = %d, want 1", n)
+	}
+	if strings.Contains(logs.String(), "STREMIO_HLS_SESSION_TTL is still the default") {
+		t.Errorf("default-TTL warning logged with idle eviction disabled; logs:\n%s", logs)
+	}
+}
