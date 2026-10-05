@@ -215,6 +215,7 @@ func TestRedactRequestURI(t *testing.T) {
 		"/ftp/x.mkv?lz=NoIgVgNg&a=1":                    "/ftp/x.mkv?lz=REDACTED&a=1",
 		"/nzb/create?lz=abc":                            "/nzb/create?lz=REDACTED",
 		"/x?apikey=sek&TOKEN=t&keep=v":                  "/x?apikey=REDACTED&TOKEN=REDACTED&keep=v",
+		"/proxy/stream?d=aHR0cA&api_password=hunter2":   "/proxy/stream?d=aHR0cA&api_password=REDACTED",
 		"/probe?url=ftp%3A%2F%2Fuser%3Apass%40host%2Ff": "/probe?url=ftp%3A%2F%2FREDACTED@host%2Ff",
 		"/probe?url=http://user:pw@host/f":              "/probe?url=http://REDACTED@host/f",
 		"/proxy/d=http%3A%2F%2Fu%3Ap%40h/x":             "/proxy/d=http%3A%2F%2FREDACTED@h/x",

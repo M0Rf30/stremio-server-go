@@ -296,7 +296,7 @@ func setActiveContentGuards(h http.Header) {
 // embedded ftp/nntp/http credentials; the rest are common secret-bearing names.
 var sensitiveQueryKeys = map[string]struct{}{
 	"lz": {}, "apikey": {}, "api_key": {}, "authkey": {}, "token": {},
-	"access_token": {}, "password": {}, "pass": {}, "key": {}, "auth": {},
+	"access_token": {}, "password": {}, "api_password": {}, "pass": {}, "key": {}, "auth": {},
 }
 
 // userinfoRe matches the userinfo of a URL embedded in a request URI, either
