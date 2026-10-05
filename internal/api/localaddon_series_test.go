@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Andrei-Edward Popa
+// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -238,5 +238,80 @@ func TestLocalSeriesGroupingWithoutIMDB(t *testing.T) {
 	}
 	if filepath.Base(episode.Path) != "show.S01E02.mkv" {
 		t.Fatalf("episode path = %q, want show.S01E02.mkv", episode.Path)
+	}
+}
+
+func scanTree(t *testing.T, files ...string) []localMeta {
+	t.Helper()
+	dir := t.TempDir()
+	for _, f := range files {
+		p := filepath.Join(dir, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("LOCAL_FILES_DIR", dir)
+	wasDisabled := localIMDBDisabled.Load()
+	localIMDBDisabled.Store(true)
+	t.Cleanup(func() { localIMDBDisabled.Store(wasDisabled) })
+	return scanLocalFiles()
+}
+
+func TestLocalSeriesBareFilenameUsesParentDir(t *testing.T) {
+	items := scanTree(t, "A/S01E01.mkv", "B/S01E01.mkv", "C/1x02.mkv")
+	if len(items) != 3 {
+		t.Fatalf("len = %d, want 3", len(items))
+	}
+	names := map[string]string{}
+	for _, m := range items {
+		names[m.Name] = m.ID
+	}
+	for _, n := range []string{"A", "B", "C"} {
+		if names[n] == "" {
+			t.Errorf("missing series %q in %v", n, names)
+		}
+	}
+	if names["A"] == names["B"] {
+		t.Error("A and B collapsed into one series id")
+	}
+	if got := dedupeLocalMetas(items, "series"); len(got) != 3 {
+		t.Errorf("catalog len = %d, want 3", len(got))
+	}
+}
+
+func TestLocalSeriesBareFilenameSeasonDirUsesGrandparent(t *testing.T) {
+	items := scanTree(t, "Show/Season 1/S01E02.mkv", "Show/S02/S02E01.mkv", "Show/Staffel 2/S02E03.mkv")
+	if len(items) != 3 {
+		t.Fatalf("len = %d, want 3", len(items))
+	}
+	for _, m := range items {
+		if m.Name != "Show" {
+			t.Errorf("name = %q, want Show", m.Name)
+		}
+		if m.ID != items[0].ID {
+			t.Errorf("id = %q, want %q", m.ID, items[0].ID)
+		}
+	}
+}
+
+func TestLocalSeriesVideosSorted(t *testing.T) {
+	key := normalizeSeriesKey("Example Show")
+	id := localSeriesID(key)
+	var items []localMeta
+	for _, se := range [][2]int{{2, 1}, {1, 10}, {1, 2}, {2, 3}} {
+		items = append(items, localMeta{ID: id, Type: "series", SeriesKey: key, Season: se[0], Episode: se[1]})
+	}
+	got := localSeriesVideos(items, id)
+	want := []string{":1:2", ":1:10", ":2:1", ":2:3"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d", len(got))
+	}
+	for i, w := range want {
+		if g, _ := got[i]["id"].(string); g != id+w {
+			t.Errorf("videos[%d] = %v, want %s", i, got[i]["id"], id+w)
+		}
 	}
 }

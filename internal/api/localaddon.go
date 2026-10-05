@@ -48,6 +48,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -220,7 +221,40 @@ func localSeriesVideos(items []localMeta, id string) []map[string]any {
 		})
 	}
 
+	sort.Slice(videos, func(i, j int) bool {
+		si, _ := videos[i]["season"].(int)
+		sj, _ := videos[j]["season"].(int)
+		if si != sj {
+			return si < sj
+		}
+		ei, _ := videos[i]["episode"].(int)
+		ej, _ := videos[j]["episode"].(int)
+		return ei < ej
+	})
+
 	return videos
+}
+
+var reSeasonDir = regexp.MustCompile(`(?i)^(season|staffel|s)[ ._-]*\d+$`)
+
+// bareSeriesDirName returns a series name derived from the parent directory
+// (or grandparent for season dirs) when the parsed title is empty or just the
+// filename stem. Returns "" when the parsed title is usable.
+func bareSeriesDirName(path, stem, title string) string {
+	t := normalizeSeriesKey(title)
+	if t != "" && t != normalizeSeriesKey(stem) {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	name := filepath.Base(dir)
+	if reSeasonDir.MatchString(name) {
+		dir = filepath.Dir(dir)
+		name = filepath.Base(dir)
+	}
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		return ""
+	}
+	return name
 }
 
 func localSeriesEpisode(items []localMeta, id string) (localMeta, bool) {
@@ -830,6 +864,11 @@ func scanLocalFiles() []localMeta {
 		stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		hex := localID(abs)
 		parsed := parseFilenameToMeta(stem)
+		if parsed.ctype == "series" {
+			if dirName := bareSeriesDirName(path, stem, parsed.name); dirName != "" {
+				parsed.name = dirName
+			}
+		}
 
 		// Check IMDB cache first.
 		imdbCacheMu.RLock()
