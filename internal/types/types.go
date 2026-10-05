@@ -24,8 +24,16 @@ type Config struct {
 	MemoryCacheSize int64  // opt-in in-RAM piece cache budget in bytes; 0 = disabled (write pieces to disk)
 	ListenPort      int    // BitTorrent peer listen port (0 = random)
 	WebUI           string // redirect target for "GET /" (e.g. https://web.stremio.com/)
-	Version         string // value reported as settings.serverVersion
-	TrackersMax     int    // max ranked UDP/HTTP trackers per torrent (STREMIO_TRACKERS_MAX; 0 = default)
+	// PublicURL is this server's externally reachable base URL behind a
+	// reverse proxy (STREMIO_PUBLIC_URL), e.g. https://stremio.example.com.
+	// When set it is used verbatim for the GET / landing redirect and the
+	// /settings baseUrl instead of deriving them from r.TLS / the first local
+	// interface, which are wrong when TLS terminates at an edge proxy. It is
+	// also the fallback for ProxyPublicURL when that is unset (but never for
+	// LocalFilesPublicURL, which must be opted into explicitly).
+	PublicURL   string
+	Version     string // value reported as settings.serverVersion
+	TrackersMax int    // max ranked UDP/HTTP trackers per torrent (STREMIO_TRACKERS_MAX; 0 = default)
 	// remote tracker list source (STREMIO_TRACKERS_URL); "" disables the remote
 	// fetch (embedded/cached list + DHT/PEX only). Default: a curated public list.
 	TrackersURL string

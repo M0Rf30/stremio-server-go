@@ -507,6 +507,22 @@ func (h *Handler) externalBase(r *http.Request) string {
 	if h.cfg.PublicURL != "" {
 		return strings.TrimRight(h.cfg.PublicURL, "/")
 	}
+	return ExternalBase(r)
+}
+
+// ExternalBase returns the externally visible base URL for a request: the
+// scheme and host as the client sees them, honouring a TLS-terminated
+// connection (r.TLS), the headers set by a reverse proxy, or r.Host otherwise.
+//
+// X-Forwarded-Proto/Host are honoured only when the immediate peer is a trusted
+// (loopback or private) proxy, like the rest of the proxy's forwarded handling,
+// so a public client cannot spoof the base. They are single-valued in practice
+// but may be comma-joined lists; only the first element is used, and the scheme
+// is accepted only when it is http or https.
+//
+// It is shared by the stream proxy and the GET / landing redirect so both
+// derive the same base.
+func ExternalBase(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"

@@ -109,6 +109,16 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	if err != nil {
 		return err
 	}
+	publicURL := publicBaseURL(lookup, "STREMIO_PUBLIC_URL")
+	// STREMIO_PUBLIC_URL is the general base the stream proxy falls back to
+	// when its own URL is unset. It deliberately does NOT enable the
+	// local-files HTTP endpoint: that stays an explicit opt-in via
+	// STREMIO_LOCAL_FILES_PUBLIC_URL, since it exposes file downloads.
+	proxyPublicURL := strings.TrimRight(getenv(lookup, "STREMIO_PROXY_PUBLIC_URL", ""), "/")
+	if proxyPublicURL == "" {
+		proxyPublicURL = publicURL
+	}
+	localFilesPublicURL := strings.TrimRight(getenv(lookup, "STREMIO_LOCAL_FILES_PUBLIC_URL", ""), "/")
 	tcfg := types.Config{
 		HTTPPort:            envInt(lookup, "HTTP_PORT", 11470),
 		HTTPSPort:           envInt(lookup, "HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
@@ -117,6 +127,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		MemoryCacheSize:     envInt64(lookup, "STREMIO_MEMORY_CACHE_SIZE", 0), // bytes; 0 = disabled (write pieces to disk)
 		ListenPort:          envInt(lookup, "BT_LISTEN_PORT", 0),
 		WebUI:               getenv(lookup, "WEB_UI_LOCATION", "https://web.stremio.com/"),
+		PublicURL:           publicURL,
 		Version:             version,
 		TrackersMax:         envInt(lookup, "STREMIO_TRACKERS_MAX", 5),
 		ProxyPassword:       getenv(lookup, "STREMIO_PROXY_PASSWORD", ""),
@@ -124,7 +135,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		ProxyIPACL:          getenv(lookup, "STREMIO_PROXY_IP_ACL", ""),
 		ProxyPrebuffer:      envInt(lookup, "STREMIO_PROXY_PREBUFFER", 3),
 		ProxySegCacheTTL:    envInt(lookup, "STREMIO_PROXY_SEG_CACHE_TTL", 300),
-		ProxyPublicURL:      getenv(lookup, "STREMIO_PROXY_PUBLIC_URL", ""),
+		ProxyPublicURL:      proxyPublicURL,
 		ProxyUpstream:       getenv(lookup, "STREMIO_PROXY_UPSTREAM", ""),
 		BitmagnetURL:        getenv(lookup, "STREMIO_BITMAGNET_URL", ""),
 		TorznabURL:          getenv(lookup, "STREMIO_TORZNAB_URL", ""),
@@ -136,7 +147,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		PeersPerTorrent:     envInt(lookup, "STREMIO_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
 		TrackersURL:         trackersURL(lookup),                                 // remote tracker list; "" disables remote fetch (STREMIO_TRACKERS_URL)
 		LocalIMDB:           envBool(lookup, "STREMIO_LOCAL_IMDB", true),         // local-files addon IMDB resolution; default on
-		LocalFilesPublicURL: strings.TrimRight(getenv(lookup, "STREMIO_LOCAL_FILES_PUBLIC_URL", ""), "/"),
+		LocalFilesPublicURL: localFilesPublicURL,
 		BTEncryption:        getenv(lookup, "STREMIO_BT_ENCRYPTION", "prefer"),
 		BTProxy:             getenv(lookup, "STREMIO_BT_PROXY", ""),
 		DHTBootstrap:        getenv(lookup, "STREMIO_DHT_BOOTSTRAP", ""),

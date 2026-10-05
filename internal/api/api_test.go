@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -1412,6 +1413,29 @@ func TestHandlerLanding_Redirect(t *testing.T) {
 	}
 	if !strings.Contains(loc, "streamingServer=") {
 		t.Errorf("Location = %q; must contain streamingServer=", loc)
+	}
+}
+
+// TestHandlerLanding_PreservesWebUIQuery checks that the streamingServer
+// parameter is merged into WEB_UI_LOCATION rather than appended blindly, so a
+// configured query string survives.
+func TestHandlerLanding_PreservesWebUIQuery(t *testing.T) {
+	h := newHandlerWithCfg(t, func(c *types.Config) {
+		c.WebUI = "https://web.stremio.com/?theme=dark"
+	})
+	rec := serve(t, h, http.MethodGet, "/", nil)
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d; want 307", rec.Code)
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("Location is not a URL: %v", err)
+	}
+	if got := loc.Query().Get("theme"); got != "dark" {
+		t.Errorf("theme = %q; want the configured query preserved", got)
+	}
+	if got := loc.Query().Get("streamingServer"); got == "" {
+		t.Error("streamingServer missing from the redirect")
 	}
 }
 

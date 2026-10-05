@@ -194,6 +194,45 @@ func TestExternalBaseXForwardedProtoHost(t *testing.T) {
 	}
 }
 
+func TestExternalBaseForwardedProtoListTakesFirst(t *testing.T) {
+	h := New(Config{})
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Host = "cdn.example.com"
+	r.RemoteAddr = "127.0.0.1:5555" // trusted reverse proxy
+	r.Header.Set("X-Forwarded-Proto", "https, http")
+	got := h.externalBase(r)
+	if got != "https://cdn.example.com" {
+		t.Errorf("got %q want %q", got, "https://cdn.example.com")
+	}
+}
+
+func TestExternalBaseIgnoresBogusForwardedProto(t *testing.T) {
+	h := New(Config{})
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Host = "cdn.example.com"
+	r.RemoteAddr = "127.0.0.1:5555" // trusted reverse proxy
+	r.Header.Set("X-Forwarded-Proto", "ftp")
+	got := h.externalBase(r)
+	if got != "http://cdn.example.com" {
+		t.Errorf("got %q want %q", got, "http://cdn.example.com")
+	}
+}
+
+// TestExternalBaseIgnoresForwardedFromPublicPeer guards the trusted-proxy rule:
+// a public client must not be able to spoof the base via X-Forwarded-*.
+func TestExternalBaseIgnoresForwardedFromPublicPeer(t *testing.T) {
+	h := New(Config{})
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Host = "internal:8080"
+	r.RemoteAddr = "203.0.113.1:1234" // public peer
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "cdn.example.com")
+	got := h.externalBase(r)
+	if got != "http://internal:8080" {
+		t.Errorf("got %q want %q", got, "http://internal:8080")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // buildProxyURL
 // ---------------------------------------------------------------------------

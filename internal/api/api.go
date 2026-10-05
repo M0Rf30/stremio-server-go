@@ -1320,16 +1320,25 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 // @Success  307
 // @Router   / [get]
 func (s *server) handleLanding(w http.ResponseWriter, r *http.Request) {
-	scheme := "http://"
-	if r.TLS != nil {
-		scheme = "https://"
+	base := s.cfg.PublicURL
+	if base == "" {
+		base = streamproxy.ExternalBase(r)
 	}
-	sep := "?"
-	if strings.Contains(s.cfg.WebUI, "?") {
-		sep = "&"
+	loc, err := url.Parse(s.cfg.WebUI)
+	if err != nil {
+		http.Error(w, "invalid WEB_UI_LOCATION", http.StatusInternalServerError)
+		return
 	}
-	loc := s.cfg.WebUI + sep + "streamingServer=" + url.QueryEscape(scheme+r.Host)
-	http.Redirect(w, r, loc, http.StatusTemporaryRedirect)
+	// Set the parameters on the parsed URL so an existing query string in
+	// WEB_UI_LOCATION is preserved and the query is encoded for us. The
+	// app.strem.io shell reads `streamingServer`; stremio-web reads
+	// `streamingServerUrl` (src/App/SearchParamsHandler.js), so set both and
+	// the redirect works whichever shell WEB_UI_LOCATION points at.
+	q := loc.Query()
+	q.Set("streamingServer", base)
+	q.Set("streamingServerUrl", base)
+	loc.RawQuery = q.Encode()
+	http.Redirect(w, r, loc.String(), http.StatusTemporaryRedirect)
 }
 
 // ---- media helpers --------------------------------------------------------
@@ -1798,6 +1807,9 @@ func computeInterfaces() []string {
 }
 
 func (s *server) baseURL() string {
+	if s.cfg.PublicURL != "" {
+		return s.cfg.PublicURL
+	}
 	for _, a := range availableInterfaces() {
 		if net.ParseIP(a) != nil && strings.Count(a, ":") == 0 { // first IPv4
 			return fmt.Sprintf("http://%s:%d", a, s.cfg.HTTPPort)

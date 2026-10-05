@@ -14,6 +14,7 @@
 package app
 
 import (
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -232,6 +233,23 @@ func metadataURL(lookup Lookup) string {
 		return ""
 	}
 	return strings.TrimRight(strings.TrimSpace(v), "/")
+}
+
+// publicBaseURL reads an externally reachable base URL (e.g.
+// STREMIO_PUBLIC_URL) and validates it: it must parse, use an http(s) scheme
+// and carry a host. An invalid value is ignored with a warning rather than
+// producing a malformed redirect or baseUrl.
+func publicBaseURL(lookup Lookup, key string) string {
+	raw := strings.TrimRight(strings.TrimSpace(getenv(lookup, key, "")), "/")
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		logging.For("config").Warn("ignoring invalid public URL", "env", key, "value", raw)
+		return ""
+	}
+	return raw
 }
 
 // defaultTrackersURL is the curated public tracker list fetched and ranked at
