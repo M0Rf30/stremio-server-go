@@ -5,5 +5,5 @@ version = 1
 [[annotations]]
 path = ["LICENSE", "go.sum", ".containerignore", "docs/swagger.json", "docs/swagger.yaml"]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Gianluca Boiano"
+SPDX-FileCopyrightText = "2026 The stremio-server-go Authors"
 SPDX-License-Identifier = "MIT"

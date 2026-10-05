@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 Gianluca Boiano
+SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
 
 SPDX-License-Identifier: MIT
 -->
@@ -453,4 +453,10 @@ DASH manifests (`415`), whose nested URLs it does not rewrite.
 
 ## License
 
-[MIT](LICENSE) - Copyright (c) 2026 Gianluca Boiano.
+[MIT](LICENSE) - Copyright (c) 2026 [The stremio-server-go Authors](AUTHORS).
+
+Contributions are accepted under the same license. New files carry the
+project's SPDX header (copyright holder "The stremio-server-go Authors",
+license MIT; `reuse annotate --copyright 'The stremio-server-go Authors'
+--license MIT <file>`); add yourself to [AUTHORS](AUTHORS) in your first pull
+request.

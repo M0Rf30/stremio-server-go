@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# SPDX-FileCopyrightText: 2026 Gianluca Boiano
+# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
 #
 # SPDX-License-Identifier: MIT
 

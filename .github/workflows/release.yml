@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Gianluca Boiano
+# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
 #
 # SPDX-License-Identifier: MIT
 
@@ -90,7 +90,7 @@ jobs:
           echo "ANDROID_386_CC=$bin/i686-linux-android21-clang" >> "$GITHUB_ENV"
           echo "ANDROID_386_CXX=$bin/i686-linux-android21-clang++" >> "$GITHUB_ENV"
       - name: Install syft (for goreleaser SBOMs)
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
