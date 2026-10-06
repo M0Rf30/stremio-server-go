@@ -327,6 +327,34 @@ func redactRequestURI(u *url.URL) string {
 	return userinfoRe.ReplaceAllString(uri, "${1}REDACTED@")
 }
 
+// stripTrackerPrefixes reduces request-supplied `tr` values to bare announce
+// URLs. stremio-core builds a torrent stream URL's `tr` params verbatim from
+// the stream's announce/sources list (stream.rs, StreamSource::Torrent), and
+// Torrentio-style addons ship that list as "tracker:<announce URL>" and
+// "dht:<infohash>" entries — the same source syntax peerSearch.sources uses
+// (see trackersFromSources). Without this a "tracker:"-wrapped URL parses as an
+// opaque URL with no host and filterRequestTrackers silently drops it, so the
+// engine never learns the stream's own trackers. "dht:" entries carry no
+// announce URL (anacrolix's DHT finds peers on its own) and are skipped.
+func stripTrackerPrefixes(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]string, 0, len(in))
+	for _, tr := range in {
+		tr = strings.TrimSpace(tr)
+		if strings.HasPrefix(tr, "dht:") {
+			continue
+		}
+		tr = strings.TrimSpace(strings.TrimPrefix(tr, "tracker:"))
+		if tr == "" {
+			continue
+		}
+		out = append(out, tr)
+	}
+	return out
+}
+
 // filterRequestTrackers drops request-supplied tracker URLs whose host is
 // localhost or a literal loopback, unspecified, link-local or cloud-metadata
 // IP, so a request cannot make the torrent client announce to local services
@@ -727,7 +755,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 	trackers := q["tr"]
 	mustInc := compileMustInclude(q["f"])
 
-	eng, err := s.em.EnsureEngine(ih, types.AddOptions{Trackers: filterRequestTrackers(trackers)})
+	eng, err := s.em.EnsureEngine(ih, types.AddOptions{Trackers: filterRequestTrackers(stripTrackerPrefixes(trackers))})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
