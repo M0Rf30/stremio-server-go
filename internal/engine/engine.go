@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1276,19 +1277,36 @@ func (e *engine) warmMoov(idx int) {
 			e.abandonTailWarm(idx)
 			return
 		}
-		buf := make([]byte, 64<<10)
-		for {
-			n, err := r.ReadContext(ctx, buf) // bounded; errors on timeout or torrent drop
-			if n == 0 || err != nil {
-				// Timed out or the torrent was dropped: the tail window is
-				// still marked Readahead, so it keeps being requested with no
-				// reader wanting it. Drop it and allow a later reader to warm
-				// it again.
-				e.abandonTailWarm(idx)
-				return
-			}
+		if !drainTail(ctx, r) {
+			e.abandonTailWarm(idx)
 		}
 	}()
+}
+
+// tailReader is the slice of torrent.Reader that drainTail needs.
+type tailReader interface {
+	ReadContext(ctx context.Context, b []byte) (int, error)
+}
+
+// drainTail reads r through to the end, discarding the bytes, so the tail
+// pieces get real demand (see warmMoov). It reports whether the tail was
+// delivered: true on a clean io.EOF, false when the read failed first (ctx
+// deadline, torrent dropped) or stopped making progress. Reaching EOF is the
+// success case — the tail is in hand — so warmMoov must NOT treat it like a
+// timed-out pre-read (abandonTailWarm clears the once-only marker, which made
+// every later NewReader — i.e. every Range request a player issues — re-run
+// needsTailWarm and re-read the whole tail window).
+func drainTail(ctx context.Context, r tailReader) bool {
+	buf := make([]byte, 64<<10)
+	for {
+		n, err := r.ReadContext(ctx, buf) // bounded; errors on timeout or torrent drop
+		if err != nil {
+			return errors.Is(err, io.EOF)
+		}
+		if n == 0 {
+			return false
+		}
+	}
 }
 
 // abandonTailWarm gives up on a bounded tail pre-read that did not complete:
