@@ -909,7 +909,7 @@ func (m *manager) evict(budget int64) {
 			ih = rel[:i]
 		}
 		if info, err2 := d.Info(); err2 == nil {
-			dirSizes[ih] += info.Size()
+			dirSizes[ih] += allocatedSize(info)
 		}
 		return nil
 	})
