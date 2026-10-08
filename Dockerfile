@@ -7,7 +7,9 @@
 # ---------------------------------------------------------------------------
 # The builder runs natively on the build host ($BUILDPLATFORM) and cross-compiles
 # to the requested target — pure-Go (CGO disabled), so no QEMU emulation needed.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27-alpine AS build
+ARG GO_IMAGE=docker.io/library/golang:1.27.1-alpine3.24
+ARG ALPINE_IMAGE=docker.io/library/alpine:3.24
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 
 RUN apk add --no-cache git ca-certificates
 
@@ -38,7 +40,7 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-amd64}" go bui
 # ---------------------------------------------------------------------------
 # Runtime stage
 # ---------------------------------------------------------------------------
-FROM docker.io/library/alpine:3.24
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.title="stremio-server-go" \
       org.opencontainers.image.description="IPv6-capable drop-in Stremio streaming server" \

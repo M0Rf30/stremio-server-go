@@ -164,5 +164,29 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
       - run: govulncheck ./...
+
+  docker:
+    name: Docker build & smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build image
+        run: docker build -t stremio-server-go:ci .
+      - name: Smoke test (/heartbeat + healthcheck)
+        run: |
+          cid="$(docker run -d -p 11470:11470 stremio-server-go:ci)"
+          trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:11470/heartbeat; then ok=1; break; fi
+            sleep 1
+          done
+          test "${ok:-0}" = 1
+          for i in $(seq 1 20); do
+            s="$(docker inspect -f '{{.State.Health.Status}}' "$cid")"
+            [ "$s" = healthy ] && exit 0
+            sleep 3
+          done
+          echo "container not healthy: $s"; exit 1
