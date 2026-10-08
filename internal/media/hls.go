@@ -2044,12 +2044,8 @@ func (m *hlsManager) g() *probeGuard {
 	return &m.guard
 }
 
-// runProbe probes mediaURL through the m.probe seam (probeMedia by default).
-func (m *hlsManager) runProbe(mediaURL string) probeMediaResult {
-	return m.runProbeCtx(context.Background(), mediaURL)
-}
-
-// runProbeCtx is runProbe bounded additionally by ctx.
+// runProbeCtx probes mediaURL through the m.probe seam (probeMedia by
+// default), bounded by ctx.
 func (m *hlsManager) runProbeCtx(ctx context.Context, mediaURL string) probeMediaResult {
 	probe := m.probe
 	if probe == nil {
