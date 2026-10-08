@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -155,6 +156,16 @@ func (e *engine) ensureDownloading(idx int) {
 			demote = append(demote, i)
 			delete(e.selected, i)
 			delete(e.primed, i)
+			delete(e.prefetched, i)
+		}
+	}
+	// Files primed only by GuessFileIdx (never selected) must release their
+	// boundary pieces once another file is the one being played.
+	for i := range e.primed {
+		if _, sel := e.selected[i]; !sel && i != idx && e.reading[i] == 0 {
+			demote = append(demote, i)
+			delete(e.primed, i)
+			delete(e.prefetched, i)
 		}
 	}
 	if !already {
@@ -176,6 +187,7 @@ func (e *engine) ensureDownloading(idx int) {
 
 // manager owns the anacrolix Client and the live engine map, satisfying types.EngineManager.
 type manager struct {
+	maxEngines  int // active-engine cap; <=0 unlimited
 	client      *torrent.Client
 	cfg         types.Config
 	downLimiter *rate.Limiter // shared pointer in cc.DownloadRateLimiter; updated by SetLimitFn
@@ -382,6 +394,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		storage:                    storageCloser,
 		purging:                    make(map[string]chan struct{}),
 		establishedConnsPerTorrent: est,
+		maxEngines:                 maxEnginesFromEnv(),
 	}
 	// Wire the evicted-piece re-download hook now that the manager (and its
 	// engine map) exists. No torrents are added until EnsureEngine, so this is
@@ -390,6 +403,37 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		memStore.refetch = m.refetchPiece
 	}
 	return m, nil
+}
+
+// ErrTooManyEngines aliases types.ErrTooManyEngines.
+var ErrTooManyEngines = types.ErrTooManyEngines
+
+// defaultMaxEngines is the active-engine cap when STREMIO_MAX_ENGINES is unset.
+const defaultMaxEngines = 20
+
+func maxEnginesFromEnv() int {
+	if v := strings.TrimSpace(os.Getenv("STREMIO_MAX_ENGINES")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n // <=0 disables the cap
+		}
+	}
+	return defaultMaxEngines
+}
+
+// oldestIdleLocked returns the least-recently-used engine with no open
+// readers, or "". Caller holds m.mu.
+func (m *manager) oldestIdleLocked() string {
+	var best string
+	var bestT time.Time
+	for ih, e := range m.engines {
+		e.mu.Lock()
+		idle, la := e.openReaders == 0, e.lastAccess
+		e.mu.Unlock()
+		if idle && (best == "" || la.Before(bestT)) {
+			best, bestT = ih, la
+		}
+	}
+	return best
 }
 
 // --------------------------------------------------------------------------
@@ -447,6 +491,18 @@ func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.En
 		if waitCh := m.purging[ih]; waitCh != nil {
 			m.mu.Unlock()
 			<-waitCh
+			continue
+		}
+		if m.maxEngines > 0 && len(m.engines) >= m.maxEngines {
+			victim := m.oldestIdleLocked()
+			if victim == "" {
+				n := len(m.engines)
+				m.mu.Unlock()
+				return nil, fmt.Errorf("engine: %d engines active: %w", n, ErrTooManyEngines)
+			}
+			finish := m.beginPurge(victim, m.engines[victim])
+			m.mu.Unlock()
+			finish()
 			continue
 		}
 
@@ -1530,11 +1586,22 @@ func (p *pinnedReader) Close() error {
 		}
 		p.e.mu.Unlock()
 		if demote {
-			files := p.e.t.Files()
-			if p.idx >= 0 && p.idx < len(files) {
-				files[p.idx].SetPriority(torrent.PiecePriorityNone)
+			// Re-check under mu: a reader may have reopened this file between
+			// the unlock above and now; demoting then would starve it.
+			p.e.mu.Lock()
+			_, sel := p.e.selected[p.idx]
+			still := p.e.reading[p.idx] == 0 && !sel
+			if still {
+				delete(p.e.prefetched, p.idx)
+				files := p.e.t.Files()
+				if p.idx >= 0 && p.idx < len(files) {
+					files[p.idx].SetPriority(torrent.PiecePriorityNone)
+				}
 			}
-			p.e.releaseBoundary([]int{p.idx})
+			p.e.mu.Unlock()
+			if still {
+				p.e.releaseBoundary([]int{p.idx})
+			}
 		}
 	})
 	return p.closeErr
@@ -1585,18 +1652,22 @@ func (e *engine) prefetchNext(idx int) {
 	f := files[next]
 	begin := f.BeginPieceIndex()
 	end := f.EndPieceIndex()
+	_ = begin
+	// Raise-only: a boundary piece already at Now (e.g. shared with the file
+	// being played) must never be lowered to Normal.
+	e.raiseBoundary(prefetchSpans(begin, end), torrent.PiecePriorityNormal, e.setPiecePriority)
+	logging.For("engine").Debug("prefetched next-file boundary", "info_hash", e.infoHash, "file_idx", next)
+}
+
+// prefetchSpans returns the header and tail piece spans prefetchNext raises for
+// a file whose piece range is [begin,end).
+func prefetchSpans(begin, end int) []pieceSpan {
 	const prefetchPieces = 4 // header + index only, opportunistic
 	tailStart := end - prefetchPieces
 	if tailStart < begin {
 		tailStart = begin
 	}
-	// Raise-only: a boundary piece already at Now (e.g. shared with the file
-	// being played) must never be lowered to Normal.
-	e.raiseBoundary([]pieceSpan{
-		{begin, min(begin+prefetchPieces, end)},
-		{tailStart, end},
-	}, torrent.PiecePriorityNormal, e.setPiecePriority)
-	logging.For("engine").Debug("prefetched next-file boundary", "info_hash", e.infoHash, "file_idx", next)
+	return []pieceSpan{{begin, min(begin+prefetchPieces, end)}, {tailStart, end}}
 }
 
 // nextVideoIdx returns the index of the first video file after idx, or -1.
@@ -2146,7 +2217,12 @@ func (e *engine) releaseBoundary(demoted []int) {
 		if i < 0 || i >= len(files) {
 			return nil
 		}
-		return boundarySpans(files[i].BeginPieceIndex(), files[i].EndPieceIndex(), info.PieceLength)
+		out := boundarySpans(files[i].BeginPieceIndex(), files[i].EndPieceIndex(), info.PieceLength)
+		// Next-file prefetch pieces raised on behalf of file i.
+		if n := e.nextVideoIdx(i); n >= 0 {
+			out = append(out, prefetchSpans(files[n].BeginPieceIndex(), files[n].EndPieceIndex())...)
+		}
+		return out
 	}
 
 	e.boundaryMu.Lock()
