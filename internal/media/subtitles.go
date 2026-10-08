@@ -23,11 +23,23 @@ import (
 // Fetch supports only http/https URLs; file://, bare paths, and every other
 // scheme are rejected by validateRemoteURL before any request is made.
 func (p *prober) SubtitlesTracks(subsURL string) (interface{}, error) {
-	tracks, err := p.fetchParsedSubs(subsURL)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{"tracks": tracks}, nil
+	return p.SubtitlesTracksContext(context.Background(), subsURL)
+}
+
+// SubtitlesTracksContext is SubtitlesTracks with caller cancellation, bounded
+// concurrency and per-URL singleflight (see ProbeContext).
+func (p *prober) SubtitlesTracksContext(ctx context.Context, subsURL string) (interface{}, error) {
+	return p.guard.do(ctx, "subs|"+normalizeProbeKey(subsURL), func(runCtx context.Context) (interface{}, error) {
+		if err := p.guard.acquire(runCtx); err != nil {
+			return nil, err
+		}
+		defer p.guard.release()
+		data, err := fetchSubBytesCtx(runCtx, subsURL, p.baseURLLocal)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"tracks": parseSubtitles(data)}, nil
+	})
 }
 
 // WriteSubtitles fetches subtitles from `from`, applies offsetMs to every
@@ -94,6 +106,11 @@ func (p *prober) fetchParsedSubs(url string) ([]map[string]interface{}, error) {
 // exempts this server's own origin, whose endpoints the caller can already
 // reach directly.
 func fetchSubBytes(url, selfBase string) ([]byte, error) {
+	return fetchSubBytesCtx(context.Background(), url, selfBase)
+}
+
+// fetchSubBytesCtx is fetchSubBytes bounded additionally by ctx.
+func fetchSubBytesCtx(parent context.Context, url, selfBase string) ([]byte, error) {
 	if err := validateRemoteURL(url, selfBase); err != nil {
 		return nil, err
 	}
@@ -102,7 +119,7 @@ func fetchSubBytes(url, selfBase string) ([]byte, error) {
 	if isSelfOrigin(url, selfBase) {
 		url = localize(url)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

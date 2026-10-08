@@ -220,9 +220,19 @@ type hlsManager struct {
 	// probe is the ffprobe seam; nil means probeMedia. Only tests set it, so
 	// StartHLS can be exercised end to end without a real ffprobe.
 	probe func(ctx context.Context, mediaURL, selfBase string, timeout time.Duration) probeMediaResult
+	// guard bounds concurrent probes and dedupes identical in-flight ones.
+	// newHLS gives each manager its own; media.New swaps in the prober's so
+	// Probe/Tracks/StartHLS share one semaphore.
+	guard  probeGuard
+	shared *probeGuard
 }
 
 // ── encoder detection ─────────────────────────────────────────────────────────
+
+// ffmpegDetectTimeout bounds the startup capability probes (-encoders,
+// -filters). A hung ffmpeg (broken driver, stalled mount) fails open to
+// software encoding instead of blocking server start.
+const ffmpegDetectTimeout = 10 * time.Second
 
 // encListOnce guards the one-time run of `ffmpeg -hide_banner -encoders`.
 var (
@@ -234,7 +244,9 @@ var (
 // The command is run exactly once per process; subsequent calls are instant.
 func encodersList() string {
 	encListOnce.Do(func() {
-		out, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
+		ctx, cancel := context.WithTimeout(context.Background(), ffmpegDetectTimeout)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders").Output()
 		if err == nil {
 			encListOut = string(out)
 		}
@@ -664,6 +676,13 @@ func doviFromSideData(c *videoColor, list []json.RawMessage) {
 // Overrides never bypass the mediaURL SSRF check or the session-id guard
 // below, which both run first regardless of opts.
 func (m *hlsManager) StartHLS(id, mediaURL string, opts types.HLSSessionOptions) (string, error) {
+	return m.StartHLSContext(context.Background(), id, mediaURL, opts)
+}
+
+// StartHLSContext is StartHLS with caller cancellation: a cancelled ctx stops
+// this caller waiting on the (shared, deduplicated) initial probe. The probe
+// itself keeps running for other waiters and still fills the probe cache.
+func (m *hlsManager) StartHLSContext(ctx context.Context, id, mediaURL string, opts types.HLSSessionOptions) (string, error) {
 	if mediaURL == "" {
 		return "", fmt.Errorf("hls: missing mediaURL")
 	}
@@ -745,27 +764,36 @@ func (m *hlsManager) StartHLS(id, mediaURL string, opts types.HLSSessionOptions)
 		if hasCached && time.Now().Before(cached.expiresAt) {
 			res = cached.result
 		} else {
-			res = m.runProbe(mediaURL)
-			m.mu.Lock()
-			if res.duration == 0 {
-				// Cache the negative result to short-circuit future probes.
-				m.probeCache[mediaURL] = probeCacheEntry{
-					result:    res,
-					expiresAt: time.Now().Add(m.cfg.NegProbeTTL),
+			// Identical concurrent probes (same URL, any session id) share one
+			// ffprobe and count against the shared probe semaphore.
+			v, perr := m.g().do(ctx, "hlsprobe|"+normalizeProbeKey(mediaURL), func(runCtx context.Context) (interface{}, error) {
+				m.mu.Lock()
+				c, ok := m.probeCache[mediaURL]
+				m.mu.Unlock()
+				if ok && time.Now().Before(c.expiresAt) {
+					return c.result, nil
 				}
+				if err := m.g().acquire(runCtx); err != nil {
+					return nil, err
+				}
+				defer m.g().release()
+				r := m.runProbeCtx(runCtx, mediaURL)
+				ttl := m.cfg.PosProbeTTL
+				if r.duration == 0 {
+					// Negative result: short-circuit future probes.
+					ttl = m.cfg.NegProbeTTL
+				}
+				m.mu.Lock()
+				m.probeCache[mediaURL] = probeCacheEntry{result: r, expiresAt: time.Now().Add(ttl)}
 				// Prune expired / excess entries to bound cache size.
 				m.sweepProbeCache()
-			} else {
-				// Cache positive result; subsequent sessions for the same URL
-				// skip the expensive ffprobe entirely until it expires.
-				// sweepProbeCache evicts expired/excess entries as usual.
-				m.probeCache[mediaURL] = probeCacheEntry{
-					result:    res,
-					expiresAt: time.Now().Add(m.cfg.PosProbeTTL),
-				}
-				m.sweepProbeCache()
+				m.mu.Unlock()
+				return r, nil
+			})
+			if perr != nil {
+				return "", fmt.Errorf("hls: probe: %w", perr)
 			}
-			m.mu.Unlock()
+			res = v.(probeMediaResult)
 		}
 
 		// Store result under the session write lock; another goroutine racing
@@ -2008,13 +2036,26 @@ func (m *hlsManager) sweepProbeCache() {
 	}
 }
 
+// g returns the probe guard in effect: the prober's shared one when set.
+func (m *hlsManager) g() *probeGuard {
+	if m.shared != nil {
+		return m.shared
+	}
+	return &m.guard
+}
+
 // runProbe probes mediaURL through the m.probe seam (probeMedia by default).
 func (m *hlsManager) runProbe(mediaURL string) probeMediaResult {
+	return m.runProbeCtx(context.Background(), mediaURL)
+}
+
+// runProbeCtx is runProbe bounded additionally by ctx.
+func (m *hlsManager) runProbeCtx(ctx context.Context, mediaURL string) probeMediaResult {
 	probe := m.probe
 	if probe == nil {
 		probe = probeMedia
 	}
-	return probe(context.Background(), mediaURL, m.selfBase, m.cfg.ProbeTimeout)
+	return probe(ctx, mediaURL, m.selfBase, m.cfg.ProbeTimeout)
 }
 
 // validSessionID reports whether id is safe to use as a directory name under
@@ -2031,6 +2072,12 @@ func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', 3, 64) }
 
 func (p *prober) StartHLS(id, mediaURL string, opts types.HLSSessionOptions) (string, error) {
 	return p.hls.StartHLS(id, mediaURL, opts)
+}
+
+// StartHLSContext is StartHLS with caller cancellation (see
+// hlsManager.StartHLSContext).
+func (p *prober) StartHLSContext(ctx context.Context, id, mediaURL string, opts types.HLSSessionOptions) (string, error) {
+	return p.hls.StartHLSContext(ctx, id, mediaURL, opts)
 }
 func (p *prober) HLSFile(ctx context.Context, id, name string) (string, string, error) {
 	return p.hls.HLSFile(ctx, id, name)

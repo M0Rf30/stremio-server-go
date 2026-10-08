@@ -5,6 +5,7 @@
 package media
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -174,7 +175,9 @@ var (
 // invoked at all when tone mapping was requested.
 func filtersList() string {
 	filtListOnce.Do(func() {
-		out, err := exec.Command("ffmpeg", "-hide_banner", "-filters").Output()
+		ctx, cancel := context.WithTimeout(context.Background(), ffmpegDetectTimeout)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-filters").Output()
 		if err == nil {
 			filtListOut = string(out)
 		}
