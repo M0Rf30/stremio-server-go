@@ -49,6 +49,9 @@ type segCache struct {
 
 	janitorOnce sync.Once
 	sweepEvery  time.Duration // janitor interval override (0 = derived from ttl)
+	stopOnce    sync.Once
+	stopCh      chan struct{}
+	stopped     sync.Once
 }
 
 // newSegCache creates a segCache with the given TTL and entry cap.
@@ -63,6 +66,15 @@ func newSegCache(ttl time.Duration, maxEntries int) *segCache {
 	}
 }
 
+// stop terminates the janitor goroutine (idempotent).
+func (c *segCache) stop() {
+	c.stopped.Do(func() {
+		c.janitorOnce.Do(func() {}) // prevent a later start
+		c.stopOnce.Do(func() { c.stopCh = make(chan struct{}) })
+		close(c.stopCh)
+	})
+}
+
 // startJanitor launches, at most once, the background sweep that drops
 // expired entries. Without it an expired entry would linger until it was
 // touched again or pushed out by LRU/byte-budget eviction.
@@ -72,11 +84,18 @@ func (c *segCache) startJanitor() {
 		if interval <= 0 {
 			interval = min(max(c.ttl/2, time.Second), time.Minute)
 		}
+		c.stopOnce.Do(func() { c.stopCh = make(chan struct{}) })
+		stop := c.stopCh
 		go func() {
 			t := time.NewTicker(interval)
 			defer t.Stop()
-			for range t.C {
-				c.sweep()
+			for {
+				select {
+				case <-t.C:
+					c.sweep()
+				case <-stop:
+					return
+				}
 			}
 		}()
 	})

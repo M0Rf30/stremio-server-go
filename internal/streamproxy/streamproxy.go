@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -40,6 +41,13 @@ type Config struct {
 	PublicURL     string        // explicit external base; "" = derive from request
 	Client        *http.Client  // shared streaming HTTP client
 	UpstreamProxy string        // global outbound proxy URL; "" = direct (socks5/http/https)
+	// TrustedProxies lists extra reverse-proxy CIDRs (beyond loopback) whose
+	// X-Forwarded-* headers are honoured (STREMIO_TRUSTED_PROXIES).
+	TrustedProxies []*net.IPNet
+	// BlockPrivate rejects loopback/private/link-local destinations even when
+	// no auth is configured. The server sets it unless
+	// STREMIO_PROXY_ALLOW_PRIVATE=1. Zero value keeps the legacy behaviour.
+	BlockPrivate bool
 }
 
 // ipCacheEntry holds a resolved public egress IP with an expiry timestamp.
@@ -66,6 +74,7 @@ const maxConcurrentPrefetch = 8
 type Handler struct {
 	cfg          Config
 	cache        *segCache
+	closeOnce    sync.Once
 	proxyMu      sync.Mutex
 	proxyClients map[string]proxyClientEntry
 	ipMu         sync.Mutex
@@ -85,10 +94,22 @@ type Handler struct {
 	flights  map[string]*flightCall
 }
 
+// Close stops background goroutines (segment-cache janitor). Idempotent.
+func (h *Handler) Close() {
+	h.closeOnce.Do(func() {
+		if h.cache != nil {
+			h.cache.stop()
+		}
+	})
+}
+
 // New creates a Handler. A nil Client is replaced with http.DefaultClient.
 func New(cfg Config) *Handler {
 	if cfg.Client == nil {
 		cfg.Client = http.DefaultClient
+	}
+	if cfg.TrustedProxies != nil {
+		SetTrustedProxies(cfg.TrustedProxies)
 	}
 	var c *segCache
 	if cfg.SegCacheTTL > 0 {
@@ -592,11 +613,32 @@ func peerIP(r *http.Request) net.IP {
 	return net.ParseIP(host)
 }
 
-// isTrustedProxy reports whether ip is a loopback or private address, i.e. a
-// peer that may legitimately be a local/same-network reverse proxy (nginx,
-// Caddy, a container-network edge such as the HF Spaces proxy, ...).
+// trustedProxyNets holds the operator-configured reverse-proxy CIDRs
+// (STREMIO_TRUSTED_PROXIES) whose forwarded headers are honoured.
+var trustedProxyNets atomic.Pointer[[]*net.IPNet]
+
+// SetTrustedProxies installs the CIDRs of reverse proxies whose
+// X-Forwarded-* headers are trusted in addition to loopback.
+func SetTrustedProxies(nets []*net.IPNet) { trustedProxyNets.Store(&nets) }
+
+// isTrustedProxy reports whether ip is a loopback address or falls inside a
+// configured trusted-proxy CIDR. Private/LAN peers are NOT implicitly trusted:
+// any LAN host could otherwise spoof X-Forwarded-For to bypass the IP ACL.
 func isTrustedProxy(ip net.IP) bool {
-	return ip != nil && netguard.IsPrivate(ip)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	if p := trustedProxyNets.Load(); p != nil {
+		for _, n := range *p {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // clientIP returns the effective client IP.
@@ -700,10 +742,38 @@ func setProxySecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "sandbox")
 }
 
-// applyRespHeaders writes RespHeaders overrides to w, skipping any Access-Control-* key.
+// BlockedRespHeader reports whether a client-injected response header (r_ /
+// r=) must be refused: cookie/redirect/refresh/CSP/CORS headers would let a
+// crafted proxy URL plant cookies on this origin, navigate the browser, or
+// weaken the sandbox.
+func BlockedRespHeader(name string) bool {
+	k := strings.ToLower(strings.TrimSpace(name))
+	switch k {
+	case "set-cookie", "set-cookie2", "refresh", "location", "content-security-policy",
+		"content-security-policy-report-only", "x-content-type-options":
+		return true
+	}
+	return strings.HasPrefix(k, "access-control-")
+}
+
+// BlockedReqHeader reports whether a client-injected upstream request header
+// (h_ / h=) must be dropped: hop-by-hop and routing headers, and headers that
+// identify or authenticate against this server (X-Rivulet-*, forwarded-for).
+func BlockedReqHeader(name string) bool {
+	k := strings.ToLower(strings.TrimSpace(name))
+	switch k {
+	case "host", "connection", "keep-alive", "proxy-authorization", "proxy-authenticate",
+		"proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "content-length",
+		"forwarded", "x-real-ip":
+		return true
+	}
+	return strings.HasPrefix(k, "x-rivulet-") || strings.HasPrefix(k, "x-forwarded-")
+}
+
+// applyRespHeaders writes RespHeaders overrides to w, skipping blocked keys.
 func applyRespHeaders(w http.ResponseWriter, rh http.Header) {
 	for k, vs := range rh {
-		if strings.HasPrefix(strings.ToLower(k), "access-control-") {
+		if BlockedRespHeader(k) {
 			continue
 		}
 		for _, v := range vs {
@@ -752,6 +822,9 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	// passthrough path; the decrypt path always issues a full GET without Range.
 	upHdr := make(http.Header)
 	for k, vs := range opts.ReqHeaders {
+		if BlockedReqHeader(k) {
+			continue
+		}
 		upHdr[k] = append([]string(nil), vs...)
 	}
 
@@ -908,8 +981,10 @@ func (h *Handler) ValidateDest(rawurl string) error {
 		}
 	}
 
-	// The proxy is "protected" when any auth mechanism is active.
-	protected := h.cfg.Password != "" || len(h.cfg.IPACL) > 0 || len(h.cfg.Secret) > 0
+	// The proxy blocks private ranges when any auth mechanism is active or
+	// when cfg.BlockPrivate is set (the server default; see
+	// STREMIO_PROXY_ALLOW_PRIVATE).
+	protected := h.proxyBlockPrivate()
 
 	for _, ip := range ips {
 		if netguard.IsCloudMetadata(ip) {
@@ -920,6 +995,12 @@ func (h *Handler) ValidateDest(rawurl string) error {
 		}
 	}
 	return nil
+}
+
+// Protected reports whether any proxy auth mechanism (password, IP ACL or
+// signing secret) is configured, i.e. the proxy is exposed to untrusted clients.
+func (h *Handler) Protected() bool {
+	return h.cfg.Password != "" || len(h.cfg.IPACL) > 0 || len(h.cfg.Secret) > 0
 }
 
 // Authorize is the exported wrapper over the internal authorize method.
@@ -939,7 +1020,7 @@ func (h *Handler) Authorize(r *http.Request) error {
 // "protected" signal in ValidateDest exactly, so a proxy URL and a
 // destination URL are held to the same trust boundary.
 func (h *Handler) proxyBlockPrivate() bool {
-	return h.cfg.Password != "" || len(h.cfg.IPACL) > 0 || len(h.cfg.Secret) > 0
+	return h.cfg.BlockPrivate || h.Protected()
 }
 
 // validateProxyHost is an SSRF guard for the client-supplied "proxy" query

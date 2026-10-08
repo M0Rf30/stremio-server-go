@@ -96,7 +96,7 @@ type server struct {
 // New returns the HTTP handler for the streaming server.
 func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProber, cfg types.Config) http.Handler {
 	localIMDBDisabled.Store(!cfg.LocalIMDB)
-	blockPrivate := cfg.ProxyPassword != "" || cfg.ProxyIPACL != "" || cfg.ProxySecret != ""
+	blockPrivate := cfg.ProxyPassword != "" || cfg.ProxyIPACL != "" || cfg.ProxySecret != "" || !proxyAllowPrivate()
 	pc := &http.Client{
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
@@ -168,6 +168,28 @@ func originHostAllowed(host string) bool {
 	return false
 }
 
+// originPortAllowed restricts loopback/own-IP origins to this server's own
+// HTTP/HTTPS ports; other local web apps must be listed in
+// STREMIO_ALLOWED_ORIGINS. Unconfigured ports (0) leave it unrestricted.
+func originPortAllowed(cfg types.Config, u *url.URL, scheme string) bool {
+	if cfg.HTTPPort == 0 && cfg.HTTPSPort == 0 {
+		return true
+	}
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return p == cfg.HTTPPort || p == cfg.HTTPSPort
+}
+
 // originEntryMatches reports whether a single STREMIO_ALLOWED_ORIGINS entry
 // matches the request Origin. entry, normOrigin and host are already
 // lower-cased by the caller. An entry may be:
@@ -188,6 +210,9 @@ func originEntryMatches(entry, normOrigin, host string) bool {
 		domain := entry[1:] // leading "." + domain
 		return len(host) > len(domain) && strings.HasSuffix(host, domain)
 	default:
+		if i := strings.Index(normOrigin, "://"); i >= 0 && entry == normOrigin[i+3:] {
+			return true
+		}
 		return entry == host
 	}
 }
@@ -215,7 +240,7 @@ func originAllowed(cfg types.Config, origin string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	if originHostAllowed(host) {
+	if originHostAllowed(host) && originPortAllowed(cfg, u, scheme) {
 		return true
 	}
 	normOrigin := scheme + "://" + strings.ToLower(u.Host)
@@ -263,10 +288,132 @@ func sideEffectingRoute(r *http.Request) bool {
 		return len(seg) >= 2 && (seg[1] == "create" || seg[1] == "remove")
 	}
 	switch first {
-	case "removeAll", "get-https", "casting":
+	case "removeAll", "get-https", "casting", "probe", "tracks", "opensubHash",
+		"subtitlesTracks", "nzb", "ftp", "bitmagnet", "torznab":
+		return true
+	case "zip", "rar", "7zip", "tar", "tgz":
+		return len(seg) >= 2 && seg[1] == "create"
+	case "hlsv2":
+		return strings.Contains(r.URL.Path, "probe")
+	case "proxy", "yt":
+		// <video>/<audio>/<track> loads of these are legitimate cross-site
+		// (stremio-web); any other destination is an attack vector.
+		switch strings.ToLower(r.Header.Get("Sec-Fetch-Dest")) {
+		case "video", "audio", "track":
+			return false
+		}
 		return true
 	}
 	return false
+}
+
+// mediaRoute reports whether the path is a playback route exempt from the
+// Host-header (DNS-rebinding) check.
+func mediaRoute(r *http.Request) bool {
+	seg := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	first := seg[0]
+	if isInfoHash(first) {
+		return len(seg) >= 2 && seg[1] != "create" && seg[1] != "remove"
+	}
+	switch first {
+	case "stream", "hlsv2", "yt", "proxy", "base64":
+		return true
+	case "zip", "rar", "7zip", "tar", "tgz":
+		return len(seg) >= 2 && seg[1] == "stream"
+	}
+	return strings.HasPrefix(first, "subtitles.")
+}
+
+func hostOf(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// hostAllowed defends against DNS rebinding: a non-media request must carry
+// a Host that is loopback, an own interface IP, an IP literal, a .local name,
+// the configured public URL host, or listed in STREMIO_ALLOWED_HOSTS.
+func hostAllowed(cfg types.Config, r *http.Request) bool {
+	if cfg.AllowAllOrigins || mediaRoute(r) {
+		return true
+	}
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || host == "localhost" || net.ParseIP(host) != nil || strings.HasSuffix(host, ".local") {
+		return true
+	}
+	if originHostAllowed(host) {
+		return true
+	}
+	for _, u := range []string{cfg.PublicURL, cfg.ProxyPublicURL, cfg.LocalFilesPublicURL} {
+		if u != "" && hostOf(u) == host {
+			return true
+		}
+	}
+	for _, e := range cfg.AllowedOrigins {
+		if h := hostOf(strings.TrimPrefix(e, "*.")); h != "" && (h == host || (strings.HasPrefix(e, "*.") && strings.HasSuffix(host, "."+h))) {
+			return true
+		}
+	}
+	for _, e := range strings.Split(os.Getenv("STREMIO_ALLOWED_HOSTS"), ",") {
+		if e = strings.ToLower(strings.TrimSpace(e)); e != "" && e == host {
+			return true
+		}
+	}
+	return false
+}
+
+// remoteIP returns the immediate TCP peer address (never X-Forwarded-For).
+func remoteIP(r *http.Request) net.IP {
+	h, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		h = r.RemoteAddr
+	}
+	return net.ParseIP(h)
+}
+
+// proxyAllowPrivate reports STREMIO_PROXY_ALLOW_PRIVATE=1, which re-enables
+// proxying to loopback/private destinations on an unprotected server.
+func proxyAllowPrivate() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("STREMIO_PROXY_ALLOW_PRIVATE")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+// parseTrustedProxies parses STREMIO_TRUSTED_PROXIES (comma-separated CIDRs
+// or bare IPs).
+func parseTrustedProxies(s string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, e := range strings.Split(s, ",") {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if !strings.Contains(e, "/") {
+			if ip := net.ParseIP(e); ip != nil {
+				if ip.To4() != nil {
+					e += "/32"
+				} else {
+					e += "/128"
+				}
+			}
+		}
+		if _, n, err := net.ParseCIDR(e); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // Shared, immutable streaming header values — pre-canonicalized keys to avoid
@@ -396,6 +543,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if crossSiteBlocked(s.cfg, r) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-site request not allowed"})
+		return
+	}
+	if !hostAllowed(s.cfg, r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "host not allowed"})
 		return
 	}
 	hdr := w.Header()
@@ -757,7 +908,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 
 	eng, err := s.em.EnsureEngine(ih, types.AddOptions{Trackers: filterRequestTrackers(stripTrackerPrefixes(trackers))})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeEngineErr(w, err)
 		return
 	}
 	ctx, cancel := withTimeout(r, s.cfg.CreateMetadataWait)
@@ -1021,7 +1172,7 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request, ih string)
 
 	eng, err := s.em.EnsureEngine(ih, opts)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeEngineErr(w, err)
 		return
 	}
 	ctx, cancel := withTimeout(r, s.cfg.CreateMetadataWait)
@@ -1039,11 +1190,13 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request, ih string)
 	// guessedFileIdx
 	if mi := compileMustInclude(body.FileMustInclude); len(mi) > 0 {
 		files := eng.Files()
+	match:
 		for i, f := range files {
 			for _, re := range mi {
 				if re.MatchString(f.Name) {
 					gi := i
 					stats.GuessedFileIdx = &gi
+					break match
 				}
 			}
 		}
@@ -1110,7 +1263,7 @@ func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 	ih := mi.HashInfoBytes().HexString()
 	eng, err := s.em.EnsureEngine(ih, types.AddOptions{MetaInfo: raw})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeEngineErr(w, err)
 		return
 	}
 	ctx, cancel := withTimeout(r, s.cfg.CreateMetadataWait)
@@ -1250,10 +1403,38 @@ var settingsBoolKeys = []string{
 	"autoUpdateEnabled",
 }
 
+// settingsMaxBody caps a POST /settings body.
+const settingsMaxBody = 64 << 10
+
+// settingsAllowedKeys is the allowlist of keys a POST /settings patch may
+// set; anything else is silently dropped (stremio-web round-trips extras).
+var settingsAllowedKeys = map[string]struct{}{
+	"cacheSize": {}, "btMaxConnections": {}, "btHandshakeTimeout": {}, "btRequestTimeout": {},
+	"btDownloadSpeedSoftLimit": {}, "btDownloadSpeedHardLimit": {}, "btMinPeersForStable": {},
+	"remoteHttps": {}, "localAddonEnabled": {}, "transcodeHorsepower": {}, "transcodeMaxBitRate": {},
+	"transcodeConcurrency": {}, "transcodeTrackConcurrency": {}, "transcodeHardwareAccel": {},
+	"transcodeProfile": {}, "allTranscodeProfiles": {}, "transcodeMaxWidth": {}, "proxyStreamsEnabled": {},
+	"seedingEnabled": {}, "trackersSourceUrl": {}, "cachedTrackers": {}, "trackersLastUpdated": {},
+	"autoUpdateEnabled": {}, "updateChannel": {}, "updateCheckIntervalHours": {},
+}
+
 // settingsReadOnlyKeys are server-computed fields a client patch must never
 // override. Present but silently dropped rather than rejected, since
 // stremio-web round-trips the full GET /settings values object on save.
 var settingsReadOnlyKeys = []string{"appPath", "cacheRoot", "serverVersion"}
+
+// settingsWriteAllowed refuses Origin-less POSTs from non-loopback peers
+// (a LAN/remote script, not a browser page) unless an api password is
+// configured and the request supplies it.
+func (s *server) settingsWriteAllowed(r *http.Request) bool {
+	if r.Header.Get("Origin") != "" || s.cfg.AllowAllOrigins {
+		return true
+	}
+	if ip := remoteIP(r); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return s.cfg.ProxyPassword != "" && s.sp.Authorize(r) == nil
+}
 
 // validateSettingsPatch type-checks the known keys of a POST /settings body
 // (API-2). Unknown keys are left untouched — stremio-web sends extras this
@@ -1311,9 +1492,13 @@ func validateSettingsPatch(patch map[string]any) string {
 // @Router   /settings [post]
 func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		if !s.settingsWriteAllowed(r) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "settings write requires a browser origin, a loopback peer, or api_password"})
+			return
+		}
 		var patch map[string]any
 		if r.Body != nil {
-			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&patch); err != nil && !errors.Is(err, io.EOF) {
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, settingsMaxBody)).Decode(&patch); err != nil && !errors.Is(err, io.EOF) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body: " + err.Error()})
 				return
 			}
@@ -1325,6 +1510,11 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, key := range settingsReadOnlyKeys {
 				delete(patch, key)
+			}
+			for key := range patch {
+				if _, ok := settingsAllowedKeys[key]; !ok {
+					delete(patch, key)
+				}
 			}
 			s.ss.Extend(patch)
 			if err := s.ss.Save(); err != nil {
@@ -1921,14 +2111,16 @@ func buildStreamProxyConfig(cfg types.Config, client *http.Client) streamproxy.C
 	}
 
 	return streamproxy.Config{
-		Password:      cfg.ProxyPassword,
-		Secret:        secret,
-		IPACL:         ipACL,
-		Prebuffer:     cfg.ProxyPrebuffer,
-		SegCacheTTL:   time.Duration(cfg.ProxySegCacheTTL) * time.Second,
-		PublicURL:     cfg.ProxyPublicURL,
-		Client:        client,
-		UpstreamProxy: cfg.ProxyUpstream,
+		Password:       cfg.ProxyPassword,
+		Secret:         secret,
+		IPACL:          ipACL,
+		Prebuffer:      cfg.ProxyPrebuffer,
+		SegCacheTTL:    time.Duration(cfg.ProxySegCacheTTL) * time.Second,
+		PublicURL:      cfg.ProxyPublicURL,
+		Client:         client,
+		UpstreamProxy:  cfg.ProxyUpstream,
+		BlockPrivate:   !proxyAllowPrivate(),
+		TrustedProxies: parseTrustedProxies(os.Getenv("STREMIO_TRUSTED_PROXIES")),
 	}
 }
 
@@ -1949,6 +2141,10 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 	}
 	if err := s.sp.Authorize(r); err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !s.sp.Protected() && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	opts, err := url.ParseQuery(seg[1])
@@ -1976,7 +2172,11 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 	}
 	for _, h := range opts["h"] { // injected request headers "key:value"
 		if i := strings.IndexByte(h, ':'); i > 0 {
-			req.Header.Set(strings.TrimSpace(h[:i]), strings.TrimSpace(h[i+1:]))
+			name := strings.TrimSpace(h[:i])
+			if streamproxy.BlockedReqHeader(name) {
+				continue
+			}
+			req.Header.Set(name, strings.TrimSpace(h[i+1:]))
 		}
 	}
 	if rng := r.Header.Get("Range"); rng != "" {
@@ -1997,7 +2197,7 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 	for _, h := range opts["r"] { // injected response headers; skip CORS headers the caller must not override
 		if i := strings.IndexByte(h, ':'); i > 0 {
 			k := http.CanonicalHeaderKey(strings.TrimSpace(h[:i]))
-			if strings.HasPrefix(k, "Access-Control-") || k == "Content-Security-Policy" || k == "X-Content-Type-Options" {
+			if streamproxy.BlockedRespHeader(k) || k == "X-Content-Type-Options" {
 				continue
 			}
 			w.Header().Set(k, strings.TrimSpace(h[i+1:]))
@@ -2065,4 +2265,22 @@ func rfc5987Encode(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// Close releases background resources owned by the handler (stream-proxy
+// segment-cache janitor). Safe to call more than once.
+func (s *server) Close() error {
+	s.sp.Close()
+	return nil
+}
+
+// writeEngineErr maps an EnsureEngine failure to an HTTP status: 503 when the
+// active-engine cap is hit, 500 otherwise.
+func writeEngineErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, types.ErrTooManyEngines) {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }

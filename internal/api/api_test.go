@@ -942,6 +942,7 @@ func TestHandlerGetSettings(t *testing.T) {
 func TestHandlerPostSettings(t *testing.T) {
 	h := newHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(`{"cacheSize":2048}`))
+	req.RemoteAddr = "127.0.0.1:5555"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -1077,9 +1078,9 @@ func TestOriginOwnInterfaceIPAllowed(t *testing.T) {
 		t.Skip("no non-loopback interfaces available on this host")
 	}
 	ip := ifaces[0]
-	origin := "http://" + ip
+	origin := "http://" + ip + ":11470"
 	if strings.Contains(ip, ":") {
-		origin = "http://[" + ip + "]"
+		origin = "http://[" + ip + "]:11470"
 	}
 	h := newHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/heartbeat", nil)
@@ -1179,6 +1180,7 @@ func TestHandlerPostSettingsValidation(t *testing.T) {
 				body = strings.NewReader(tc.body)
 			}
 			req := httptest.NewRequest(http.MethodPost, "/settings", body)
+			req.RemoteAddr = "127.0.0.1:5555"
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -1207,6 +1209,7 @@ func TestHandlerPostSettingsDropsReadOnlyKeys(t *testing.T) {
 	h := New(newFakeEM(), ss, &fakeProber{}, cfg)
 	body := `{"appPath":"/evil","cacheRoot":"/evil","serverVersion":"9.9.9","cacheSize":1024}`
 	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:5555"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

@@ -75,7 +75,7 @@ func TestCrossSiteRemoveAllWithoutFetchMetadataSucceeds(t *testing.T) {
 func TestCrossSiteOriginlessMediaAndReadsAllowed(t *testing.T) {
 	h := newHandler(t, testEngine())
 	for _, p := range []string{"/" + testIH + "/0", "/heartbeat", "/hlsv2/abc/stream_0/seg0.ts", "/hlsv2/abc/master.m3u8?mediaURL=http%3A%2F%2Fexample.com%2Fv.mkv", "/yt/dQw4w9WgXcQ"} {
-		rec := serveWithHeaders(h, p, map[string]string{"Sec-Fetch-Site": "cross-site"})
+		rec := serveWithHeaders(h, p, map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Dest": "video"})
 		if rec.Code == http.StatusForbidden {
 			t.Errorf("cross-site GET %s = 403; media/read routes must stay allowed", p)
 		}

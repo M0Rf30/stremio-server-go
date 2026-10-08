@@ -68,7 +68,7 @@ func TestExternalBaseForwardedValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := h.externalBase(extBaseReq("10.0.0.5:1234", tc.proto, tc.host))
+			got := h.externalBase(extBaseReq("127.0.0.5:1234", tc.proto, tc.host))
 			if got != tc.want {
 				t.Errorf("got %q want %q", got, tc.want)
 			}
@@ -96,14 +96,14 @@ func TestClientIPRightmostUntrusted(t *testing.T) {
 		want string
 	}{
 		{"public peer ignores xff", xffReq("203.0.113.9:1", "1.2.3.4"), "203.0.113.9"},
-		{"no xff", xffReq("10.0.0.2:1"), "10.0.0.2"},
-		{"single hop", xffReq("10.0.0.2:1", "198.51.100.7"), "198.51.100.7"},
-		{"spoofed leftmost", xffReq("10.0.0.2:1", "192.168.1.1, 198.51.100.7"), "198.51.100.7"},
-		{"spoofed public leftmost", xffReq("10.0.0.2:1", "8.8.8.8, 198.51.100.7"), "198.51.100.7"},
-		{"trusted proxies skipped", xffReq("10.0.0.2:1", "198.51.100.7, 10.0.0.9, 127.0.0.1"), "198.51.100.7"},
-		{"multiple headers", xffReq("10.0.0.2:1", "8.8.8.8", "198.51.100.7, 10.0.0.9"), "198.51.100.7"},
-		{"all private uses leftmost", xffReq("127.0.0.1:1", "192.168.1.5, 10.0.0.9"), "192.168.1.5"},
-		{"garbage hop falls back to peer", xffReq("10.0.0.2:1", "198.51.100.7, bogus"), "10.0.0.2"},
+		{"no xff", xffReq("127.0.0.2:1"), "127.0.0.2"},
+		{"single hop", xffReq("127.0.0.2:1", "198.51.100.7"), "198.51.100.7"},
+		{"spoofed leftmost", xffReq("127.0.0.2:1", "192.168.1.1, 198.51.100.7"), "198.51.100.7"},
+		{"spoofed public leftmost", xffReq("127.0.0.2:1", "8.8.8.8, 198.51.100.7"), "198.51.100.7"},
+		{"trusted proxies skipped", xffReq("127.0.0.2:1", "198.51.100.7, 127.0.0.9, 127.0.0.1"), "198.51.100.7"},
+		{"multiple headers", xffReq("127.0.0.2:1", "8.8.8.8", "198.51.100.7, 127.0.0.9"), "198.51.100.7"},
+		{"all private uses leftmost", xffReq("127.0.0.1:1", "127.0.0.5, 127.0.0.9"), "127.0.0.5"},
+		{"garbage hop falls back to peer", xffReq("127.0.0.2:1", "198.51.100.7, bogus"), "127.0.0.2"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

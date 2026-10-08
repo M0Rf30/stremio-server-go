@@ -481,20 +481,31 @@ func TestClientIPDirect(t *testing.T) {
 func TestClientIPXFFTrustedFromLoopback(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "127.0.0.1:8080" // loopback → trust XFF
-	r.Header.Set("X-Forwarded-For", "203.0.113.55, 10.0.0.1")
+	r.Header.Set("X-Forwarded-For", "203.0.113.55, 127.0.0.2")
 	ip := clientIP(r)
 	if ip.String() != "203.0.113.55" {
 		t.Errorf("XFF from loopback: got %q want %q", ip, "203.0.113.55")
 	}
 }
 
-func TestClientIPXFFTrustedFromPrivate(t *testing.T) {
+func TestClientIPXFFIgnoredFromUntrustedPrivate(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
-	r.RemoteAddr = "192.168.1.100:8080" // private → trust XFF
+	r.RemoteAddr = "192.168.1.100:8080" // private but untrusted → XFF ignored
 	r.Header.Set("X-Forwarded-For", "8.8.8.8")
-	ip := clientIP(r)
-	if ip.String() != "8.8.8.8" {
-		t.Errorf("XFF from private peer: got %q want %q", ip, "8.8.8.8")
+	if ip := clientIP(r); ip.String() != "192.168.1.100" {
+		t.Errorf("XFF from untrusted private peer: got %q want 192.168.1.100", ip)
+	}
+}
+
+func TestClientIPXFFTrustedFromConfiguredProxy(t *testing.T) {
+	_, n, _ := net.ParseCIDR("192.168.1.0/24")
+	SetTrustedProxies([]*net.IPNet{n})
+	t.Cleanup(func() { SetTrustedProxies(nil) })
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "192.168.1.100:8080"
+	r.Header.Set("X-Forwarded-For", "8.8.8.8")
+	if ip := clientIP(r); ip.String() != "8.8.8.8" {
+		t.Errorf("XFF from configured proxy: got %q want 8.8.8.8", ip)
 	}
 }
 

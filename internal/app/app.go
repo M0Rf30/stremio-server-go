@@ -554,6 +554,9 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		go shutOne(ppSrv, "pprof")
 	}
 	shutWg.Wait()
+	if c, ok := handler.(io.Closer); ok {
+		_ = c.Close()
+	}
 
 	return runErr
 }

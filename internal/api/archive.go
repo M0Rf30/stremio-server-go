@@ -285,6 +285,27 @@ func (p *archivePayload) source() string {
 	return archiveURLFromEntry(entries[0])
 }
 
+// sources returns every part URL (url/from first, else all `urls` entries).
+func (p *archivePayload) sources() []string {
+	if p.URL != "" {
+		return []string{p.URL}
+	}
+	if p.From != "" {
+		return []string{p.From}
+	}
+	var entries []json.RawMessage
+	if len(p.URLs) == 0 || json.Unmarshal(p.URLs, &entries) != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if u := archiveURLFromEntry(e); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 // archiveURLFromEntry extracts a URL string from one `urls` entry, which may be
 // a bare string, a `[url, bytes?]` tuple, or a `{"url":…}` object.
 func archiveURLFromEntry(raw json.RawMessage) string {
@@ -620,6 +641,52 @@ func archiveResolveLocalPath(source string) (string, error) {
 	return real, nil
 }
 
+// archiveDownloadParts downloads every part in order and concatenates them
+// into one temp file (split archives: .001/.002/…, raw multi-part bodies).
+// The total size is still bounded by archiveMaxDownloadBytes.
+func archiveDownloadParts(urls []string) (string, error) {
+	out, err := os.CreateTemp("", archiveTmpDLPrefix+"*")
+	if err != nil {
+		return "", err
+	}
+	fail := func(e error) (string, error) {
+		_ = out.Close()
+		_ = os.Remove(out.Name())
+		return "", e
+	}
+	var total int64
+	for _, u := range urls {
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			return fail(fmt.Errorf("part %q is not an http(s) URL", u))
+		}
+		part, err := archiveDownload(u)
+		if err != nil {
+			return fail(err)
+		}
+		f, err := os.Open(part)
+		if err != nil {
+			_ = os.Remove(part)
+			return fail(err)
+		}
+		n, cerr := io.Copy(out, f)
+		_ = f.Close()
+		_ = os.Remove(part)
+		if cerr != nil {
+			return fail(cerr)
+		}
+		total += n
+		if total > archiveMaxDownloadBytes {
+			return fail(fmt.Errorf("combined parts exceed size limit (%d bytes)", archiveMaxDownloadBytes))
+		}
+	}
+	name := out.Name()
+	if err := out.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
 // ── helper: download / key / path-encoding ───────────────────────────────────
 
 // archiveDownload fetches u and streams it to a new temp file.
@@ -853,7 +920,14 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 	var archivePath string
 	var isTempArch bool
 
-	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+	if sources := payload.sources(); len(sources) > 1 && strings.HasPrefix(source, "http") {
+		archivePath, err = archiveDownloadParts(sources)
+		if err != nil {
+			http.Error(w, "download failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		isTempArch = true
+	} else if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
 		archivePath, err = archiveDownload(source)
 		if err != nil {
 			http.Error(w, "download failed: "+err.Error(), http.StatusBadGateway)
