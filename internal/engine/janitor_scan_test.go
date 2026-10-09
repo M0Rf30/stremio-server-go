@@ -70,18 +70,28 @@ func (m *manager) hasEngine(ih string) bool {
 	return ok
 }
 
-// TestEvictTickSkipsWalkWhenCacheQuiet: once a tick has found the cache within
-// budget, later ticks skip the filesystem walk while the same engines are loaded
-// and none has received data, until the reading ages out. The skip is observed
-// through a file written behind the janitor's back: only a walk could see it.
+// settle runs the two measuring ticks after which the janitor trusts an
+// under-budget reading: the first only records the counters, the second finds
+// them unchanged and memoises the walk.
+func settle(t *testing.T, m *manager) {
+	t.Helper()
+	m.evictTick(scanLimit)
+	m.evictTick(scanLimit)
+	if m.scan.dl == nil {
+		t.Fatal("two under-budget walks with still counters left no memo")
+	}
+}
+
+// TestEvictTickSkipsWalkWhenCacheQuiet: once ticks have found the cache within
+// budget with still counters, later ticks skip the filesystem walk while the
+// same engines are loaded and none has received data, until the reading ages
+// out. The skip is observed through a file written behind the janitor's back:
+// only a walk could see it.
 func TestEvictTickSkipsWalkWhenCacheQuiet(t *testing.T) {
 	cfg := newJanitorTestCfg(t)
 	m := scanFixture(t, cfg)
 
-	m.evictTick(scanLimit)
-	if m.scan.dl == nil {
-		t.Fatal("an under-budget walk left no memo")
-	}
+	settle(t, m)
 	writeIncompressible(t, filepath.Join(cfg.CacheRoot, scanIhOld, "big.bin"), 2<<20)
 
 	m.evictTick(scanLimit)
@@ -98,6 +108,46 @@ func TestEvictTickSkipsWalkWhenCacheQuiet(t *testing.T) {
 	}
 	if !m.hasEngine(scanIhMRU) {
 		t.Fatal("MRU engine should be preserved")
+	}
+}
+
+// TestEvictTickDoesNotTrustFirstMeasurement: the library counts received bytes
+// before the chunk is written, so a counter that was already bumped when first
+// sampled says nothing about bytes still in flight. A single within-budget walk
+// must not start skipping ticks; a write landing right after it (and with no
+// further counter movement) has to be seen by the very next tick.
+func TestEvictTickDoesNotTrustFirstMeasurement(t *testing.T) {
+	cfg := newJanitorTestCfg(t)
+	m := scanFixture(t, cfg)
+
+	m.evictTick(scanLimit)
+	writeIncompressible(t, filepath.Join(cfg.CacheRoot, scanIhOld, "big.bin"), 2<<20) // counted earlier, landed late
+
+	m.evictTick(scanLimit)
+	if m.hasEngine(scanIhOld) {
+		t.Fatal("tick right after the first measurement skipped the walk and missed the late write")
+	}
+}
+
+// TestEvictTickDoesNotMemoiseWhileCountersMove: a counter that differs from the
+// one sampled before the previous walk means data arrived in between, so the
+// walk is not memoised even though it was within budget.
+func TestEvictTickDoesNotMemoiseWhileCountersMove(t *testing.T) {
+	cfg := newJanitorTestCfg(t)
+	m := scanFixture(t, cfg)
+
+	m.evictTick(scanLimit)
+	m.scan.mu.Lock()
+	m.scan.prev[m.engines[scanIhMRU]]-- // the counter moved since the previous sample
+	m.scan.mu.Unlock()
+	m.evictTick(scanLimit)
+	if m.scan.dl != nil {
+		t.Fatal("a walk preceded by counter movement was memoised")
+	}
+	writeIncompressible(t, filepath.Join(cfg.CacheRoot, scanIhOld, "big.bin"), 2<<20)
+	m.evictTick(scanLimit)
+	if m.hasEngine(scanIhOld) {
+		t.Fatal("tick after counter movement skipped the walk")
 	}
 }
 
@@ -122,7 +172,7 @@ func TestEvictTickWalksWhenEngineSetChanges(t *testing.T) {
 	cfg := newJanitorTestCfg(t)
 	m := scanFixture(t, cfg)
 
-	m.evictTick(scanLimit)
+	settle(t, m)
 	writeIncompressible(t, filepath.Join(cfg.CacheRoot, scanIhOld, "big.bin"), 2<<20)
 	if _, err := m.EnsureEngine(scanIhNew, types.AddOptions{}); err != nil {
 		t.Fatalf("EnsureEngine: %v", err)
@@ -139,7 +189,7 @@ func TestEvictTickWalksWhenDataReceived(t *testing.T) {
 	cfg := newJanitorTestCfg(t)
 	m := scanFixture(t, cfg)
 
-	m.evictTick(scanLimit)
+	settle(t, m)
 	writeIncompressible(t, filepath.Join(cfg.CacheRoot, scanIhOld, "big.bin"), 2<<20)
 	m.scan.mu.Lock()
 	m.scan.dl[m.engines[scanIhMRU]]-- // the counter no longer matches the memo
@@ -232,7 +282,8 @@ func BenchmarkEvictWalk(b *testing.B) {
 // within budget and untouched: no filesystem access.
 func BenchmarkEvictTickQuiet(b *testing.B) {
 	m := benchCacheManager(b, 20, 60, 250)
-	m.evictTick(1 << 40) // the measuring walk
+	m.evictTick(1 << 40) // the measuring walks: the reading is trusted after
+	m.evictTick(1 << 40) // a second one finds the counters unchanged
 	b.ReportAllocs()
 	for b.Loop() {
 		m.evictTick(1 << 40)

@@ -701,7 +701,7 @@ func (m *manager) Close() error {
 // The goroutine stops when Close() is called (which closes m.done).
 func (m *manager) StartJanitor(cacheSizeFn func() int64) {
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(janitorTick)
 		defer ticker.Stop()
 		for {
 			select {
@@ -976,7 +976,7 @@ func (m *manager) evict(budget int64) {
 	// walked, not the whole cache root, so leftover directories of torrents that
 	// are no longer loaded (and any other files under the root) cost no stats.
 	// Peer data counters are sampled before the walk so growth during it shows
-	// up on the next tick (see cacheQuiet).
+	// up on the next tick (see cacheQuiet, diskScan.observe).
 	type entry struct {
 		e           *engine
 		size        int64
@@ -1002,11 +1002,12 @@ func (m *manager) evict(budget int64) {
 		total += sz
 	}
 
+	// An under-budget reading is only memoised once the data counters have
+	// held still since the previous measurement (see diskScan.observe).
+	m.scan.observe(total <= budget, total, dl)
 	if total <= budget {
-		m.scan.remember(total, dl)
 		return
 	}
-	m.scan.forget()
 
 	// Sort ascending by lastAccess (oldest first). The MRU engine is last and
 	// is always preserved — we iterate only up to len(entries)-1.
@@ -1052,9 +1053,12 @@ func (m *manager) evict(budget int64) {
 // diskScanMaxAge bounds how long the janitor trusts a cache-size measurement
 // without walking the cache again, whatever the download counters say. It
 // backstops the activity heuristic in cacheQuiet (filesystems that allocate
-// whole files up front, external writers), so a stale reading is corrected
-// within a few ticks.
-const diskScanMaxAge = 5 * time.Minute
+// whole files up front or lag in reporting blocks, external writers), so a
+// stale reading is corrected within a few ticks.
+const diskScanMaxAge = 4 * janitorTick
+
+// janitorTick is the period of the janitor's size/idle/seed-ratio pass.
+const janitorTick = 30 * time.Second
 
 // diskScan is the janitor's memo of its last under-budget cache walk.
 type diskScan struct {
@@ -1062,18 +1066,33 @@ type diskScan struct {
 	at    time.Time         // when the walk was taken
 	total int64             // allocated bytes attributed to the live engines then
 	dl    map[*engine]int64 // per-engine peer data bytes received at that point; nil = no memo
+	prev  map[*engine]int64 // counters sampled before the previous walk (any outcome)
 }
 
-func (s *diskScan) remember(total int64, dl map[*engine]int64) {
+// observe records the result of a walk whose counters were sampled before it.
+// The walk is memoised only when it was within budget AND every counter equals
+// the one sampled before the previous walk. The library bumps its received-bytes
+// counter before the chunk is written, so a bump just before a sample may still
+// be unwritten when the walk runs; a counter that has been still for a whole
+// janitor interval guarantees such in-flight writes have landed.
+func (s *diskScan) observe(withinBudget bool, total int64, dl map[*engine]int64) {
 	s.mu.Lock()
-	s.at, s.total, s.dl = time.Now(), total, dl
-	s.mu.Unlock()
-}
-
-func (s *diskScan) forget() {
-	s.mu.Lock()
+	defer s.mu.Unlock()
+	stable := s.prev != nil && len(s.prev) == len(dl)
+	if stable {
+		for e, n := range dl {
+			if p, ok := s.prev[e]; !ok || p != n {
+				stable = false
+				break
+			}
+		}
+	}
+	s.prev = dl
+	if withinBudget && stable {
+		s.at, s.total, s.dl = time.Now(), total, dl
+		return
+	}
 	s.dl = nil
-	s.mu.Unlock()
 }
 
 // downloaded returns the cumulative peer data bytes received for the torrent
