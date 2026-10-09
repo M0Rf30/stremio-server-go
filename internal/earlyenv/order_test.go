@@ -10,8 +10,9 @@ package earlyenv_test
 
 import (
 	"context"
-	"math/bits"
 	"os"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -21,16 +22,15 @@ import (
 )
 
 // TestInitOrder proves this package's init() ran before anacrolix/torrent/
-// storage's, by checking the environment storage observed: on 32-bit it must
-// already carry the forced value (unless the runner set one explicitly).
+// storage's, by checking the environment storage observed: it must already
+// carry a backend choice -- the forced classic one, or the runner's own.
 func TestInitOrder(t *testing.T) {
-	if bits.UintSize > 32 {
-		t.Skip("only meaningful on 32-bit builds; run with GOARCH=386")
+	v, ok := os.LookupEnv(earlyenv.FileIoEnv)
+	if !ok {
+		t.Fatal("file I/O backend was not selected before anacrolix/torrent/storage init")
 	}
-	if !earlyenv.Applied {
-		if _, ok := os.LookupEnv(earlyenv.FileIoEnv); !ok {
-			t.Fatal("32-bit build but classic file I/O was not forced")
-		}
+	if earlyenv.Applied && v != "classic" {
+		t.Fatalf("Applied but %s=%q", earlyenv.FileIoEnv, v)
 	}
 }
 
@@ -65,5 +65,44 @@ func TestLargeFileWritable(t *testing.T) {
 	}
 	if _, err := tor.Piece(info.Piece(0)).WriteAt([]byte("head"), 0); err != nil {
 		t.Fatalf("write at start: %v", err)
+	}
+}
+
+// TestDefaultBackendDoesNotMapFiles checks the effect, not just the env var:
+// after writing through anacrolix's default file storage, the torrent file
+// must not appear in this process's memory mappings (it would with mmap).
+func TestDefaultBackendDoesNotMapFiles(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc/self/maps")
+	}
+	if v, _ := os.LookupEnv(earlyenv.FileIoEnv); v != "classic" {
+		t.Skipf("runner selected %s=%q explicitly", earlyenv.FileIoEnv, v)
+	}
+	const pieceLen = 256 << 10
+	info := &metainfo.Info{Name: "probe-unmapped.mkv", Length: 4 * pieceLen, PieceLength: pieceLen, Pieces: make([]byte, 20*4)}
+	client := storage.NewFileByInfoHash(t.TempDir())
+	t.Cleanup(func() { _ = client.Close() })
+	tor, err := client.OpenTorrent(context.Background(), info, metainfo.Hash{2})
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if tor.Close != nil {
+			_ = tor.Close()
+		}
+	})
+	if _, err := tor.Piece(info.Piece(1)).WriteAt(make([]byte, pieceLen), 0); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 16)
+	if _, err := tor.Piece(info.Piece(1)).ReadAt(buf, 0); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	maps, err := os.ReadFile("/proc/self/maps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(maps), "probe-unmapped.mkv") {
+		t.Fatal("torrent file is memory-mapped: classic file I/O is not in effect")
 	}
 }
