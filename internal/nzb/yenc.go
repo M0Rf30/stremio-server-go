@@ -12,7 +12,104 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+const (
+	// yencMaxLine is the longest encoded line accepted (the bufio.Scanner
+	// token limit). Real encoders emit ~128-byte lines (the spec allows at
+	// most ~1 KiB), so anything near this is pathological input.
+	yencMaxLine = 256 * 1024
+	// yencScanBuf is the initial (pooled) scanner buffer; it only grows
+	// toward yencMaxLine for pathologically long lines.
+	yencScanBuf = 64 * 1024
+	// yencWriteBuf batches the per-line writes into fewer, larger Write
+	// calls (was one syscall per ~128-byte encoded line before).
+	yencWriteBuf = 128 * 1024
+)
+
+var (
+	ybeginTag = []byte("=ybegin")
+	ypartTag  = []byte("=ypart")
+	yendTag   = []byte("=yend")
+)
+
+// yencState is the per-decode scratch memory. Decoding one article used to
+// allocate a 256 KiB scanner buffer and a 128 KiB bufio writer (~390 KiB per
+// ~700 KiB segment); both are now pooled, so a steady-state decode allocates
+// only a few small objects regardless of how many segments are fetched.
+type yencState struct {
+	scan []byte        // initial bufio.Scanner buffer
+	out  []byte        // decoded bytes of the current line
+	bw   *bufio.Writer // batches writes to the destination
+}
+
+var yencPool = sync.Pool{New: func() any {
+	return &yencState{
+		scan: make([]byte, yencScanBuf),
+		out:  make([]byte, 0, 1024),
+		bw:   bufio.NewWriterSize(io.Discard, yencWriteBuf),
+	}
+}}
+
+// yencHeader carries the layout fields of an article's =ybegin/=ypart lines.
+type yencHeader struct {
+	Size    int64 // =ybegin size=: size of the whole file; 0 when absent
+	Part    int   // =ybegin part=; 0 when absent
+	Begin   int64 // =ypart begin= (1-based, inclusive); 0 when absent
+	End     int64 // =ypart end= (1-based, inclusive); 0 when absent
+	HasPart bool  // an =ypart line was present (a multi-part article)
+}
+
+// parseYbegin extracts size= and part= from a "=ybegin ..." line. The name=
+// field runs to the end of the line and may contain spaces, so parsing stops
+// there.
+func parseYbegin(line []byte, h *yencHeader) {
+	for _, f := range strings.Fields(string(line[len(ybeginTag):])) {
+		k, v, ok := strings.Cut(f, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(k) {
+		case "size":
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				h.Size = n
+			}
+		case "part":
+			if n, err := strconv.Atoi(v); err == nil {
+				h.Part = n
+			}
+		case "name":
+			return
+		}
+	}
+}
+
+// parseYpart extracts begin= and end= from a "=ypart ..." line.
+func parseYpart(line []byte, h *yencHeader) {
+	for _, f := range strings.Fields(string(line[len(ypartTag):])) {
+		k, v, ok := strings.Cut(f, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(k) {
+		case "begin":
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				h.Begin = n
+			}
+		case "end":
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				h.End = n
+			}
+		}
+	}
+}
+
+// yencOpenFunc is called once per article, after its headers are parsed and
+// before the first decoded byte is written, to choose the destination. It
+// lets a caller place a multi-part article at the offset its =ypart header
+// declares. Returning an error aborts the decode.
+type yencOpenFunc func(h yencHeader) (io.Writer, error)
 
 // DecodeYenc decodes a single-part yEnc-encoded article body from r and writes
 // the decoded bytes to w.
@@ -32,23 +129,48 @@ import (
 // or when a pcrc32= (or, for single-part articles, crc32=) is present and does
 // not match. Callers rely on this so a bad article is never treated as data.
 func DecodeYenc(r io.Reader, w io.Writer) error {
-	// Batch per-line Write calls through a 128 KiB buffer to reduce the number
-	// of write syscalls (was one syscall per ~128-byte encoded line before).
-	bw := bufio.NewWriterSize(w, 128*1024)
+	_, _, err := decodeYenc(r, func(yencHeader) (io.Writer, error) { return w, nil })
+	return err
+}
 
-	const maxLine = 256 * 1024
+// decodeYenc is DecodeYenc with a caller-chosen destination: open is invoked
+// once the article's =ybegin/=ypart headers are known. It returns the parsed
+// header and the number of decoded bytes written.
+func decodeYenc(r io.Reader, open yencOpenFunc) (yencHeader, int64, error) {
+	st := yencPool.Get().(*yencState)
+	defer func() {
+		// Drop the destination reference and any unflushed bytes so nothing
+		// leaks into the next article that reuses this writer.
+		st.bw.Reset(io.Discard)
+		yencPool.Put(st)
+	}()
+
 	scanner := bufio.NewScanner(r)
-	// Large buffer avoids re-allocation for long lines and amortises reads.
-	scanner.Buffer(make([]byte, maxLine), maxLine)
+	// The pooled buffer is the scanner's initial buffer; it still grows up to
+	// yencMaxLine for an unusually long line, exactly as before.
+	scanner.Buffer(st.scan, yencMaxLine)
 
-	// outBuf is reused across all lines in this call: after the first line the
-	// backing array is kept and only reset to length 0, so allocation 3 from
-	// the old make([]byte, 0, len(raw)) per-line drops to ~zero.
-	outBuf := make([]byte, 0, 256)
-	inBody := false
-	sawPart := false
-	var written int64
-	crc := crc32.NewIEEE()
+	var (
+		hdr     yencHeader
+		inBody  bool
+		opened  bool
+		written int64
+		sum     uint32 // running CRC-32 (IEEE) of the decoded bytes
+	)
+	// bind attaches the destination once, at the first data line (or at the
+	// trailer of an empty part) — by then =ybegin/=ypart have been parsed.
+	bind := func() error {
+		if opened {
+			return nil
+		}
+		opened = true
+		w, err := open(hdr)
+		if err != nil {
+			return err
+		}
+		st.bw.Reset(w)
+		return nil
+	}
 
 	for scanner.Scan() {
 		// scanner.Bytes() is a zero-copy view into the scanner's internal
@@ -57,59 +179,73 @@ func DecodeYenc(r io.Reader, w io.Writer) error {
 		raw := scanner.Bytes()
 
 		switch {
-		case bytes.HasPrefix(raw, []byte("=ybegin")):
+		case bytes.HasPrefix(raw, ybeginTag):
 			inBody = true
+			parseYbegin(raw, &hdr)
 			continue
-		case bytes.HasPrefix(raw, []byte("=ypart")):
+		case bytes.HasPrefix(raw, ypartTag):
 			// multi-part header: still inside the data section
-			sawPart = true
+			hdr.HasPart = true
+			parseYpart(raw, &hdr)
 			continue
-		case bytes.HasPrefix(raw, []byte("=yend")):
+		case bytes.HasPrefix(raw, yendTag):
 			// end-of-part marker; flush the buffer, verify and stop decoding.
 			if !inBody {
-				return fmt.Errorf("yenc: =yend without =ybegin")
+				return hdr, written, fmt.Errorf("yenc: =yend without =ybegin")
 			}
-			if err := bw.Flush(); err != nil {
-				return err
+			if err := bind(); err != nil {
+				return hdr, written, err
 			}
-			return verifyYencTrailer(string(raw), written, crc.Sum32(), sawPart)
+			if err := st.bw.Flush(); err != nil {
+				return hdr, written, err
+			}
+			return hdr, written, verifyYencTrailer(string(raw), written, sum, hdr.HasPart)
 		}
 
 		if !inBody {
 			continue
 		}
+		if err := bind(); err != nil {
+			return hdr, written, err
+		}
 
-		outBuf = outBuf[:0]
+		// st.out is reused across all lines: only reset to length 0.
+		out := st.out[:0]
 		for i := 0; i < len(raw); i++ {
 			b := raw[i]
 			if b == '=' {
 				i++
 				if i >= len(raw) {
-					return fmt.Errorf("yenc: escape character at end of line")
+					return hdr, written, fmt.Errorf("yenc: escape character at end of line")
 				}
 				// escaped byte: subtract 64 + 42 (wraps as uint8)
-				outBuf = append(outBuf, raw[i]-64-42)
+				out = append(out, raw[i]-64-42)
 			} else {
 				// plain byte: subtract 42 (wraps as uint8)
-				outBuf = append(outBuf, b-42)
+				out = append(out, b-42)
 			}
 		}
-
-		if _, err := bw.Write(outBuf); err != nil {
-			return err
+		if cap(out) <= yencScanBuf {
+			st.out = out // keep growth for the next line / article (bounded)
 		}
-		written += int64(len(outBuf))
-		_, _ = crc.Write(outBuf)
+
+		if _, err := st.bw.Write(out); err != nil {
+			return hdr, written, err
+		}
+		written += int64(len(out))
+		sum = crc32.Update(sum, crc32.IEEETable, out)
 	}
 	if err := scanner.Err(); err != nil {
-		return err
+		return hdr, written, err
 	}
 	// Whatever was decoded is still flushed, but the article is not usable.
-	_ = bw.Flush()
-	if !inBody {
-		return fmt.Errorf("yenc: no =ybegin header found (not a yEnc article)")
+	if opened {
+		_ = st.bw.Flush()
 	}
-	return fmt.Errorf("yenc: no =yend trailer found (truncated article)")
+	if !inBody {
+		return hdr, written, fmt.Errorf("yenc: no =ybegin header found (not a yEnc article)")
+	}
+	return hdr, written, fmt.Errorf("yenc: no =yend trailer found (truncated article)")
 }
 
 // verifyYencTrailer checks the decoded part length and CRC against the values

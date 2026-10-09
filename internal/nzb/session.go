@@ -48,15 +48,19 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 }
 
 // Session holds the NNTP server configuration and the parsed file list for one
-// NZB job. It maintains a persistent NNTP connection across AssembleFile calls
-// to amortise the TCP+TLS+AUTHINFO handshake cost (100–400 ms) that would
-// otherwise be paid on every range request in seekable NZB streaming.
-// A mutex serialises access because Client is not safe for concurrent use.
+// NZB job. AssembleFile keeps a persistent NNTP connection across calls to
+// amortise the TCP+TLS+AUTHINFO handshake cost (100–400 ms) that would
+// otherwise be paid on every sequential assembly. A mutex serialises access
+// because Client is not safe for concurrent use. StartAssembly is the
+// progressive, parallel alternative: it dials its own connections.
 type Session struct {
 	cfg    ServerConfig
 	files  []File
 	mu     sync.Mutex // guards client
 	client *Client    // persistent; lazily dialled; nil = not yet connected
+
+	asmMu sync.Mutex // guards asms
+	asms  map[*Assembly]struct{}
 }
 
 // NewSession creates a Session from server configuration and pre-parsed files.
@@ -69,9 +73,36 @@ func (sess *Session) Files() []File {
 	return sess.files
 }
 
-// Close releases the persistent NNTP connection held by this Session, if any.
+// file returns the File named name, or an error when the NZB has none.
+func (sess *Session) file(name string) (*File, error) {
+	for i := range sess.files {
+		if sess.files[i].Name == name {
+			return &sess.files[i], nil
+		}
+	}
+	return nil, fmt.Errorf("nzb: file %q not found in NZB", name)
+}
+
+// sizeCap is the write-cap for file f: the declared size, or
+// nzbDefaultMaxBytes when the NZB omits or zeroes segment sizes so the cap is
+// never disabled by missing metadata.
+func sizeCap(f *File) int64 {
+	if f.Size <= 0 {
+		return nzbDefaultMaxBytes
+	}
+	return f.Size
+}
+
+// Close releases the persistent NNTP connection held by this Session, if any,
+// and cancels every assembly started from it (their connections are closed).
 // It is safe to call Close concurrently with or after AssembleFile.
 func (sess *Session) Close() error {
+	sess.asmMu.Lock()
+	for a := range sess.asms {
+		a.Cancel()
+	}
+	sess.asmMu.Unlock()
+
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	if sess.client != nil {
@@ -106,25 +137,13 @@ func isConnErr(err error) bool {
 // The total bytes written is capped at the declared file size to prevent disk
 // exhaustion from malformed or adversarial NZB data.
 func (sess *Session) AssembleFile(name string, dst io.Writer) error {
-	var target *File
-	for i := range sess.files {
-		if sess.files[i].Name == name {
-			target = &sess.files[i]
-			break
-		}
-	}
-	if target == nil {
-		return fmt.Errorf("nzb: file %q not found in NZB", name)
+	target, err := sess.file(name)
+	if err != nil {
+		return err
 	}
 
 	// Always wrap dst with a size cap to prevent disk exhaustion.
-	// When the NZB omits or zeroes segment sizes (target.Size ≤ 0), fall back
-	// to nzbDefaultMaxBytes so the cap is never disabled by missing metadata.
-	capBytes := target.Size
-	if capBytes <= 0 {
-		capBytes = nzbDefaultMaxBytes
-	}
-	w := &limitedWriter{w: dst, limit: capBytes}
+	w := &limitedWriter{w: dst, limit: sizeCap(target)}
 
 	// Serialise NNTP command sequences: Client is not safe for concurrent use.
 	sess.mu.Lock()

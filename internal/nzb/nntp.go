@@ -5,6 +5,7 @@
 package nzb
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -22,16 +23,24 @@ const (
 	// opTimeout is the per-operation deadline applied around greeting, auth, and
 	// each BODY fetch. It is refreshed before every Body call.
 	opTimeout = 60 * time.Second
+	// closeTimeout bounds the QUIT exchange in Close so a wedged server cannot
+	// stall connection teardown for the remainder of opTimeout.
+	closeTimeout = 5 * time.Second
 )
 
 // ServerConfig holds the connection parameters for one NNTP server.
 type ServerConfig struct {
-	Host        string
-	Port        int
-	User        string
-	Pass        string
-	SSL         bool
-	Connections int // informational; single-connection client ignores this
+	Host string
+	Port int
+	User string
+	Pass string
+	SSL  bool
+	// Connections is how many parallel NNTP connections StartAssembly may
+	// open for one file (the server's allowed connection count). Values <= 0
+	// select defaultConnections; the effective value is capped at
+	// maxConnections. Extra connections the server refuses are tolerated —
+	// the assembly just runs with fewer. Dial and AssembleFile use one.
+	Connections int
 	// Control, when set, is passed as the net.Dialer.Control hook for the
 	// TCP dial (and, for SSL, the TLS handshake's underlying TCP dial),
 	// letting callers apply an SSRF guard (e.g. netguard.DialControl) that
@@ -59,6 +68,12 @@ func containsCRLF(s string) bool {
 // Default ports: 119 (plain), 563 (SSL) when cfg.Port == 0.
 // A 30 s dial timeout and 60 s per-operation deadlines are enforced.
 func Dial(cfg ServerConfig) (*Client, error) {
+	return DialContext(context.Background(), cfg)
+}
+
+// DialContext is Dial with cancellation: cancelling ctx aborts a dial or
+// handshake in progress (the connection is closed, the error is returned).
+func DialContext(ctx context.Context, cfg ServerConfig) (*Client, error) {
 	port := cfg.Port
 	if port == 0 {
 		if cfg.SSL {
@@ -74,15 +89,17 @@ func Dial(cfg ServerConfig) (*Client, error) {
 	var err error
 	dialer := &net.Dialer{Timeout: dialTimeout, Control: cfg.Control}
 	if cfg.SSL {
-		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
-			ServerName: cfg.Host,
-		})
+		td := tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: cfg.Host}}
+		conn, err = td.DialContext(ctx, "tcp", addr)
 	} else {
-		conn, err = dialer.Dial("tcp", addr)
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("nntp: dial %s: %w", addr, err)
 	}
+	// Unblock the greeting/auth exchange below if ctx is cancelled mid-way.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	// Set a deadline covering the greeting and any authentication exchange.
 	if err := conn.SetDeadline(time.Now().Add(opTimeout)); err != nil {
@@ -160,8 +177,15 @@ func (c *Client) authinfo(user, pass string) error {
 // it, and writes the decoded bytes to w. The leading/trailing angle brackets
 // on messageID are optional; Body adds them if absent.
 func (c *Client) Body(messageID string, w io.Writer) error {
+	_, _, err := c.body(messageID, func(yencHeader) (io.Writer, error) { return w, nil })
+	return err
+}
+
+// body is Body with a caller-chosen destination (see yencOpenFunc). It
+// returns the article's parsed yEnc header and the decoded byte count.
+func (c *Client) body(messageID string, open yencOpenFunc) (yencHeader, int64, error) {
 	if containsCRLF(messageID) {
-		return fmt.Errorf("nntp: Body: messageID contains invalid characters")
+		return yencHeader{}, 0, fmt.Errorf("nntp: Body: messageID contains invalid characters")
 	}
 
 	// Normalise message-id: ensure angle brackets.
@@ -171,31 +195,39 @@ func (c *Client) Body(messageID string, w io.Writer) error {
 
 	// Refresh the per-operation deadline before each fetch.
 	if err := c.conn.SetDeadline(time.Now().Add(opTimeout)); err != nil {
-		return fmt.Errorf("nntp: set deadline: %w", err)
+		return yencHeader{}, 0, fmt.Errorf("nntp: set deadline: %w", err)
 	}
 
 	if err := c.tp.PrintfLine("BODY %s", messageID); err != nil {
-		return fmt.Errorf("nntp: BODY send: %w", err)
+		return yencHeader{}, 0, fmt.Errorf("nntp: BODY send: %w", err)
 	}
 
 	// Expect 222 (body follows).
 	if _, _, err := c.tp.ReadResponse(222); err != nil {
-		return fmt.Errorf("nntp: BODY %s: %w", messageID, err)
+		return yencHeader{}, 0, fmt.Errorf("nntp: BODY %s: %w", messageID, err)
 	}
 
 	// DotReader handles dot-unstuffing of the dot-terminated article body.
 	dr := c.tp.DotReader()
-	err := DecodeYenc(dr, w)
+	hdr, n, err := decodeYenc(dr, open)
 	// Drain any unread bytes so the connection is left at a clean command
-	// boundary regardless of how DecodeYenc exited (early =yend return,
+	// boundary regardless of how decodeYenc exited (early =yend return,
 	// write error, etc.). Without this, leftover body bytes would be read
 	// as the next server response, silently desyncing the protocol stream.
 	_, _ = io.Copy(io.Discard, dr)
-	return err
+	return hdr, n, err
+}
+
+// abort closes the underlying connection immediately, without the QUIT
+// exchange. It is safe to call from another goroutine and unblocks a Body
+// call that is waiting on the network.
+func (c *Client) abort() {
+	_ = c.conn.Close()
 }
 
 // Close sends QUIT and closes the underlying connection.
 func (c *Client) Close() error {
+	_ = c.conn.SetDeadline(time.Now().Add(closeTimeout))
 	_ = c.tp.PrintfLine("QUIT")
 	_, _, _ = c.tp.ReadResponse(205)
 	return c.conn.Close()
