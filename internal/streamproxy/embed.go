@@ -13,10 +13,11 @@ import (
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
 )
 
-// Embed-page auto-resolution for /proxy/stream (EasyProxy behaviour): when
-// the destination matches a definition's "match" pattern it is an embed page,
-// not media, so it is resolved with that definition first. Players issue many
-// Range requests for one URL, so resolutions are cached briefly.
+// Embed-page auto-resolution for /proxy/stream, /proxy/hls and /proxy/mpd
+// (EasyProxy behaviour): when the destination matches a definition's "match"
+// pattern it is an embed page, not media, so it is resolved with that
+// definition first. Players issue many Range requests for one URL, so
+// resolutions are cached briefly.
 
 const (
 	embedCacheTTL = 10 * time.Minute
@@ -66,10 +67,12 @@ func (c *embedCache) put(key string, res *extractResult) {
 	c.m[key] = embedEntry{res: res, expires: time.Now().Add(embedCacheTTL)}
 }
 
-// resolveEmbed resolves opts.Dest when it matches a definition. It returns
-// true when it has written the response (error or redirect to the HLS/MPD
-// endpoint); otherwise opts.Dest/ReqHeaders now describe the media to stream.
-func (h *Handler) resolveEmbed(w http.ResponseWriter, r *http.Request, opts *Options) bool {
+// resolveEmbed resolves opts.Dest when it matches a definition. endpoint is
+// the proxy endpoint serving the request (/proxy/stream, /proxy/hls/… or
+// /proxy/mpd/…). It returns true when it has written the response (error or
+// redirect to the result's endpoint); otherwise opts.Dest/ReqHeaders now
+// describe the media to serve on endpoint.
+func (h *Handler) resolveEmbed(w http.ResponseWriter, r *http.Request, opts *Options, endpoint string) bool {
 	if h.defs == nil {
 		return false
 	}
@@ -101,8 +104,9 @@ func (h *Handler) resolveEmbed(w http.ResponseWriter, r *http.Request, opts *Opt
 			opts.ReqHeaders.Set(k, v)
 		}
 	}
-	if res.Endpoint != "/proxy/stream" {
-		// Playlists must be rewritten by their own endpoint.
+	if res.Endpoint != endpoint {
+		// Playlists must be rewritten by their own endpoint (and a media
+		// stream must not be parsed as a playlist).
 		http.Redirect(w, r, h.buildProxyURL(h.externalBase(r), res.Endpoint, res.URL, opts), http.StatusFound)
 		return true
 	}

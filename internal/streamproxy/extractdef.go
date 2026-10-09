@@ -5,6 +5,7 @@
 package streamproxy
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,8 @@ const (
 	maxDefFetches   = 8
 	maxDefTimeout   = 20 * time.Second
 	maxDefTemplates = 4096
+	maxDefBody      = 64 << 10 // serialized POST body cap
+	maxDefBodyDepth = 16       // nesting cap for a step body
 )
 
 // DefSet is a parsed extractor definitions document.
@@ -47,7 +50,8 @@ type namedExtractor struct {
 
 // Extractor is a single host definition.
 type Extractor struct {
-	// Match, when set, is an RE2 regex on /proxy/stream destination URLs:
+	// Match, when set, is an RE2 regex on the destination URL of
+	// /proxy/stream, /proxy/hls/manifest.m3u8 and /proxy/mpd/manifest.m3u8:
 	// a matching destination (an embed page rather than a media file) is
 	// resolved with this definition before streaming, as EasyProxy does.
 	Match  string  `json:"match,omitempty"`
@@ -63,6 +67,8 @@ type Step struct {
 	IfPath    string            `json:"if_path,omitempty"`   // regex on the input URL path
 	IfURL     string            `json:"if_url,omitempty"`    // regex on the current page URL
 	Fetch     string            `json:"fetch,omitempty"`     // template; body becomes the current page
+	Method    string            `json:"method,omitempty"`    // GET (default) or POST; needs fetch
+	Body      json.RawMessage   `json:"body,omitempty"`      // JSON value sent by POST; string leaves are templates
 	Headers   map[string]string `json:"headers,omitempty"`   // fetch headers (templates)
 	JSON      string            `json:"json,omitempty"`      // dot path into the fetched (or From) JSON
 	Regex     string            `json:"regex,omitempty"`     // RE2; group 1 (or whole match) is captured
@@ -74,6 +80,9 @@ type Step struct {
 	Optional  bool              `json:"optional,omitempty"`  // failure skips the step instead of aborting
 
 	ifPath, ifURL, re *regexp.Regexp
+	post              bool // Method is POST
+	body              any  // decoded Body (json.Number for numbers), nil when absent
+	hasBody           bool
 }
 
 // Result describes the resolved stream.
@@ -182,6 +191,9 @@ func (ex *Extractor) compile() error {
 		if s.Fetch == "" && s.Regex == "" && s.JSON == "" && s.Value == "" && len(s.Transform) == 0 {
 			return fmt.Errorf("step %d: no action", i)
 		}
+		if err := s.compileRequest(i); err != nil {
+			return err
+		}
 		if s.ifPath, err = compileOpt(s.IfPath); err != nil {
 			return fmt.Errorf("step %d if_path: %w", i, err)
 		}
@@ -244,7 +256,7 @@ func (st *defRun) step(r *http.Request, s *Step, in *url.URL, get pageFetcher) e
 	}
 	if s.Fetch != "" {
 		target := resolveURL(st.vars["url"], st.expand(s.Fetch))
-		body, err := st.fetch(r, target, s.Headers, get)
+		body, err := st.fetchStep(r, s, target, get)
 		if err != nil {
 			return err
 		}
@@ -351,6 +363,48 @@ func mergeReferer(h map[string]string, ref string) map[string]string {
 }
 
 func (st *defRun) fetch(r *http.Request, target string, hdr map[string]string, get pageFetcher) (string, error) {
+	return st.do(r, http.MethodGet, target, hdr, nil, get)
+}
+
+// fetchStep performs the step's own request (GET, or POST with its body).
+func (st *defRun) fetchStep(r *http.Request, s *Step, target string, get pageFetcher) (string, error) {
+	if !s.post {
+		return st.fetch(r, target, s.Headers, get)
+	}
+	var body []byte
+	if s.hasBody {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(st.expandJSON(s.body)); err != nil {
+			return "", fmt.Errorf("%w: encode body: %w", errExtract, err)
+		}
+		body = bytes.TrimRight(buf.Bytes(), "\n")
+		if len(body) > maxDefBody {
+			return "", fmt.Errorf("%w: request body too large", errExtract)
+		}
+	}
+	hdr := s.Headers
+	if s.hasBody && !hasHeader(hdr, "Content-Type") {
+		hdr = make(map[string]string, len(s.Headers)+1)
+		for k, v := range s.Headers {
+			hdr[k] = v
+		}
+		hdr["Content-Type"] = "application/json"
+	}
+	return st.do(r, http.MethodPost, target, hdr, body, get)
+}
+
+func hasHeader(h map[string]string, name string) bool {
+	for k := range h {
+		if strings.EqualFold(k, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (st *defRun) do(r *http.Request, method, target string, hdr map[string]string, body []byte, get pageFetcher) (string, error) {
 	st.fetches++
 	if st.fetches > maxDefFetches {
 		return "", fmt.Errorf("%w: too many fetches", errExtract)
@@ -359,7 +413,81 @@ func (st *defRun) fetch(r *http.Request, target string, hdr map[string]string, g
 	for k, v := range hdr {
 		h[k] = st.expand(v)
 	}
-	return get(r, target, h)
+	return get(r, method, target, h, body)
+}
+
+// expandJSON returns a copy of a decoded body with every string leaf
+// expanded as a template. Object keys stay literal. The result is
+// serialized afterwards, so substituted values are JSON-escaped.
+func (st *defRun) expandJSON(v any) any {
+	switch t := v.(type) {
+	case string:
+		return st.expand(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = st.expandJSON(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = st.expandJSON(e)
+		}
+		return out
+	}
+	return v
+}
+
+// jsonDepth returns the nesting depth of a decoded JSON value.
+func jsonDepth(v any) int {
+	d := 0
+	switch t := v.(type) {
+	case []any:
+		for _, e := range t {
+			d = max(d, jsonDepth(e))
+		}
+		return d + 1
+	case map[string]any:
+		for _, e := range t {
+			d = max(d, jsonDepth(e))
+		}
+		return d + 1
+	}
+	return 0
+}
+
+// compileRequest validates and decodes a step's method and body.
+func (s *Step) compileRequest(i int) error {
+	switch strings.ToUpper(strings.TrimSpace(s.Method)) {
+	case "", http.MethodGet:
+	case http.MethodPost:
+		s.post = true
+	default:
+		return fmt.Errorf("step %d: unsupported method %q (GET or POST)", i, s.Method)
+	}
+	s.hasBody = len(s.Body) > 0
+	if s.hasBody && !s.post {
+		return fmt.Errorf("step %d: body needs method POST", i)
+	}
+	if s.Fetch == "" && (s.Method != "" || s.hasBody) {
+		return fmt.Errorf("step %d: method/body need fetch", i)
+	}
+	if !s.hasBody {
+		return nil
+	}
+	if len(s.Body) > maxDefBody {
+		return fmt.Errorf("step %d: body too large", i)
+	}
+	dec := json.NewDecoder(bytes.NewReader(s.Body))
+	dec.UseNumber()
+	if err := dec.Decode(&s.body); err != nil {
+		return fmt.Errorf("step %d: body: %w", i, err)
+	}
+	if jsonDepth(s.body) > maxDefBodyDepth {
+		return fmt.Errorf("step %d: body nested deeper than %d", i, maxDefBodyDepth)
+	}
+	return nil
 }
 
 func (st *defRun) result(res *Result) (*extractResult, error) {

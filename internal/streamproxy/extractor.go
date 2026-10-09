@@ -5,6 +5,7 @@
 package streamproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,8 +39,9 @@ type extractResult struct {
 	Endpoint string // /proxy/stream or /proxy/hls/manifest.m3u8
 }
 
-// pageFetcher fetches a page with the given headers and returns its body.
-type pageFetcher func(r *http.Request, rawurl string, hdr map[string]string) (string, error)
+// pageFetcher fetches a page (GET, or POST with body) with the given headers
+// and returns its body.
+type pageFetcher func(r *http.Request, method, rawurl string, hdr map[string]string, body []byte) (string, error)
 
 // mediaflowEndpointName maps proxy paths to MediaFlow's endpoint identifiers.
 var mediaflowEndpointName = map[string]string{
@@ -134,7 +136,10 @@ func writeExtractorError(w http.ResponseWriter, code int, msg string) {
 
 // extractorFetch returns a pageFetcher using the SSRF-guarded proxy client.
 func (h *Handler) extractorFetch(proxyURL string) pageFetcher {
-	return func(r *http.Request, rawurl string, hdr map[string]string) (string, error) {
+	if proxyURL == "" {
+		proxyURL = h.cfg.UpstreamProxy
+	}
+	return func(r *http.Request, method, rawurl string, hdr map[string]string, body []byte) (string, error) {
 		if err := h.ValidateDest(rawurl); err != nil {
 			return "", err
 		}
@@ -142,12 +147,16 @@ func (h *Handler) extractorFetch(proxyURL string) pageFetcher {
 		for k, v := range hdr {
 			hh.Set(k, v)
 		}
-		resp, err := h.fetch(r.Context(), http.MethodGet, rawurl, hh, nil, proxyURL)
+		var rd io.Reader
+		if body != nil {
+			rd = bytes.NewReader(body)
+		}
+		resp, err := h.fetch(r.Context(), method, rawurl, hh, rd, proxyURL)
 		if err != nil {
 			return "", err
 		}
 		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode != http.StatusOK && (method != http.MethodPost || resp.StatusCode/100 != 2) {
 			return "", fmt.Errorf("%w: upstream status %d", errExtract, resp.StatusCode)
 		}
 		b, err := io.ReadAll(io.LimitReader(resp.Body, maxExtractorPage))

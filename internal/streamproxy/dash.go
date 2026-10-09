@@ -41,6 +41,9 @@ func dashServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 	if h.rejectBlockedProxyHost(w, opts.Proxy) {
 		return
 	}
+	if h.resolveEmbed(w, r, opts, "/proxy/mpd/manifest.m3u8") {
+		return
+	}
 	effProxy := opts.Proxy
 	if effProxy == "" {
 		effProxy = h.cfg.UpstreamProxy

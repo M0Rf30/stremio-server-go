@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -945,7 +946,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// An embed page matching a definition is resolved to its media first.
-	if h.resolveEmbed(w, r, opts) {
+	if h.resolveEmbed(w, r, opts, "/proxy/stream") {
 		return
 	}
 
@@ -1290,7 +1291,17 @@ func (h *Handler) clientFor(proxyURL string) *http.Client {
 		e.client.CloseIdleConnections()
 		delete(h.proxyClients, key)
 	}
-	c, err := buildProxyClient(proxyURL, blockPrivate, h.cfg.PrivateAllow)
+	var c *http.Client
+	var err error
+	if h.cfg.UpstreamProxy != "" && proxyURL == h.cfg.UpstreamProxy {
+		// Operator-configured upstream: the TCP hop to this exact host:port is
+		// exempt from the private-range guard (it is typically a loopback ssh
+		// -D tunnel or LAN proxy). Destinations are still checked by
+		// ValidateDest before every fetch.
+		c, err = buildProxyClientControl(proxyURL, upstreamHopControl(proxyURL))
+	} else {
+		c, err = buildProxyClient(proxyURL, blockPrivate, h.cfg.PrivateAllow)
+	}
 	if err != nil {
 		logging.For("streamproxy").Warn("cannot build proxy client; using default", "proxy_url", proxyURL, "err", err)
 		return base
@@ -1363,6 +1374,42 @@ func proxyClientKey(proxyURL string, blockPrivate bool) string {
 // closing the DNS-rebinding TOCTOU gap between validateProxyHost's pre-flight
 // check and the actual dial.
 func buildProxyClient(proxyURL string, blockPrivate bool, allow *netguard.Allow) (*http.Client, error) {
+	return buildProxyClientControl(proxyURL, netguard.DialControlAllow(blockPrivate, allow))
+}
+
+// upstreamHopControl returns a dialer Control for the TCP hop to the
+// operator-configured upstream proxy. It only accepts connections to the
+// proxy's own port and still refuses cloud-metadata addresses; any other
+// address (the dialer is only ever used for the proxy hop) is rejected by the
+// full private-range guard.
+func upstreamHopControl(proxyURL string) func(network, address string, c syscall.RawConn) error {
+	wantPort := ""
+	if u, err := url.Parse(proxyURL); err == nil {
+		wantPort = u.Port()
+		if wantPort == "" {
+			switch u.Scheme {
+			case "socks5", "socks5h":
+				wantPort = "1080"
+			case "https":
+				wantPort = "443"
+			default:
+				wantPort = "80"
+			}
+		}
+	}
+	relaxed := netguard.DialControl(false)
+	strict := netguard.DialControl(true)
+	return func(network, address string, c syscall.RawConn) error {
+		if _, port, err := net.SplitHostPort(address); err == nil && port == wantPort {
+			return relaxed(network, address, c)
+		}
+		return strict(network, address, c)
+	}
+}
+
+// buildProxyClientControl is buildProxyClient with an explicit dialer
+// Control for the hop to the proxy host.
+func buildProxyClientControl(proxyURL string, control func(network, address string, c syscall.RawConn) error) (*http.Client, error) {
 	u, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse proxy URL: %w", err)
@@ -1370,7 +1417,7 @@ func buildProxyClient(proxyURL string, blockPrivate bool, allow *netguard.Allow)
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
-		Control:   netguard.DialControlAllow(blockPrivate, allow),
+		Control:   control,
 	}
 	tr := &http.Transport{
 		TLSHandshakeTimeout:   10 * time.Second,

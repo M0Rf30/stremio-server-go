@@ -22,7 +22,7 @@ import (
 )
 
 func fakeGet(pages map[string]string) pageFetcher {
-	return func(_ *http.Request, rawurl string, _ map[string]string) (string, error) {
+	return func(_ *http.Request, _, rawurl string, _ map[string]string, _ []byte) (string, error) {
 		if b, ok := pages[rawurl]; ok {
 			return b, nil
 		}
@@ -152,6 +152,12 @@ func TestParseDefSetRejects(t *testing.T) {
 		"noaction":  `{"version":1,"extractors":{"a":{"steps":[{"optional":true}],"result":{"url":"{input}","endpoint":"hls"}}}}`,
 		"follow":    `{"version":1,"extractors":{"a":{"steps":[{"fetch":"{input}","follow":true}],"result":{"url":"{input}","endpoint":"hls"}}}}`,
 		"nourl":     `{"version":1,"extractors":{"a":{"steps":[{"fetch":"{input}"}],"result":{"endpoint":"hls"}}}}`,
+		"badmethod": `{"version":1,"extractors":{"a":{"steps":[{"fetch":"{input}","method":"PUT"}],"result":{"url":"{input}","endpoint":"hls"}}}}`,
+		"bodyget":   `{"version":1,"extractors":{"a":{"steps":[{"fetch":"{input}","body":{"a":1}}],"result":{"url":"{input}","endpoint":"hls"}}}}`,
+		"bodyget2":  `{"version":1,"extractors":{"a":{"steps":[{"fetch":"{input}","method":"GET","body":"x"}],"result":{"url":"{input}","endpoint":"hls"}}}}`,
+		"nofetch":   `{"version":1,"extractors":{"a":{"steps":[{"value":"x","method":"POST"}],"result":{"url":"{input}","endpoint":"hls"}}}}`,
+		"badbody":   `{"version":1,"extractors":{"a":{"steps":[{"fetch":"{input}","method":"POST","body":{"a":}}],"result":{"url":"{input}","endpoint":"hls"}}}}`,
+		"deepbody":  `{"version":1,"extractors":{"a":{"steps":[{"fetch":"{input}","method":"POST","body":` + strings.Repeat("[", 40) + strings.Repeat("]", 40) + `}],"result":{"url":"{input}","endpoint":"hls"}}}}`,
 	} {
 		if _, err := ParseDefSet([]byte(doc)); err == nil {
 			t.Errorf("%s: accepted", name)
