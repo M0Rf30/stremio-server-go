@@ -37,6 +37,7 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 
+	"github.com/M0Rf30/stremio-server-go/internal/dvr"
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 	"github.com/M0Rf30/stremio-server-go/internal/streamproxy"
@@ -91,6 +92,10 @@ type server struct {
 	certReload  atomic.Pointer[func()]
 	proxyClient *http.Client
 	blobClient  *http.Client
+	// dvr is the opt-in recorder behind /record and /api/recordings (nil
+	// unless STREMIO_DVR_ENABLED; dvrInitErr says why when enabled but unusable).
+	dvr        *dvr.Manager
+	dvrInitErr string
 }
 
 // New returns the HTTP handler for the streaming server.
@@ -121,7 +126,7 @@ func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProbe
 			}).DialContext,
 		},
 	}
-	return &server{
+	s := &server{
 		em:          em,
 		ss:          ss,
 		prober:      prober,
@@ -132,6 +137,13 @@ func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProbe
 		proxyClient: pc,
 		blobClient:  bc,
 	}
+	if m, err := newDVR(cfg); err != nil {
+		s.dvrInitErr = err.Error()
+		logging.For("dvr").Error("dvr disabled: cannot initialise", "err", err)
+	} else {
+		s.dvr = m
+	}
+	return s
 }
 
 // Shared, immutable CORS header values, assigned directly into the response
@@ -299,6 +311,8 @@ func sideEffectingRoute(r *http.Request) bool {
 		return len(seg) >= 2 && seg[1] == "create"
 	case "hlsv2":
 		return strings.Contains(r.URL.Path, "probe")
+	case "record", "api":
+		return dvrSideEffecting(r)
 	case "proxy", "yt", "extractor":
 		// <video>/<audio>/<track> loads of these are legitimate cross-site
 		// (stremio-web); any other destination is an attack vector.
@@ -347,6 +361,12 @@ func hostOf(raw string) string {
 // the configured public URL host, or listed in STREMIO_ALLOWED_HOSTS.
 func hostAllowed(cfg types.Config, r *http.Request) bool {
 	if cfg.AllowAllOrigins || mediaRoute(r) {
+		return true
+	}
+	// DVR routes are fetched by remote addons/players under whatever public
+	// name they were configured with; with a password set the Host check adds
+	// nothing (a rebinding page cannot know it).
+	if cfg.ProxyPassword != "" && dvrRoute(r) {
 		return true
 	}
 	host := r.Host
@@ -725,6 +745,10 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.sp.HandleBase64(w, r, splitEncodedPath(r))
 	case "extractor":
 		s.sp.HandleExtractor(w, r, splitEncodedPath(r))
+	case "record":
+		s.handleRecord(w, r, strings.Split(path, "/"))
+	case "api":
+		s.handleRecordings(w, r, strings.Split(path, "/"))
 	// /list — active infohash array handled above (single-segment hot path)
 	// /stream/:infoHash/:fileIdx — alias to /:infoHash/:fileIdx
 	case "stream":
@@ -2346,6 +2370,9 @@ func rfc5987Encode(s string) string {
 // segment-cache janitor). Safe to call more than once.
 func (s *server) Close() error {
 	s.sp.Close()
+	if s.dvr != nil {
+		_ = s.dvr.Close() // stops active recordings gracefully so the files stay playable
+	}
 	return nil
 }
 

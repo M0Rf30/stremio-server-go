@@ -140,6 +140,27 @@ type Config struct {
 	// default 90s. Slow-starting torrents/debrid links may need a longer
 	// window than the default.
 	CreateMetadataWait time.Duration
+
+	// SelfURL is a loopback base URL (e.g. http://127.0.0.1:11470) on which
+	// this process is reachable by its own child processes (ffmpeg). Set by
+	// the app after BIND_ADDRESS is resolved; "" = derive from HTTPPort.
+	SelfURL string
+
+	// DVR (MediaFlow/EasyProxy-compatible /record + /api/recordings), opt-in.
+	// DVREnabled is STREMIO_DVR_ENABLED (default false). DVRDir is
+	// STREMIO_DVR_DIR ("" = <AppPath>/recordings). DVRDefaultDuration and
+	// DVRMaxDuration (STREMIO_DVR_DEFAULT_DURATION / _MAX_DURATION) bound one
+	// recording; DVRMaxActive (STREMIO_DVR_MAX_ACTIVE) caps concurrent ffmpeg
+	// recorders; DVRMaxBytes (STREMIO_DVR_MAX_BYTES, 0 = unlimited) caps the
+	// total size of the recordings directory; DVRRetentionDays
+	// (STREMIO_DVR_RETENTION_DAYS, 0 = keep forever) ages out finished ones.
+	DVREnabled         bool
+	DVRDir             string
+	DVRDefaultDuration time.Duration
+	DVRMaxDuration     time.Duration
+	DVRMaxActive       int
+	DVRMaxBytes        int64
+	DVRRetentionDays   int
 }
 
 // FileInfo mirrors an entry of stats.files as consumed by stremio-web.

@@ -33,6 +33,9 @@ Not affiliated with or endorsed by Stremio.
   driven by external, declarative definitions (see [Extractors](#extractors); no
   hosts are built in). Addons with a MediaFlow/EasyProxy setting can use this server
   as their proxy URL with `STREMIO_PROXY_PASSWORD` as the proxy password.
+- **DVR recording** (opt-in) - EasyProxy-compatible `/record` + `/api/recordings`:
+  an addon's DVR entry records a live stream in the background with `ffmpeg`
+  (stream copy) while the player watches it; see [DVR recording](#dvr-recording).
 - **Archive streaming** - direct playback of media inside ZIP / RAR / 7z / TAR /
   TGZ containers (`/zip`, `/rar`, `/7zip`, `/tar`, `/tgz`), plus **Usenet/NZB**
   (`/nzb`, NNTP + yEnc) and **FTP/FTPS** (`/ftp`) streaming - all pure-Go.
@@ -159,11 +162,18 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_PROXY_IP_ACL` | _(unset)_ | comma-separated CIDR allowlist for proxy clients |
 | `STREMIO_PROXY_PREBUFFER` | `3` | upcoming segments to prefetch (`0` = off) |
 | `STREMIO_PROXY_SEG_CACHE_TTL` | `300` | proxy segment cache TTL, seconds (`0` = off) |
+| `STREMIO_DVR_ENABLED` | `false` | enable the `/record` DVR and `/api/recordings` (needs `ffmpeg`; see [DVR recording](#dvr-recording)) |
+| `STREMIO_DVR_DIR` | `$APP_PATH/recordings` | where recordings and their metadata are stored |
+| `STREMIO_DVR_DEFAULT_DURATION` | `14400` | recording length when the request has no `duration` (seconds or a Go duration) |
+| `STREMIO_DVR_MAX_DURATION` | `28800` | hard per-recording cap; longer requests are clamped (seconds or a Go duration) |
+| `STREMIO_DVR_MAX_ACTIVE` | `2` | concurrent recordings; more get `429` |
+| `STREMIO_DVR_MAX_BYTES` | `0` | total size cap of the recordings directory in bytes (`0` = unlimited); a full store refuses new recordings (`507`); each recording is also limited (`ffmpeg -fs`) to the space left when it starts |
+| `STREMIO_DVR_RETENTION_DAYS` | `7` | finished recordings older than this are deleted (`0` = keep forever) |
 | `STREMIO_EXTRACTORS_FILE` | `$APP_PATH/extractors.json` | local `/extractor` definitions (re-read on change) |
 | `STREMIO_EXTRACTORS_URL` | _(unset)_ | remote definitions list, refreshed every 6h; `off`/empty disables. Requires `STREMIO_EXTRACTORS_PUBKEY` |
 | `STREMIO_EXTRACTORS_PUBKEY` | _(unset)_ | ed25519 public key (hex/base64); the remote list is used only if `<URL>.sig` verifies |
 | `STREMIO_PROXY_PUBLIC_URL` | _(derive; falls back to `STREMIO_PUBLIC_URL`)_ | external base URL written into rewritten manifests |
-| `STREMIO_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for stream proxy (socks5/http/https); overridden per-request by `&proxy=` |
+| `STREMIO_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for stream proxy and extractor fetches (socks5/http/https); overridden per-request by `&proxy=`. The proxy host:port itself is operator-trusted and may be loopback/LAN (e.g. an `ssh -D` tunnel on `127.0.0.1`) without `STREMIO_PROXY_PRIVATE_ALLOW`; destinations are still SSRF-checked before each fetch. |
 | `STREMIO_BITMAGNET_URL` | _(unset)_ | GraphQL endpoint of a self-hosted Bitmagnet instance; enables the `/bitmagnet` add-on. Unset = add-on serves the manifest but returns no streams. |
 | `STREMIO_TORZNAB_URL` | _(unset)_ | Torznab indexer API base URL; enables the `/torznab` add-on. Unset = add-on serves the manifest but returns no streams. |
 | `STREMIO_TORZNAB_APIKEY` | _(unset)_ | API key for the Torznab indexer. Required by Prowlarr and Jackett; not needed for Bitmagnet. |
@@ -429,6 +439,7 @@ once per process. `scripts/libstremio_smoke.py` exercises it through ctypes.
 | `internal/engine` | anacrolix client, readers, stats, trackers, cache eviction |
 | `internal/api` | enginefs routes, streaming, proxy, casting, local-addon, youtube, archive/nzb/ftp |
 | `internal/streamproxy` | `/proxy` HLS/DASH rewrite, DRM decrypt, signed URLs, segment cache |
+| `internal/dvr` | DVR recorder: ffmpeg stream-copy supervisor, recording store, retention |
 | `internal/netguard` | SSRF guard: private/loopback/cloud-metadata checks + dial-time `Control` hook, shared by the proxy, archive/nzb/ftp fetches, and the media relay |
 | `internal/settings` | settings store (`server-settings.json`) |
 | `internal/media` | ffprobe, HLS transcode, subtitles, opensub hash |
@@ -442,9 +453,9 @@ once per process. `scripts/libstremio_smoke.py` exercises it through ctypes.
 ## Extractors
 
 `/extractor/video` resolves a page into a stream using definitions that live
-outside the binary, and `/proxy/stream` can use them to resolve embed pages
-(see `match` below). The server ships with none; unknown `host=` values return
-`400`.
+outside the binary, and `/proxy/stream`, `/proxy/hls/manifest.m3u8` and
+`/proxy/mpd/manifest.m3u8` can use them to resolve embed pages (see `match`
+below). The server ships with none; unknown `host=` values return `400`.
 
 **Sources** (local entries override remote ones with the same name):
 
@@ -457,6 +468,17 @@ outside the binary, and `/proxy/stream` can use them to resolve embed pages
   The last verified copy is cached under `APP_PATH`. Like `STREMIO_TRACKERS_URL`,
   this URL is operator-configured, so it may point at a LAN/localhost copy; the
   signature, not the address, is what makes it trusted.
+
+**Signed remote list:** host `extractors.json` plus a hex `extractors.json.sig`
+somewhere reachable and opt in by setting
+
+```sh
+STREMIO_EXTRACTORS_URL=https://definitions.example/extractors.json
+STREMIO_EXTRACTORS_PUBKEY=<ed25519 public key, hex or base64>
+```
+
+Nothing is fetched unless both are set; a list whose signature does not verify
+is ignored.
 
 **Format** (`version` must be `1`; unknown fields are rejected):
 
@@ -486,7 +508,9 @@ outside the binary, and `/proxy/stream` can use them to resolve embed pages
 
 | Step field | Meaning |
 |---|---|
-| `fetch` + `headers` | GET a URL (resolved against the current page). Alone, the response becomes the current page; with `json`/`regex`, only the captured value is kept |
+| `fetch` + `headers` | request a URL (resolved against the current page); GET unless `method` says otherwise. Alone, the response becomes the current page; with `json`/`regex`, only the captured value is kept |
+| `method` | `GET` (default) or `POST`; needs `fetch` |
+| `body` | any JSON value, sent by a `POST` step as `application/json` (unless `headers` sets `Content-Type`). Every string leaf is a template (`{var}`, `{var?text}`) expanded before serialization, so substituted values are JSON-escaped automatically; object keys stay literal. A `body` without `"method": "POST"` is rejected; at most 64 KB serialized, 16 levels deep |
 | `json` | dot path (`a.0.b`) into the fetched body or `from` variable |
 | `regex` | RE2 pattern on the current page or `from` variable; group 1 (or the whole match) is captured |
 | `value` | literal template, stored in `set` |
@@ -501,14 +525,20 @@ variables: `input`, `origin`, `host`, `path`, `query` (of the input URL), `url`
 and `page_origin` (current page), `body`. `result.endpoint` is `stream`, `hls`
 or `mpd`; empty query/header values are dropped.
 
-**Embed pages on `/proxy/stream`:** a definition may also set `match`, an RE2
-regex on `/proxy/stream` destination URLs. A matching destination is treated
-as an embed page (not media) and resolved with that definition first, as
-EasyProxy does: a `stream` result is served directly (with the definition's
-headers; caller `h_` headers take precedence), while `hls`/`mpd` results are
-redirected (302) to their proxy endpoint. Resolutions are cached for 10 minutes
-so a player's Range requests don't refetch the page; a page that can't be
-resolved returns `502` instead of its HTML.
+**Embed pages on `/proxy/stream`, `/proxy/hls` and `/proxy/mpd`:** a definition
+may also set `match`, an RE2 regex on the destination (`d`) of those endpoints.
+A matching destination is treated as an embed page (not media) and resolved
+with that definition first, as EasyProxy does, then served on the result's
+`endpoint` with the definition's headers (caller `h_` headers take precedence):
+when that is the endpoint that received the request (for example an
+`/proxy/hls/manifest.m3u8` request for a definition whose result endpoint is
+`hls`) the playlist is served directly; otherwise the request is redirected
+(302) to the proxy URL of the result endpoint, with the same auth/signing
+parameters. Resolutions are cached for 10 minutes so a player's Range or
+playlist-refresh requests don't refetch the page; a page that can't be
+resolved returns `502` instead of its HTML. This is how a MediaFlow-style link
+such as `/proxy/hls/manifest.m3u8?d=<hoster play URL>` plays when a definition
+matches it.
 
 ```json
 "embedhost": {
@@ -518,10 +548,93 @@ resolved returns `502` instead of its HTML.
 }
 ```
 
+A multi-step API hop with a POST (the response is JSON, captured by `json`):
+
+```json
+"apihost": {
+  "match": "^https://api\\.example/play/",
+  "steps": [
+    {"fetch": "https://api.example/resolve", "method": "POST",
+     "headers": {"X-Client": "web"},
+     "body": {"url": "{input}", "lang": "it"},
+     "json": "0.url", "set": "src"}
+  ],
+  "result": {"url": "{src}", "endpoint": "hls"}
+}
+```
+
 Limits: 32 steps, 8 fetches and 20 s per request, 4 MB per page, 1 MB per
 definitions file. Every fetch and the resolved URL go through the same
 private-address checks as `/proxy`. There is no scripting, so pages that need a
 JavaScript runtime or anti-bot challenges cannot be described.
+
+## DVR recording
+
+An opt-in, MediaFlow/EasyProxy-compatible DVR. An addon with a DVR option and
+this server as its EasyProxy URL adds a record entry per stream, a catalog of
+recordings, and *Stop & Watch* / *DELETE* entries; they all call the endpoints
+below, which mirror [EasyProxy](https://github.com/realbestia1/EasyProxy)
+(`routes/recordings.py`, `services/recording_manager.py`).
+
+```
+STREMIO_DVR_ENABLED=1
+STREMIO_PROXY_PASSWORD=...      # strongly recommended: required as api_password when set
+```
+
+Opening `{server}/record?url=<stream>&name=<title>&duration=14400&api_password=<pw>`
+starts an `ffmpeg -c copy` recorder in the background and answers `302` to the
+live proxy URL (`/proxy/hls/manifest.m3u8?d=…`), so the player starts watching
+while the recording runs. The recorder reads the *same* proxy URL on loopback,
+so request headers (`h_*`), embed/extractor resolution (the `url` may be an embed
+page matched by an `extractors.json` definition, or force one with `&extractor=`),
+the SSRF guard and the upstream proxy (`STREMIO_PROXY_UPSTREAM`, `&proxy=`) apply
+to the recording exactly as to playback. `url` may also be a `/proxy/…` URL of
+this server. Repeating the request for a source that is already recording does not
+start a second recorder.
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /record?url=&name=&duration=` | start + `302` live; `400` bad url/duration, `429` over `STREMIO_DVR_MAX_ACTIVE`, `503` no `ffmpeg`, `507` store full |
+| `GET /record/stop/{id}` | stop (finalises the file) and `302` to `/api/recordings/{id}/stream` |
+| `GET /api/recordings[?status=]` | `{"recordings":[…],"active_count":n,"system_stats":{…}}` |
+| `GET /api/recordings/active` | `{"recordings":[…active…]}` |
+| `POST /api/recordings/start` | JSON `{url,name,duration,extractor,proxy}` → `201` recording (`200` if already recording) |
+| `GET /api/recordings/{id}` | one recording, `404` if unknown |
+| `POST /api/recordings/{id}/stop` | stop, returns the recording |
+| `DELETE /api/recordings/{id}` · `GET …/{id}/delete` | delete file + metadata (the `GET` form is for players that can only open a URL); `DELETE /api/recordings[/all][?status=]` deletes many |
+| `GET /api/recordings/{id}/stream` | `video/mp2t`; `Range` for finished recordings, live-follow while it records |
+| `GET /api/recordings/{id}/download` | attachment, `Range` supported |
+
+A recording is `{id, name, url, file_path, status, started_at, stopped_at,
+duration_seconds, file_size_bytes, error_message, is_active, elapsed_seconds,
+max_duration_seconds}`; `status` is `recording`, `completed` (source ended or the
+duration cap was reached), `stopped` (user or shutdown) or `failed`.
+`file_path` is the bare file name, `url` is the requested source with
+`api_password`/`token` removed. Files are MPEG-TS (`<id>_<name>.ts`, growing and
+playable while recording) with a `<id>.json` sidecar in `STREMIO_DVR_DIR`.
+
+Notes:
+
+- **Duration** is in seconds. Missing, empty, `0` or negative uses
+  `STREMIO_DVR_DEFAULT_DURATION`; anything above `STREMIO_DVR_MAX_DURATION` is
+  clamped; a non-number is `400`. Besides ffmpeg's `-t`, a wall-clock watchdog
+  ends a recorder that stalls past the cap.
+- **Names** are only a label: the file name is generated from the id plus the name
+  reduced to letters, digits, `-`, `_` and spaces (≤ 50 characters), so a title can
+  never address a path outside `STREMIO_DVR_DIR`.
+- **Auth**: every DVR route requires `api_password` (query, or `X-Api-Password`)
+  when `STREMIO_PROXY_PASSWORD` is set, and honours `STREMIO_PROXY_IP_ACL` (which
+  must then include `127.0.0.1`, as the recorder reads the proxy on loopback).
+  With neither set anyone who can reach the server can record and read - a warning
+  is logged. `/record`, `/record/stop`, `…/delete` and all non-`GET` DVR requests
+  are side-effecting routes: a browser-originated cross-site request without an
+  allowed `Origin` is refused (`403`), even as `<video src>`. Playback
+  (`…/stream`, `…/download`) and JSON reads are not blocked.
+- **Shutdown** stops every active recorder gracefully (`q` to ffmpeg, kill after
+  10 s) so partial files stay playable; a recording interrupted by a crash is
+  marked `failed` on the next start (empty partial files are removed).
+- Not implemented: the `/recordings` web UI, ClearKey (`key_id`/`key`) and
+  `max_res` — addons using this API do not need them.
 
 ## Security
 
@@ -541,7 +654,7 @@ with no `Origin` header (native players, curl, most non-browser clients) are
 unaffected. Browsers omit `Origin` on cross-site links, images and iframes, so
 a request with no `Origin` but `Sec-Fetch-Site: cross-site` is refused (`403`)
 on side-effecting routes (`/removeAll`, `/{infoHash}/create|remove`,
-`/get-https`, `/casting`); media routes loaded by `<video>` or native HLS are
+`/get-https`, `/casting`, the DVR `/record` family); media routes loaded by `<video>` or native HLS are
 not affected. Proxied and streamed content is served with
 `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`, so an
 HTML/SVG body cannot run script on the server's own origin.

@@ -165,6 +165,13 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		// CreateMetadataWait bounds /create, /{infoHash}/create, and
 		// /{infoHash}/{fileIdx}'s wait for a torrent's metadata (issue #20).
 		CreateMetadataWait: envDuration(lookup, "STREMIO_CREATE_METADATA_TIMEOUT", 90*time.Second),
+		DVREnabled:         envBool(lookup, "STREMIO_DVR_ENABLED", false), // opt-in /record DVR (EasyProxy-compatible)
+		DVRDir:             getenv(lookup, "STREMIO_DVR_DIR", ""),         // "" = <APP_PATH>/recordings
+		DVRDefaultDuration: envDuration(lookup, "STREMIO_DVR_DEFAULT_DURATION", 4*time.Hour),
+		DVRMaxDuration:     envDuration(lookup, "STREMIO_DVR_MAX_DURATION", 8*time.Hour),
+		DVRMaxActive:       envInt(lookup, "STREMIO_DVR_MAX_ACTIVE", 2),
+		DVRMaxBytes:        envInt64(lookup, "STREMIO_DVR_MAX_BYTES", 0), // 0 = unlimited
+		DVRRetentionDays:   envInt(lookup, "STREMIO_DVR_RETENTION_DAYS", 7),
 	}
 	if tcfg.DisableWebtorrent {
 		logging.For("engine").Info("webtorrent/webrtc peers disabled")
@@ -391,6 +398,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		}
 	}
 	baseLocal := fmt.Sprintf("http://%s", net.JoinHostPort(selfHost, strconv.Itoa(tcfg.HTTPPort)))
+	tcfg.SelfURL = baseLocal
 	prober := media.New(baseLocal, hlsConfig(lookup), ss)
 	// prober owns a per-instance background reaper goroutine (and a working
 	// directory) created fresh by media.New on every Run call; close it via
