@@ -268,3 +268,17 @@ func trackersURL(lookup Lookup) string {
 	}
 	return strings.TrimSpace(v)
 }
+
+// optionalURL returns the value of key, with ""/off/0/false/no/disable(d)
+// meaning disabled (""). There is no default.
+func optionalURL(lookup Lookup, key string) string {
+	v, ok := lookup(key)
+	if !ok {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off", "0", "false", "no", "disable", "disabled":
+		return ""
+	}
+	return strings.TrimSpace(v)
+}

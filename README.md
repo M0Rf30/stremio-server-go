@@ -30,9 +30,9 @@ Not affiliated with or endorsed by Stremio.
 - **MediaFlow / EasyProxy compatible** - `/proxy/stream`, `/proxy/hls/manifest.m3u8`,
   `/proxy/mpd/manifest.m3u8`, `/proxy/ip`, `/generate_url`, plus a MediaFlow-style
   `/extractor/video[.m3u8|.mp4]?host=…&d=<page>&redirect_stream=true|false` resolver
-  for `VixCloud` (other hosts return `400`). Addons with a MediaFlow/EasyProxy
-  setting can use this server as their proxy URL with `STREMIO_PROXY_PASSWORD` as
-  the proxy password.
+  driven by external, declarative definitions (see [Extractors](#extractors); no
+  hosts are built in). Addons with a MediaFlow/EasyProxy setting can use this server
+  as their proxy URL with `STREMIO_PROXY_PASSWORD` as the proxy password.
 - **Archive streaming** - direct playback of media inside ZIP / RAR / 7z / TAR /
   TGZ containers (`/zip`, `/rar`, `/7zip`, `/tar`, `/tgz`), plus **Usenet/NZB**
   (`/nzb`, NNTP + yEnc) and **FTP/FTPS** (`/ftp`) streaming - all pure-Go.
@@ -150,6 +150,9 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_PROXY_IP_ACL` | _(unset)_ | comma-separated CIDR allowlist for proxy clients |
 | `STREMIO_PROXY_PREBUFFER` | `3` | upcoming segments to prefetch (`0` = off) |
 | `STREMIO_PROXY_SEG_CACHE_TTL` | `300` | proxy segment cache TTL, seconds (`0` = off) |
+| `STREMIO_EXTRACTORS_FILE` | `$APP_PATH/extractors.json` | local `/extractor` definitions (re-read on change) |
+| `STREMIO_EXTRACTORS_URL` | _(unset)_ | remote definitions list, refreshed every 6h; `off`/empty disables. Requires `STREMIO_EXTRACTORS_PUBKEY` |
+| `STREMIO_EXTRACTORS_PUBKEY` | _(unset)_ | ed25519 public key (hex/base64); the remote list is used only if `<URL>.sig` verifies |
 | `STREMIO_PROXY_PUBLIC_URL` | _(derive; falls back to `STREMIO_PUBLIC_URL`)_ | external base URL written into rewritten manifests |
 | `STREMIO_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for stream proxy (socks5/http/https); overridden per-request by `&proxy=` |
 | `STREMIO_BITMAGNET_URL` | _(unset)_ | GraphQL endpoint of a self-hosted Bitmagnet instance; enables the `/bitmagnet` add-on. Unset = add-on serves the manifest but returns no streams. |
@@ -425,6 +428,72 @@ once per process. `scripts/libstremio_smoke.py` exercises it through ctypes.
 | `internal/logging` | structured slog logger (leveled, component-tagged, text/json) |
 | `docs/swagger.yaml` | OpenAPI/Swagger spec, generated from code (`make swagger`) |
 | `scripts/smoke.sh` | end-to-end API smoke test |
+
+## Extractors
+
+`/extractor/video` resolves a page into a stream using definitions that live
+outside the binary. The server ships with none; unknown `host=` values return
+`400`.
+
+**Sources** (local entries override remote ones with the same name):
+
+- `$APP_PATH/extractors.json` (or `STREMIO_EXTRACTORS_FILE`): checked for
+  changes every few seconds; an invalid edit is logged and the previous good set
+  stays active.
+- `STREMIO_EXTRACTORS_URL`: fetched at startup and every 6h together with a
+  detached ed25519 signature at `<URL>.sig` (raw 64 bytes, hex or base64). It is
+  ignored unless `STREMIO_EXTRACTORS_PUBKEY` is set and the signature verifies.
+  The last verified copy is cached under `APP_PATH`. Like `STREMIO_TRACKERS_URL`,
+  this URL is operator-configured, so it may point at a LAN/localhost copy; the
+  signature, not the address, is what makes it trusted.
+
+**Format** (`version` must be `1`; unknown fields are rejected):
+
+```json
+{
+  "version": 1,
+  "extractors": {
+    "example": {
+      "steps": [
+        {"if_path": "^/(movie|tv)/", "fetch": "{origin}/api{path}", "json": "src", "set": "embed", "optional": true},
+        {"fetch": "{embed}", "headers": {"Referer": "{input}"}},
+        {"if_url": "/iframe", "regex": "<iframe[^>]+src=\"([^\"]+)", "transform": ["html_unescape"], "follow": true},
+        {"regex": "'token'\\s*:\\s*'(\\w+)'", "set": "token"},
+        {"regex": "url\\s*:\\s*'(https?://[^']+)'", "set": "playlist"},
+        {"regex": "canPlayFHD\\s*=\\s*true", "set": "fhd", "optional": true}
+      ],
+      "result": {
+        "url": "{playlist}",
+        "query": {"token": "{token}", "h": "{fhd?1}"},
+        "headers": {"Referer": "{page_origin}/"},
+        "endpoint": "hls"
+      }
+    }
+  }
+}
+```
+
+| Step field | Meaning |
+|---|---|
+| `fetch` + `headers` | GET a URL (resolved against the current page). Alone, the response becomes the current page; with `json`/`regex`, only the captured value is kept |
+| `json` | dot path (`a.0.b`) into the fetched body or `from` variable |
+| `regex` | RE2 pattern on the current page or `from` variable; group 1 (or the whole match) is captured |
+| `value` | literal template, stored in `set` |
+| `transform` | `base64`, `html_unescape`, `url_unescape`, `unpack_js` (p,a,c,k,e,d), `reverse`, `trim`, `scheme_https` |
+| `set` | variable that receives the value |
+| `follow` | fetch the captured URL and make it the current page |
+| `if_path` / `if_url` | run the step only if the input path / current page URL matches |
+| `optional` | a failure skips the step instead of failing the request |
+
+Templates use `{var}` or `{var?text}` (`text` if `var` is non-empty). Built-in
+variables: `input`, `origin`, `host`, `path`, `query` (of the input URL), `url`
+and `page_origin` (current page), `body`. `result.endpoint` is `stream`, `hls`
+or `mpd`; empty query/header values are dropped.
+
+Limits: 32 steps, 8 fetches and 20 s per request, 4 MB per page, 1 MB per
+definitions file. Every fetch and the resolved URL go through the same
+private-address checks as `/proxy`. There is no scripting, so pages that need a
+JavaScript runtime or anti-bot challenges cannot be described.
 
 ## Security
 

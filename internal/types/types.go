@@ -55,6 +55,11 @@ type Config struct {
 	ProxyPublicURL   string // explicit external base URL for proxy; "" = derive
 	ProxyUpstream    string // global upstream proxy for stream-proxy fetches; "" = direct (STREMIO_PROXY_UPSTREAM; socks5/http)
 
+	// Declarative /extractor definitions.
+	ExtractorsFile   string // local definitions file; "" = <AppPath>/extractors.json (STREMIO_EXTRACTORS_FILE)
+	ExtractorsURL    string // remote definitions list; "" disables (STREMIO_EXTRACTORS_URL)
+	ExtractorsPubKey string // ed25519 public key (hex/base64) the remote list must be signed with (STREMIO_EXTRACTORS_PUBKEY)
+
 	// Bitmagnet integration (self-hosted DHT index).
 	BitmagnetURL string // GraphQL endpoint, e.g. http://localhost:3333/graphql; "" disables stream queries
 

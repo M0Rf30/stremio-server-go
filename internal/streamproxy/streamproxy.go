@@ -48,6 +48,16 @@ type Config struct {
 	// no auth is configured. The server sets it unless
 	// STREMIO_PROXY_ALLOW_PRIVATE=1. Zero value keeps the legacy behaviour.
 	BlockPrivate bool
+	// AppPath is where extractors.json and the cached remote list live.
+	AppPath string
+	// ExtractorsFile overrides <AppPath>/extractors.json.
+	ExtractorsFile string
+	// ExtractorsURL is a remote definitions list; it is only used together
+	// with a valid ExtractorsPubKey (ed25519, hex/base64), and its detached
+	// signature is fetched from ExtractorsURL+".sig".
+	ExtractorsURL     string
+	ExtractorsPubKey  string
+	ExtractorsRefresh time.Duration // remote refresh interval (0 = 6h)
 }
 
 // ipCacheEntry holds a resolved public egress IP with an expiry timestamp.
@@ -92,6 +102,8 @@ type Handler struct {
 	// de-duplicate concurrent cache misses (see cachedFetch).
 	flightMu sync.Mutex
 	flights  map[string]*flightCall
+	// defs holds the declarative /extractor definitions.
+	defs *defRegistry
 }
 
 // Close stops background goroutines (segment-cache janitor). Idempotent.
@@ -99,6 +111,9 @@ func (h *Handler) Close() {
 	h.closeOnce.Do(func() {
 		if h.cache != nil {
 			h.cache.stop()
+		}
+		if h.defs != nil {
+			h.defs.close()
 		}
 	})
 }
@@ -142,6 +157,7 @@ func New(cfg Config) *Handler {
 		// Pre-convert password bytes once to avoid per-request allocation (F11).
 		passwordBytes: []byte(cfg.Password),
 		flights:       make(map[string]*flightCall),
+		defs:          newDefRegistry(cfg),
 	}
 }
 
