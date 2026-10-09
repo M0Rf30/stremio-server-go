@@ -92,7 +92,7 @@ func TestBuildProxyClientDialControlBlocksPrivateHTTP(t *testing.T) {
 	}))
 	defer victim.Close()
 
-	c, err := buildProxyClient(victim.URL, true) // blockPrivate=true
+	c, err := buildProxyClient(victim.URL, true, nil) // blockPrivate=true
 	if err != nil {
 		t.Fatalf("buildProxyClient: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestBuildProxyClientDialControlAllowsPrivateWhenUnguarded(t *testing.T) {
 	}))
 	defer victim.Close()
 
-	c, err := buildProxyClient(victim.URL, false) // blockPrivate=false
+	c, err := buildProxyClient(victim.URL, false, nil) // blockPrivate=false
 	if err != nil {
 		t.Fatalf("buildProxyClient: %v", err)
 	}

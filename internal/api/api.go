@@ -96,12 +96,16 @@ type server struct {
 // New returns the HTTP handler for the streaming server.
 func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProber, cfg types.Config) http.Handler {
 	localIMDBDisabled.Store(!cfg.LocalIMDB)
-	blockPrivate := cfg.ProxyPassword != "" || cfg.ProxyIPACL != "" || cfg.ProxySecret != "" || !proxyAllowPrivate()
+	// The signing secret is not part of this: it is auto-generated on every
+	// install, so counting it made STREMIO_PROXY_ALLOW_PRIVATE a no-op. Only
+	// a password or IP ACL signals that untrusted clients can reach the proxy.
+	blockPrivate := cfg.ProxyPassword != "" || cfg.ProxyIPACL != "" || !proxyAllowPrivate()
+	privateAllow := parsePrivateAllow(cfg.ProxyPrivateAllow)
 	pc := &http.Client{
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
 				Timeout: 10 * time.Second,
-				Control: netguard.DialControl(blockPrivate),
+				Control: netguard.DialControlAllow(blockPrivate, privateAllow),
 			}).DialContext,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 15 * time.Second,
@@ -124,7 +128,7 @@ func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProbe
 		cfg:         cfg,
 		logReq:      cfg.HTTPLog,
 		accessLog:   logging.For("http"),
-		sp:          streamproxy.New(buildStreamProxyConfig(cfg, pc)),
+		sp:          streamproxy.New(buildStreamProxyConfig(cfg, pc, privateAllow)),
 		proxyClient: pc,
 		blobClient:  bc,
 	}
@@ -389,6 +393,20 @@ func remoteIP(r *http.Request) net.IP {
 func proxyAllowPrivate() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("STREMIO_PROXY_ALLOW_PRIVATE")))
 	return v == "1" || v == "true" || v == "yes"
+}
+
+// parsePrivateAllow parses STREMIO_PROXY_PRIVATE_ALLOW (IPs, CIDRs and
+// hostnames that stay reachable through the proxy even when private
+// destinations are blocked). Invalid entries are logged and skipped.
+func parsePrivateAllow(spec string) *netguard.Allow {
+	a, bad := netguard.ParseAllow(spec)
+	if len(bad) > 0 {
+		logging.For("config").Warn("ignoring invalid STREMIO_PROXY_PRIVATE_ALLOW entries", "entries", strings.Join(bad, ","))
+	}
+	if a != nil {
+		logging.For("streamproxy").Info("private destinations allowlisted", "allow", a.String())
+	}
+	return a
 }
 
 // parseTrustedProxies parses STREMIO_TRUSTED_PROXIES (comma-separated CIDRs
@@ -2087,7 +2105,7 @@ var streamBufPool = sync.Pool{
 }
 
 // buildStreamProxyConfig converts types.Config proxy fields to a streamproxy.Config.
-func buildStreamProxyConfig(cfg types.Config, client *http.Client) streamproxy.Config {
+func buildStreamProxyConfig(cfg types.Config, client *http.Client, privateAllow *netguard.Allow) streamproxy.Config {
 	// Decode ProxySecret: try hex then base64url then base64std.
 	var secret []byte
 	if cfg.ProxySecret != "" {
@@ -2122,6 +2140,7 @@ func buildStreamProxyConfig(cfg types.Config, client *http.Client) streamproxy.C
 		Client:           client,
 		UpstreamProxy:    cfg.ProxyUpstream,
 		BlockPrivate:     !proxyAllowPrivate(),
+		PrivateAllow:     privateAllow,
 		TrustedProxies:   parseTrustedProxies(os.Getenv("STREMIO_TRUSTED_PROXIES")),
 		AppPath:          cfg.AppPath,
 		ExtractorsFile:   cfg.ExtractorsFile,

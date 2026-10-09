@@ -137,6 +137,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		ProxySegCacheTTL:    envInt(lookup, "STREMIO_PROXY_SEG_CACHE_TTL", 300),
 		ProxyPublicURL:      proxyPublicURL,
 		ProxyUpstream:       getenv(lookup, "STREMIO_PROXY_UPSTREAM", ""),
+		ProxyPrivateAllow:   getenv(lookup, "STREMIO_PROXY_PRIVATE_ALLOW", ""), // IPs/CIDRs/hostnames reachable even when private destinations are blocked
 		ExtractorsFile:      getenv(lookup, "STREMIO_EXTRACTORS_FILE", ""),
 		ExtractorsURL:       optionalURL(lookup, "STREMIO_EXTRACTORS_URL"), // remote extractor definitions; "" / off disables
 		ExtractorsPubKey:    getenv(lookup, "STREMIO_EXTRACTORS_PUBKEY", ""),
