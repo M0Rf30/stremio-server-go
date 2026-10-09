@@ -17,15 +17,20 @@
 //
 //	GET  /nzb/stream?key={key}
 //	GET  /nzb/stream/{key}/{file...}
-//	                         → assembled file served with Range/HEAD support
+//	                         → file served with Range/HEAD support; assembly is
+//	                         progressive (a range is answered as soon as the
+//	                         segments covering it are downloaded, no need to
+//	                         wait for the whole file)
 //
 // Sessions expire after 1 hour of inactivity; extracted temp files are removed
 // by a background janitor started lazily on first create.
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,15 +60,18 @@ const (
 
 // ---- session store ---------------------------------------------------------
 
-// nzbFileState tracks the assembly of a single file within a session.
-// A mutex serialises concurrent callers. On success the result is cached
-// permanently (done=true); on failure the lock is released so a subsequent
-// request may retry, preserving the single-flight-on-success guarantee.
+// nzbFileState tracks the background assembly of a single file within a
+// session. The assembly is shared: every request for the file reads from the
+// same temp file while one set of parallel NNTP workers fills it, so a client
+// disconnecting never stops it. The mutex only guards (re)starting; nothing
+// blocks while holding it. A failed assembly is discarded and restarted by the
+// next request.
 type nzbFileState struct {
-	mu   sync.Mutex
-	done bool // true once assembly has succeeded; path is valid forever
-	path string
-	err  error // last assembly error; meaningful only when !done
+	mu      sync.Mutex
+	asm     *nzb.Assembly // nil until the first request
+	path    string        // temp file backing asm
+	started time.Time     // stable Last-Modified while the file fills up
+	restart int           // how many times a failed assembly was restarted
 }
 
 // nzbSession holds all state for one NZB streaming session.
@@ -136,9 +144,36 @@ func nzbEvictIdle() {
 	nzbSessionsMu.Unlock()
 
 	for _, sess := range evict {
-		if sess.tmpDir != "" {
-			_ = os.RemoveAll(sess.tmpDir)
+		sess.discard()
+	}
+}
+
+// discard stops the session's background assemblies, waits (bounded) for
+// their workers to release the temp files and NNTP connections, and deletes
+// the session's temp directory.
+func (sess *nzbSession) discard() {
+	sess.mu.Lock()
+	states := make([]*nzbFileState, 0, len(sess.fileStates))
+	for _, fs := range sess.fileStates {
+		states = append(states, fs)
+	}
+	sess.mu.Unlock()
+
+	for _, fs := range states {
+		fs.mu.Lock()
+		asm := fs.asm
+		fs.mu.Unlock()
+		if asm == nil {
+			continue
 		}
+		asm.Cancel()
+		select {
+		case <-asm.Done():
+		case <-time.After(5 * time.Second):
+		}
+	}
+	if sess.tmpDir != "" {
+		_ = os.RemoveAll(sess.tmpDir)
 	}
 }
 
@@ -337,8 +372,8 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 
 	nzbSessionsMu.Lock()
 	// Evict any previous session under the same key.
-	if old, ok := nzbSessions[key]; ok && old.tmpDir != "" {
-		go func(d string) { _ = os.RemoveAll(d) }(old.tmpDir)
+	if old, ok := nzbSessions[key]; ok {
+		go old.discard()
 	}
 	nzbSessions[key] = sess
 	nzbSessionsMu.Unlock()
@@ -487,47 +522,26 @@ func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string)
 	}
 	sess.mu.Unlock()
 
-	// Exactly one goroutine at a time performs assembly (others wait on fs.mu).
-	// On success the path is cached permanently; on failure the mutex is released
-	// so a later request can retry.
-	assembledPath, assembleErr := func() (string, error) {
-		fs.mu.Lock()
-		defer fs.mu.Unlock()
+	// The first request starts the background assembly (parallel NNTP
+	// connections filling a temp file); later ones share it. A previously
+	// failed assembly is restarted from scratch.
+	asm, assembledPath, modTime, err := fs.ensure(sess, target, fileIdx)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
 
-		if fs.done {
-			return fs.path, nil
+	// The decoded size is known as soon as the first article's yEnc header has
+	// been read — long before the file is complete — so the response can start
+	// right away. r.Context() only bounds this request: if the client goes
+	// away the shared assembly carries on for the next one.
+	ctx := r.Context()
+	size, err := asm.Size(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return // client disconnected
 		}
-
-		safeName := filepath.Base(target.Name)
-		if safeName == "" || safeName == "." || safeName == "/" {
-			safeName = "media.bin"
-		}
-		// Prefix with the file index to make the temp name unique per NZB entry.
-		tmpPath := filepath.Join(sess.tmpDir, fmt.Sprintf("%d-%s", fileIdx, safeName))
-
-		f, err := os.Create(tmpPath)
-		if err != nil {
-			fs.err = err
-			return "", err
-		}
-
-		nzbSess := nzb.NewSession(sess.cfg, sess.files)
-		defer func() { _ = nzbSess.Close() }()
-		if err := nzbSess.AssembleFile(target.Name, f); err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmpPath)
-			fs.err = fmt.Errorf("nzb assemble: %w", err)
-			return "", fs.err
-		}
-		_ = f.Close()
-		fs.done = true
-		fs.path = tmpPath
-		fs.err = nil
-		return tmpPath, nil
-	}()
-
-	if assembleErr != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": assembleErr.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "nzb assemble: " + err.Error()})
 		return
 	}
 
@@ -539,19 +553,128 @@ func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string)
 	}
 	defer func() { _ = f.Close() }()
 
-	fi, err := f.Stat()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-
 	w.Header().Set("Content-Type", mimeByName(target.Name))
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("transferMode.dlna.org", "Streaming")
 	w.Header().Set("contentFeatures.dlna.org",
 		"DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
 
-	http.ServeContent(w, r, target.Name, fi.ModTime(), f)
+	if asm.Complete() {
+		// Fully assembled: serve the plain file (keeps the sendfile fast path).
+		http.ServeContent(w, r, target.Name, modTime, f)
+		return
+	}
+	// Still downloading: each Read waits only for the segments it needs.
+	http.ServeContent(w, r, target.Name, modTime, &nzbProgressiveFile{ctx: ctx, asm: asm, f: f, size: size})
+}
+
+// ensure returns the file's assembly, starting it when there is none or the
+// previous one failed. The temp file is created before the assembly starts and
+// closed once its workers have exited.
+func (fs *nzbFileState) ensure(sess *nzbSession, target *nzb.File, fileIdx int) (*nzb.Assembly, string, time.Time, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.asm != nil && fs.asm.Err() == nil {
+		return fs.asm, fs.path, fs.started, nil
+	}
+	prefix := strconv.Itoa(fileIdx)
+	if fs.asm != nil {
+		// Failed (or cancelled): drop the broken partial file. Readers still
+		// attached to it keep their own open descriptor; the retry writes a
+		// new, differently named file so stale workers can never touch it.
+		fs.asm.Cancel()
+		_ = os.Remove(fs.path)
+		fs.restart++
+		prefix += "r" + strconv.Itoa(fs.restart)
+	}
+
+	safeName := filepath.Base(target.Name)
+	if safeName == "" || safeName == "." || safeName == "/" {
+		safeName = "media.bin"
+	}
+	// Prefix with the file index to make the temp name unique per NZB entry.
+	tmpPath := filepath.Join(sess.tmpDir, prefix+"-"+safeName)
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	// context.Background(), not the request's: the assembly outlives any one
+	// client. It is stopped by nzbSession.discard (eviction / replacement).
+	asm, err := nzb.NewSession(sess.cfg, sess.files).StartAssembly(context.Background(), target.Name, f)
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return nil, "", time.Time{}, fmt.Errorf("nzb assemble: %w", err)
+	}
+	go func() {
+		<-asm.Done()
+		_ = f.Close()
+	}()
+
+	fs.asm, fs.path, fs.started = asm, tmpPath, time.Now()
+	return fs.asm, fs.path, fs.started, nil
+}
+
+// nzbProgressiveFile is the io.ReadSeeker http.ServeContent reads while the
+// file is still being assembled. Seek is pure arithmetic on the already-known
+// size; Read blocks only until the segment holding its next byte is on disk
+// (or the request's context ends) and then returns what is present.
+type nzbProgressiveFile struct {
+	ctx  context.Context
+	asm  *nzb.Assembly
+	f    *os.File
+	size int64
+	pos  int64
+}
+
+func (p *nzbProgressiveFile) Read(b []byte) (int, error) {
+	if p.pos >= p.size {
+		return 0, io.EOF
+	}
+	n := p.size - p.pos
+	if int64(len(b)) < n {
+		n = int64(len(b))
+	}
+	if n <= 0 {
+		return 0, nil
+	}
+	// Wait for the first byte only, then read whatever contiguous run is on
+	// disk (up to len(b)): the client gets data as it lands instead of the
+	// handler stalling until a whole copy buffer's worth has been downloaded.
+	avail, err := p.asm.WaitAvailable(p.ctx, p.pos, n)
+	if err != nil {
+		return 0, err
+	}
+	m, err := p.f.ReadAt(b[:avail], p.pos)
+	p.pos += int64(m)
+	switch {
+	case int64(m) == avail:
+		err = nil // ReadAt may report io.EOF together with a full read
+	case errors.Is(err, io.EOF):
+		err = io.ErrUnexpectedEOF // the assembly said these bytes were written
+	}
+	return m, err
+}
+
+func (p *nzbProgressiveFile) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = p.pos + offset
+	case io.SeekEnd:
+		abs = p.size + offset
+	default:
+		return 0, errors.New("nzb: invalid seek whence")
+	}
+	if abs < 0 {
+		return 0, errors.New("nzb: negative seek position")
+	}
+	p.pos = abs
+	return abs, nil
 }
 
 // nzbResolveFile selects which file to serve from the NZB.
