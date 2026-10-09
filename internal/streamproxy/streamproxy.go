@@ -104,6 +104,8 @@ type Handler struct {
 	flights  map[string]*flightCall
 	// defs holds the declarative /extractor definitions.
 	defs *defRegistry
+	// embeds caches embed-page resolutions for /proxy/stream.
+	embeds embedCache
 }
 
 // Close stops background goroutines (segment-cache janitor). Idempotent.
@@ -829,6 +831,11 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	// than silently falling back to the base client, which would mask the
 	// probe while still fetching opts.Dest.
 	if h.rejectBlockedProxyHost(w, opts.Proxy) {
+		return
+	}
+
+	// An embed page matching a definition is resolved to its media first.
+	if h.resolveEmbed(w, r, opts) {
 		return
 	}
 

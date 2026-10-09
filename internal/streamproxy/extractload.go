@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,32 @@ func (reg *defRegistry) lookup(name string) (*Extractor, bool) {
 		}
 	}
 	return nil, false
+}
+
+// match returns the first definition (local before remote, by name) whose
+// match pattern accepts dest.
+func (reg *defRegistry) match(dest string) (string, *Extractor, bool) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.reloadLocalLocked()
+	for _, ds := range []*DefSet{reg.local, reg.remote} {
+		if ds == nil {
+			continue
+		}
+		names := make([]string, 0, len(ds.Extractors))
+		for n, ex := range ds.Extractors {
+			if ex.match != nil {
+				names = append(names, n)
+			}
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			if ds.Extractors[n].match.MatchString(dest) {
+				return n, ds.Extractors[n], true
+			}
+		}
+	}
+	return "", nil, false
 }
 
 func (reg *defRegistry) reloadLocalLocked() {
