@@ -48,6 +48,9 @@ type Config struct {
 	// no auth is configured. The server sets it unless
 	// STREMIO_PROXY_ALLOW_PRIVATE=1. Zero value keeps the legacy behaviour.
 	BlockPrivate bool
+	// PrivateAllow lists private destinations that stay reachable even when
+	// private addresses are blocked (STREMIO_PROXY_PRIVATE_ALLOW). nil = none.
+	PrivateAllow *netguard.Allow
 	// AppPath is where extractors.json and the cached remote list live.
 	AppPath string
 	// ExtractorsFile overrides <AppPath>/extractors.json.
@@ -973,8 +976,9 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 // ValidateDest is an SSRF guard for proxy destination URLs.
 // It rejects non-http(s) schemes, resolves the hostname, and blocks:
 //   - 169.254.169.254 (cloud-metadata endpoint) — always.
-//   - Loopback, RFC 1918, link-local, and ULA addresses — only when the proxy
-//     has a password or IP-ACL configured (i.e., it is exposed to untrusted clients).
+//   - Loopback, RFC 1918, link-local, and ULA addresses — when the proxy has
+//     a password or IP ACL, or STREMIO_PROXY_ALLOW_PRIVATE is unset, unless
+//     the address is on cfg.PrivateAllow (STREMIO_PROXY_PRIVATE_ALLOW).
 //
 // Returns nil when the destination is permitted.
 func (h *Handler) ValidateDest(rawurl string) error {
@@ -1004,17 +1008,17 @@ func (h *Handler) ValidateDest(rawurl string) error {
 		}
 	}
 
-	// The proxy blocks private ranges when any auth mechanism is active or
-	// when cfg.BlockPrivate is set (the server default; see
-	// STREMIO_PROXY_ALLOW_PRIVATE).
+	// Private ranges are blocked when the proxy is exposed (password / IP ACL)
+	// or STREMIO_PROXY_ALLOW_PRIVATE is unset, except for addresses on the
+	// STREMIO_PROXY_PRIVATE_ALLOW allowlist.
 	protected := h.proxyBlockPrivate()
 
 	for _, ip := range ips {
 		if netguard.IsCloudMetadata(ip) {
 			return fmt.Errorf("destination resolves to disallowed cloud-metadata address %s", ip)
 		}
-		if protected && netguard.IsPrivate(ip) {
-			return fmt.Errorf("destination resolves to private address %s (proxy is protected)", ip)
+		if protected && netguard.IsPrivate(ip) && !h.cfg.PrivateAllow.Contains(ip) {
+			return fmt.Errorf("destination resolves to private address %s (proxy is protected; see STREMIO_PROXY_PRIVATE_ALLOW)", ip)
 		}
 	}
 	return nil
@@ -1038,12 +1042,18 @@ func (h *Handler) Authorize(r *http.Request) error {
 // ---------------------------------------------------------------------------
 
 // proxyBlockPrivate reports whether this handler must block private/loopback
-// and cloud-metadata destinations for outbound requests made on a client's
-// behalf — i.e. whether it is exposed to untrusted clients. Mirrors the
-// "protected" signal in ValidateDest exactly, so a proxy URL and a
-// destination URL are held to the same trust boundary.
+// destinations for outbound requests made on a client's behalf: either the
+// operator left STREMIO_PROXY_ALLOW_PRIVATE unset (cfg.BlockPrivate) or the
+// proxy is exposed to untrusted clients (a password or IP ACL is set).
+//
+// The signing secret deliberately does not count: it is auto-generated on
+// every install, so counting it made STREMIO_PROXY_ALLOW_PRIVATE a no-op.
+// Signed URLs are a capability mechanism, not a sign of exposure. Mirrors
+// the "protected" signal in ValidateDest exactly, so a proxy URL and a
+// destination URL are held to the same trust boundary. Addresses on
+// cfg.PrivateAllow stay reachable either way.
 func (h *Handler) proxyBlockPrivate() bool {
-	return h.cfg.BlockPrivate || h.Protected()
+	return h.cfg.BlockPrivate || h.cfg.Password != "" || len(h.cfg.IPACL) > 0
 }
 
 // validateProxyHost is an SSRF guard for the client-supplied "proxy" query
@@ -1082,7 +1092,7 @@ func (h *Handler) validateProxyHost(rawurl string) error {
 
 	blockPrivate := h.proxyBlockPrivate()
 	for _, ip := range ips {
-		if verr := netguard.ValidateIP(ip, blockPrivate); verr != nil {
+		if verr := netguard.ValidateIPAllow(ip, blockPrivate, h.cfg.PrivateAllow); verr != nil {
 			return fmt.Errorf("proxy host %q: %w", host, verr)
 		}
 	}
@@ -1134,7 +1144,7 @@ func (h *Handler) clientFor(proxyURL string) *http.Client {
 		e.client.CloseIdleConnections()
 		delete(h.proxyClients, key)
 	}
-	c, err := buildProxyClient(proxyURL, blockPrivate)
+	c, err := buildProxyClient(proxyURL, blockPrivate, h.cfg.PrivateAllow)
 	if err != nil {
 		logging.For("streamproxy").Warn("cannot build proxy client; using default", "proxy_url", proxyURL, "err", err)
 		return base
@@ -1206,7 +1216,7 @@ func proxyClientKey(proxyURL string, blockPrivate bool) string {
 // the caller reaches through the proxy) is guarded with netguard.DialControl,
 // closing the DNS-rebinding TOCTOU gap between validateProxyHost's pre-flight
 // check and the actual dial.
-func buildProxyClient(proxyURL string, blockPrivate bool) (*http.Client, error) {
+func buildProxyClient(proxyURL string, blockPrivate bool, allow *netguard.Allow) (*http.Client, error) {
 	u, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse proxy URL: %w", err)
@@ -1214,7 +1224,7 @@ func buildProxyClient(proxyURL string, blockPrivate bool) (*http.Client, error) 
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
-		Control:   netguard.DialControl(blockPrivate),
+		Control:   netguard.DialControlAllow(blockPrivate, allow),
 	}
 	tr := &http.Transport{
 		TLSHandshakeTimeout:   10 * time.Second,

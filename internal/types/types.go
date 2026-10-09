@@ -54,6 +54,10 @@ type Config struct {
 	ProxySegCacheTTL int    // segment cache TTL in seconds (0 = caching off)
 	ProxyPublicURL   string // explicit external base URL for proxy; "" = derive
 	ProxyUpstream    string // global upstream proxy for stream-proxy fetches; "" = direct (STREMIO_PROXY_UPSTREAM; socks5/http)
+	// ProxyPrivateAllow is a comma-separated list of IPs, CIDRs and hostnames the
+	// stream proxy may reach even when private destinations are blocked
+	// (STREMIO_PROXY_PRIVATE_ALLOW); cloud-metadata is never allowed.
+	ProxyPrivateAllow string
 
 	// Declarative /extractor definitions.
 	ExtractorsFile   string // local definitions file; "" = <AppPath>/extractors.json (STREMIO_EXTRACTORS_FILE)

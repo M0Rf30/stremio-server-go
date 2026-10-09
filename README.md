@@ -95,7 +95,8 @@ Then point any Stremio client's **streaming server URL** at
 |---|---|---|
 | `BIND_ADDRESS` | _(unset)_ | interface the HTTP/HTTPS listeners bind to. Unset (the default) binds **every** interface — on an IPv6-enabled host that includes globally routable addresses, and this API is **unauthenticated**. Set `127.0.0.1` (or `::1`) to restrict it to loopback, which is all the official Stremio desktop/web client needs. When set to a specific non-loopback, non-wildcard address (e.g. a LAN IP), a second listener is also started on `127.0.0.1:HTTP_PORT` sharing the same handler, so `ffmpeg`/`ffprobe` self-requests (HLS transcode, `/yt`, `/proxy`) keep working; if that fallback bind itself fails, the server logs a warning and falls back to reaching itself via the configured `BIND_ADDRESS` instead. |
 | `STREMIO_ALLOWED_ORIGINS` | _(unset)_ | comma-separated extra allowed browser `Origin` values, checked on state-changing routes and `/proxy`. Each entry is `scheme://host[:port]` (exact match), `host[:port]` (matches either `http://` or `https://`), or `*.domain` (any scheme, subdomains only — the bare domain itself does not match). `*` alone restores the legacy behavior (no Origin check, `Access-Control-Allow-Origin: *` on every response, no `Vary`). Unset: requests with **no** `Origin` header (native players, curl) are always allowed with `Access-Control-Allow-Origin: *`; browser requests are allowed from the official Stremio web origins (`https://web.stremio.com`, `https://web.strem.io`, `https://app.strem.io`, `https://staging.strem.io`, `https://*.stremio.rocks`), `localhost`/`127.0.0.1`/`[::1]` and this server's own interface IPs on the server's own `HTTP_PORT`/`HTTPS_PORT` (other ports must be listed here), plus anything listed here. A disallowed `Origin` (including the literal `null`) gets `403 {"error":"origin not allowed"}` before the request is routed — GET and the CORS `OPTIONS` preflight alike. An allowed non-empty `Origin` gets `Access-Control-Allow-Origin: <that origin>` + `Vary: Origin` instead of `*`; its preflight also gets `Access-Control-Allow-Private-Network: true` when the request sent `Access-Control-Request-Private-Network: true`. |
-| `STREMIO_PROXY_ALLOW_PRIVATE` | _(unset)_ | set `1` to let `/proxy` (and the proxy client) reach loopback/private/link-local destinations on an unprotected server. Default: blocked (cloud-metadata is always blocked). Servers with a proxy password/secret/IP ACL always block them. |
+| `STREMIO_PROXY_ALLOW_PRIVATE` | _(unset)_ | set `1` to let `/proxy` (and the proxy client) reach loopback/private/link-local destinations when no proxy password or IP ACL is set. Default: blocked (cloud-metadata is always blocked). A password or `STREMIO_PROXY_IP_ACL` always re-enables blocking; the signing secret (`STREMIO_PROXY_SECRET`, auto-generated) does not. |
+| `STREMIO_PROXY_PRIVATE_ALLOW` | _(unset)_ | comma-separated IPs, CIDRs and hostnames (e.g. `192.168.1.10,10.0.0.0/24,nas.lan`) that `/proxy`, `/extractor` and the proxy client may reach even while private destinations are blocked — including on a password-protected, exposed server. Checked on the IP actually dialed (DNS-rebinding-safe); hostnames are re-resolved every 5 minutes. Cloud-metadata can never be allowlisted. |
 | `STREMIO_TRUSTED_PROXIES` | _(unset)_ | comma-separated CIDRs/IPs of reverse proxies whose `X-Forwarded-*` headers are honoured, in addition to loopback. LAN peers are no longer trusted implicitly. |
 | `STREMIO_ALLOWED_HOSTS` | _(unset)_ | comma-separated extra `Host` header names accepted on non-media routes (DNS-rebinding guard). Always accepted: `localhost`, IP literals, `*.local`, the host of `STREMIO_PUBLIC_URL`/proxy/local-files public URLs and `STREMIO_ALLOWED_ORIGINS` hosts. Others get `403` (media/stream routes are exempt). |
 | `HTTP_PORT` | `11470` | enginefs HTTP API port |
@@ -547,6 +548,12 @@ The same dial-time guard, including redirects, covers archive/NZB downloads
 (`STREMIO_ARCHIVE_ALLOW_PRIVATE`) and FTP (`STREMIO_FTP_ALLOW_PRIVATE`). The
 relay recognises HLS playlists by content as well as by type, and refuses
 DASH manifests (`415`), whose nested URLs it does not rewrite.
+
+For `/proxy` and `/extractor`, private destinations are blocked unless
+`STREMIO_PROXY_ALLOW_PRIVATE=1` and no proxy password or IP ACL is set. To let
+an exposed, password-protected server reach a specific LAN host (a NAS, a local
+embed page), list it in `STREMIO_PROXY_PRIVATE_ALLOW` instead of opening all
+private ranges.
 
 ## License
 
