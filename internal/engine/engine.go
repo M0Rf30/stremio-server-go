@@ -34,7 +34,6 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/mse"
-	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/net/proxy"
 	"golang.org/x/time/rate"
 
@@ -359,10 +358,14 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		memStore = ms
 		logging.For("engine").Info("in-RAM piece cache enabled; piece data not written to disk", "bytes", cfg.MemoryCacheSize)
 	} else {
-		fs := storage.NewFileByInfoHash(cfg.CacheRoot)
+		fs := newFileStorage(cfg.CacheRoot, cfg.StorageMmap)
 		cc.DefaultStorage = fs
 		storageCloser = fs
-		logging.For("engine").Info("disk piece cache", "path", cfg.CacheRoot)
+		fileIO := "classic"
+		if cfg.StorageMmap {
+			fileIO = "mmap"
+		}
+		logging.For("engine").Info("disk piece cache", "path", cfg.CacheRoot, "file_io", fileIO)
 	}
 
 	// Bandwidth rate limiters — start unlimited; SetLimitFn() adjusts them live.

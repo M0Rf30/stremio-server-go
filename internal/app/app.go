@@ -79,7 +79,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	defer cancel()
 	logging.Setup(logw)
 	if earlyenv.Applied {
-		logging.For("engine").Info("torrent storage uses classic file I/O (set TORRENT_STORAGE_DEFAULT_FILE_IO=mmap to memory-map instead)")
+		logging.For("engine").Info("32-bit build: using classic file I/O for torrent storage (mmap cannot map files of 4 GiB or more)")
 	}
 
 	lookup := cfg.Lookup
@@ -124,7 +124,8 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		HTTPSPort:           envInt(lookup, "HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
 		AppPath:             appPath,
 		CacheRoot:           appPath,
-		MemoryCacheSize:     envInt64(lookup, "STREMIO_MEMORY_CACHE_SIZE", 0), // bytes; 0 = disabled (write pieces to disk)
+		MemoryCacheSize:     envInt64(lookup, "STREMIO_MEMORY_CACHE_SIZE", 0),                                                    // bytes; 0 = disabled (write pieces to disk)
+		StorageMmap:         strings.EqualFold(strings.TrimSpace(getenv(lookup, "TORRENT_STORAGE_DEFAULT_FILE_IO", "")), "mmap"), // default classic pread/pwrite; "mmap" opts in
 		ListenPort:          envInt(lookup, "BT_LISTEN_PORT", 0),
 		WebUI:               getenv(lookup, "WEB_UI_LOCATION", "https://web.stremio.com/"),
 		PublicURL:           publicURL,
