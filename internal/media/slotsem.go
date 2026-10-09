@@ -69,6 +69,10 @@ func (s *slotSem) acquire(ctx context.Context, limitFn func() int) error {
 		case <-w.ready:
 			return nil
 		case <-ctx.Done():
+			// Re-read the live limit (outside the lock): it may have been
+			// lowered since this waiter queued, and the hand-back below must
+			// not over-grant against a stale value.
+			limit = limitFn()
 			s.mu.Lock()
 			if w.granted {
 				// Lost the race: a release already handed us a slot. Give
