@@ -432,7 +432,8 @@ once per process. `scripts/libstremio_smoke.py` exercises it through ctypes.
 ## Extractors
 
 `/extractor/video` resolves a page into a stream using definitions that live
-outside the binary. The server ships with none; unknown `host=` values return
+outside the binary, and `/proxy/stream` can use them to resolve embed pages
+(see `match` below). The server ships with none; unknown `host=` values return
 `400`.
 
 **Sources** (local entries override remote ones with the same name):
@@ -489,6 +490,23 @@ Templates use `{var}` or `{var?text}` (`text` if `var` is non-empty). Built-in
 variables: `input`, `origin`, `host`, `path`, `query` (of the input URL), `url`
 and `page_origin` (current page), `body`. `result.endpoint` is `stream`, `hls`
 or `mpd`; empty query/header values are dropped.
+
+**Embed pages on `/proxy/stream`:** a definition may also set `match`, an RE2
+regex on `/proxy/stream` destination URLs. A matching destination is treated
+as an embed page (not media) and resolved with that definition first, as
+EasyProxy does: a `stream` result is served directly (with the definition's
+headers; caller `h_` headers take precedence), while `hls`/`mpd` results are
+redirected (302) to their proxy endpoint. Resolutions are cached for 10 minutes
+so a player's Range requests don't refetch the page; a page that can't be
+resolved returns `502` instead of its HTML.
+
+```json
+"embedhost": {
+  "match": "^https://embed\\.example/e/",
+  "steps": [{"fetch": "{input}"}, {"regex": "src:\\s*\"([^\"]+)\"", "set": "src"}],
+  "result": {"url": "{src}", "headers": {"Referer": "{input}"}, "endpoint": "stream"}
+}
+```
 
 Limits: 32 steps, 8 fetches and 20 s per request, 4 MB per page, 1 MB per
 definitions file. Every fetch and the resolved URL go through the same

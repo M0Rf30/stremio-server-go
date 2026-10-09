@@ -39,8 +39,14 @@ type DefSet struct {
 
 // Extractor is a single host definition.
 type Extractor struct {
+	// Match, when set, is an RE2 regex on /proxy/stream destination URLs:
+	// a matching destination (an embed page rather than a media file) is
+	// resolved with this definition before streaming, as EasyProxy does.
+	Match  string  `json:"match,omitempty"`
 	Steps  []*Step `json:"steps"`
 	Result Result  `json:"result"`
+
+	match *regexp.Regexp
 }
 
 // Step is one extraction action. Exactly one of Fetch, Regex, JSON-on-var or
@@ -142,6 +148,9 @@ func (ex *Extractor) compile() error {
 		return fmt.Errorf("result.url is required")
 	}
 	var err error
+	if ex.match, err = compileOpt(ex.Match); err != nil {
+		return fmt.Errorf("match: %w", err)
+	}
 	for i, s := range ex.Steps {
 		if s == nil {
 			return fmt.Errorf("step %d: empty", i)
