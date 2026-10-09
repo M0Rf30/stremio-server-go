@@ -5,6 +5,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,6 +69,21 @@ func BenchmarkCompileMustInclude(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = compileMustInclude(vals)
+	}
+}
+
+// BenchmarkCompileMustIncludeMiss measures the cache-miss path (compile plus
+// the compiled-size gate) on distinct typical patterns.
+func BenchmarkCompileMustIncludeMiss(b *testing.B) {
+	vals := make([][]string, 1024)
+	for i := range vals {
+		vals[i] = []string{fmt.Sprintf(`/S%02dE0[1-3].*\.(mkv|mp4)$/i`, i)}
+	}
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		_ = compileMustInclude(vals[i%len(vals)])
+		i++
 	}
 }
 
