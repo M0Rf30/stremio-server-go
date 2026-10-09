@@ -92,9 +92,9 @@ func hlsServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 //     #EXT-X-PRELOAD-HINT URI="..." attributes are always routed to
 //     /proxy/stream; all other attributes (METHOD, IV, BYTERANGE, …) are kept.
 //   - #EXT-X-RENDITION-REPORT URI="..." is routed to /proxy/hls/manifest.m3u8.
-//   - #EXT-X-MEDIA and #EXT-X-I-FRAME-STREAM-INF URI="..." attributes are
-//     routed to /proxy/hls/manifest.m3u8 when the URL contains ".m3u8",
-//     otherwise to /proxy/stream.
+//   - #EXT-X-MEDIA and #EXT-X-I-FRAME-STREAM-INF URI="..." attributes always
+//     name a media playlist (RFC 8216 §4.3.4.1, §4.3.4.3) and are routed to
+//     /proxy/hls/manifest.m3u8, even when the URL has no ".m3u8" suffix.
 //   - URIs with a non-http(s) scheme (data:, skd:, ...) are left untouched.
 func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) string {
 	lines := strings.Split(playlist, "\n")
@@ -161,8 +161,8 @@ func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) str
 			out = append(out, hlsRewriteURIAttr(line, baseURL, ext, opts, h, "/proxy/hls/manifest.m3u8"))
 
 		case "#EXT-X-MEDIA", "#EXT-X-I-FRAME-STREAM-INF":
-			// Alternate rendition or I-frame playlist: endpoint depends on URL.
-			out = append(out, hlsRewriteURIAttr(line, baseURL, ext, opts, h, ""))
+			// Alternate rendition or I-frame playlist: always a media playlist.
+			out = append(out, hlsRewriteURIAttr(line, baseURL, ext, opts, h, "/proxy/hls/manifest.m3u8"))
 
 		default:
 			// All other tags and comments: preserve verbatim, do not reset nextIsVariant
