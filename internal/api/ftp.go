@@ -186,7 +186,7 @@ func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string)
 			}
 			bufp := streamBufPool.Get().(*[]byte)
 			defer streamBufPool.Put(bufp)
-			_, _ = io.CopyBuffer(w, io.LimitReader(rc, copyLen), *bufp)
+			copyStream(w, io.LimitReader(rc, copyLen), *bufp)
 			return
 		}
 	}
@@ -201,7 +201,7 @@ func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string)
 	}
 	bufp := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(bufp)
-	_, _ = io.CopyBuffer(w, rc, *bufp)
+	copyStream(w, rc, *bufp)
 }
 
 // ftpExtractRangeStart parses the start byte offset from a Range header for
