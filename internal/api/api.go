@@ -2106,10 +2106,11 @@ type writerOnly struct{ io.Writer }
 // a client that has stopped reading (socket send buffer full). The deadline is
 // re-armed before every write, so a healthy stream of any total duration is
 // never cut — only a client that makes no progress for this long is dropped,
-// releasing its goroutine, torrent reader and pooled buffer. It is generous
-// because players legitimately stop reading for a long while when paused;
-// they simply re-request with a Range header on resume. 0 disables.
-var streamWriteIdleTimeout = 5 * time.Minute
+// releasing its goroutine, torrent reader and pooled buffer. A paused player
+// also stops reading, and not every player reconnects cleanly on resume, so
+// the bound is long enough for ordinary pauses (an hour) while still
+// reclaiming connections whose client is gone or wedged. 0 disables.
+var streamWriteIdleTimeout = time.Hour
 
 // deadlineWriter re-arms the connection's write deadline before each Write.
 // rc is held by value so the wrapper costs a single allocation per stream.

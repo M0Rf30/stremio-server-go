@@ -185,6 +185,7 @@ func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 		"STREMIO_HLS_SUBTITLE_TIMEOUT":     "45s",
 		"STREMIO_HLS_PROBE_TIMEOUT":        "15s",
 		"STREMIO_HLS_SEEK_PREROLL":         "3",
+		"STREMIO_HLS_SEGMENT_CACHE_BYTES":  "536870912",
 	}
 	got := hlsConfig(MapLookup(env))
 	want := media.HLSConfig{
@@ -215,6 +216,7 @@ func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 		SubtitleTimeout:    45 * time.Second,
 		ProbeTimeout:       15 * time.Second,
 		SeekPreroll:        3 * time.Second,
+		SegmentCacheBytes:  512 << 20,
 	}
 	if got != want {
 		t.Errorf("hlsConfig(full env) = %+v,\nwant %+v", got, want)

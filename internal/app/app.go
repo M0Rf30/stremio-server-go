@@ -718,6 +718,10 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		ProbeTimeout:    envDuration(lookup, "STREMIO_HLS_PROBE_TIMEOUT", d.ProbeTimeout),
 
 		SeekPreroll: seekPreroll(lookup, d.SeekPreroll),
+
+		// Per-session transcoded-segment disk cap: 0 = derived from bitrate,
+		// negative = unlimited (STREMIO_HLS_SEGMENT_CACHE_BYTES).
+		SegmentCacheBytes: envInt64(lookup, "STREMIO_HLS_SEGMENT_CACHE_BYTES", d.SegmentCacheBytes),
 	}
 }
 

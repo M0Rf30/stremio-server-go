@@ -83,8 +83,8 @@ type HLSConfig struct {
 	// SegmentCacheBytes caps the transcoded-segment bytes kept on disk per
 	// session; the least recently used segments are deleted beyond it. 0 (the
 	// default) derives the cap from the session's max bitrate (~20 minutes of
-	// media, see segmentCacheBytes); a negative value disables the cap. Not yet
-	// wired to an environment variable (that lives in internal/app).
+	// media, see segmentCacheBytes); a negative value disables the cap
+	// (STREMIO_HLS_SEGMENT_CACHE_BYTES).
 	SegmentCacheBytes int64
 
 	// --- timeouts ---
