@@ -83,6 +83,20 @@ const prefetchTimeout = 30 * time.Second
 // run simultaneously across all requests handled by a single Handler.
 const maxConcurrentPrefetch = 8
 
+// segmentWriteChunk is the size of each response write of a buffered
+// (decrypted) segment. The write deadline is re-armed per chunk, so it bounds
+// the time a client may take to accept one chunk rather than the whole
+// segment: a healthy transfer of any duration is never cut.
+const segmentWriteChunk = 256 << 10
+
+// segmentWriteIdleTimeout is how long the proxy waits for a client to accept
+// one segmentWriteChunk before dropping it. The server has no WriteTimeout, so
+// without this a client that stops reading would hold a fully buffered
+// segment, and its reservation in the in-flight budget, indefinitely. The
+// limit also sets the slowest sustained rate that is still served
+// (segmentWriteChunk / segmentWriteIdleTimeout, about 8.7 KiB/s).
+const segmentWriteIdleTimeout = 30 * time.Second
+
 // Handler is the stream proxy request handler.
 type Handler struct {
 	cfg          Config
@@ -99,6 +113,8 @@ type Handler struct {
 	// upstream body is being read (cache fills, prefetches, DRM decrypts);
 	// the segment cache's own budget only counts entries already stored.
 	inflight *byteBudget
+	// writeIdle overrides segmentWriteIdleTimeout when non-zero (tests).
+	writeIdle time.Duration
 	// signingGCM is the pre-built AES-GCM cipher for token sign/verify (F7).
 	// nil when Secret is empty. cipher.AEAD is goroutine-safe.
 	signingGCM cipher.AEAD
@@ -202,6 +218,41 @@ var mpdHandler func(h *Handler, w http.ResponseWriter, r *http.Request)
 // segmentDecryptor may decrypt segment in place: the caller hands over
 // ownership and must not use segment afterwards (only the returned slice).
 var segmentDecryptor func(h *Handler, p DecryptParams, segment []byte) ([]byte, error)
+
+// writeIdleTimeout returns the effective per-chunk write idle timeout.
+func (h *Handler) writeIdleTimeout() time.Duration {
+	if h.writeIdle > 0 {
+		return h.writeIdle
+	}
+	return segmentWriteIdleTimeout
+}
+
+// writeSegment writes p to w in segmentWriteChunk pieces, re-arming the
+// connection's write deadline to idle before each one (via
+// http.ResponseController, which also reaches through wrappers that implement
+// Unwrap). A client that makes no progress for idle therefore fails the
+// pending Write with a timeout and the caller returns, releasing whatever it
+// reserved for p. The last deadline is deliberately left armed: it also bounds
+// the flush of the buffered tail when the handler returns, and net/http clears
+// it itself once the response is finished. Writers without deadline support
+// (e.g. httptest recorders, which never block) are written without one.
+func writeSegment(w http.ResponseWriter, p []byte, idle time.Duration) error {
+	rc := http.NewResponseController(w)
+	armed := idle > 0
+	for len(p) > 0 {
+		n := min(len(p), segmentWriteChunk)
+		if armed {
+			if err := rc.SetWriteDeadline(time.Now().Add(idle)); err != nil {
+				armed = false
+			}
+		}
+		if _, err := w.Write(p[:n]); err != nil {
+			return err
+		}
+		p = p[n:]
+	}
+	return nil
+}
 
 // Route dispatches /proxy/* sub-paths. seg[0] is "proxy". Returns true if handled.
 func (h *Handler) Route(w http.ResponseWriter, r *http.Request, seg []string) bool {
@@ -974,7 +1025,12 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Length", strconv.Itoa(len(decrypted)))
 			w.WriteHeader(http.StatusOK)
 			if r.Method != http.MethodHead {
-				_, _ = w.Write(decrypted)
+				// The reservation stays held until the plaintext has been
+				// written (the buffer is live until then), so the write is
+				// bounded: a client that stops reading is dropped after
+				// writeIdleTimeout instead of pinning up to maxSegmentBytes of
+				// the in-flight budget for as long as it keeps the connection.
+				_ = writeSegment(w, decrypted, h.writeIdleTimeout())
 			}
 			return
 		}
@@ -1017,13 +1073,20 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	// in-flight budget has room; otherwise stream straight through unbuffered.
 	if useCache && cacheableResponse(resp) && resp.ContentLength <= h.cache.maxBytes {
 		if n := resp.ContentLength; h.inflight.tryAcquire(n) {
-			defer h.inflight.release(n)
+			held := n
+			defer func() { h.inflight.release(held) }()
 			data, readErr := readSegment(resp.Body, n)
 			if readErr != nil {
 				http.Error(w, "upstream read error", http.StatusBadGateway)
 				return
 			}
 			h.cache.putFull(cacheKey(opts.Dest, upHdr), data, resp.Header.Clone(), resp.StatusCode)
+			// The segment cache now owns data and counts it in its own byte
+			// budget, so the in-flight reservation is returned before the
+			// response write: a slow client must not hold the same bytes in
+			// both budgets (and starve other fills) while it drains them.
+			h.inflight.release(held)
+			held = 0
 			copyAllowedHeaders(w, resp.Header)
 			applyRespHeaders(w, opts.RespHeaders)
 			setProxySecurityHeaders(w)
