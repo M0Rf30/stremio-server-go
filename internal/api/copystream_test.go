@@ -56,20 +56,25 @@ func TestCopyStreamUsesPooledBuffer(t *testing.T) {
 	}
 }
 
-// deadlineRW is an http.ResponseWriter that records SetWriteDeadline calls.
+// deadlineRW is an http.ResponseWriter that records SetWriteDeadline calls and
+// the deadline that was in force at each Write.
 type deadlineRW struct {
 	discardRW
-	deadlines []time.Time
+	deadlines []time.Time // every SetWriteDeadline argument, in order
+	cur       time.Time   // deadline currently pending (zero: none)
+	armed     []time.Time // pending deadline observed at each Write
 	writes    int
 }
 
 func (d *deadlineRW) Write(p []byte) (int, error) {
 	d.writes++
+	d.armed = append(d.armed, d.cur)
 	return len(p), nil
 }
 
 func (d *deadlineRW) SetWriteDeadline(t time.Time) error {
 	d.deadlines = append(d.deadlines, t)
+	d.cur = t
 	return nil
 }
 
@@ -85,17 +90,61 @@ func TestCopyStreamRearmsWriteDeadlinePerWrite(t *testing.T) {
 	if rw.writes != 4 {
 		t.Fatalf("writes = %d, want 4", rw.writes)
 	}
-	// one deadline per write + the final clear
-	if len(rw.deadlines) != rw.writes+1 {
-		t.Fatalf("deadline calls = %d, want %d", len(rw.deadlines), rw.writes+1)
+	// Each write is bracketed: armed right before it, cleared right after.
+	if len(rw.deadlines) != 2*rw.writes {
+		t.Fatalf("deadline calls = %d, want %d (arm+clear per write)", len(rw.deadlines), 2*rw.writes)
 	}
-	for i, d := range rw.deadlines[:rw.writes] {
-		if d.IsZero() || time.Until(d) <= 0 || time.Until(d) > time.Minute {
-			t.Errorf("deadline[%d] = %v, want within the next minute", i, d)
+	for i := range rw.writes {
+		if d := rw.deadlines[2*i]; d.IsZero() || time.Until(d) <= 0 || time.Until(d) > time.Minute {
+			t.Errorf("arm[%d] = %v, want within the next minute", i, d)
+		}
+		if !rw.deadlines[2*i+1].IsZero() {
+			t.Errorf("clear[%d] = %v, want zero", i, rw.deadlines[2*i+1])
+		}
+		if rw.armed[i].IsZero() {
+			t.Errorf("write %d ran with no deadline pending", i)
 		}
 	}
-	if last := rw.deadlines[len(rw.deadlines)-1]; !last.IsZero() {
-		t.Errorf("final deadline = %v, want cleared", last)
+	if !rw.cur.IsZero() {
+		t.Errorf("deadline left pending after copyStream: %v", rw.cur)
+	}
+}
+
+// pendingProbeReader wraps a reader and records whether a write deadline is
+// pending on rw at the moment the source is read.
+type pendingProbeReader struct {
+	r       io.Reader
+	rw      *deadlineRW
+	reads   int
+	pending int
+}
+
+func (p *pendingProbeReader) Read(b []byte) (int, error) {
+	p.reads++
+	if !p.rw.cur.IsZero() {
+		p.pending++
+	}
+	return p.r.Read(b)
+}
+
+// TestCopyStreamNoDeadlinePendingWhileReadingSource: the idle deadline is for
+// a client that stops reading. While copyStream is blocked on the SOURCE (a
+// torrent with no peers) no write is in flight, so no deadline may be pending
+// — on HTTP/2 a pending deadline resets the stream even with no write queued.
+func TestCopyStreamNoDeadlinePendingWhileReadingSource(t *testing.T) {
+	old := streamWriteIdleTimeout
+	streamWriteIdleTimeout = time.Minute
+	t.Cleanup(func() { streamWriteIdleTimeout = old })
+
+	rw := &deadlineRW{}
+	src := &pendingProbeReader{r: bytes.NewReader(bytes.Repeat([]byte("x"), 4*1024)), rw: rw}
+	copyStream(rw, src, make([]byte, 1024))
+
+	if src.reads < 4 {
+		t.Fatalf("source reads = %d, want >= 4", src.reads)
+	}
+	if src.pending != 0 {
+		t.Errorf("a write deadline was pending during %d of %d source reads, want 0", src.pending, src.reads)
 	}
 }
 
@@ -143,7 +192,7 @@ func TestCopyStreamDropsStalledClient(t *testing.T) {
 
 // slowReader returns n chunks, sleeping between them (a slow upstream, not a
 // slow client): total duration far exceeds the idle timeout, which must not
-// cut the stream because the deadline is re-armed per write.
+// cut the stream because a deadline is only pending during each write.
 type slowReader struct {
 	n     int
 	pause time.Duration
@@ -179,5 +228,101 @@ func TestCopyStreamLongStreamNotKilledByIdleDeadline(t *testing.T) {
 	}
 	if len(body) != 8 {
 		t.Errorf("body = %d bytes, want 8", len(body))
+	}
+}
+
+// newHTTP2TestServer starts an HTTPS httptest server that negotiates HTTP/2
+// (the production HTTPS listener's protocol); use srv.Client() to reach it.
+func newHTTP2TestServer(t *testing.T, h http.Handler) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// stallSource yields head, then blocks for stall (a torrent with no peers: no
+// bytes available, client healthy), then yields tail and EOF.
+type stallSource struct {
+	head, tail []byte
+	stall      time.Duration
+	step       int
+}
+
+func (s *stallSource) Read(p []byte) (int, error) {
+	switch s.step {
+	case 0:
+		s.step++
+		return copy(p, s.head), nil
+	case 1:
+		s.step++
+		time.Sleep(s.stall)
+		return copy(p, s.tail), nil
+	}
+	return 0, io.EOF
+}
+
+// TestCopyStreamSourceStallNotResetOnHTTP2: on HTTP/2 SetWriteDeadline arms a
+// timer that resets the stream whether or not a write is pending, so a
+// deadline left armed across a stalled SOURCE read killed healthy clients. The
+// client here keeps reading throughout; only the source stalls (5x longer than
+// the idle timeout), and the stream must survive it.
+func TestCopyStreamSourceStallNotResetOnHTTP2(t *testing.T) {
+	old := streamWriteIdleTimeout
+	streamWriteIdleTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { streamWriteIdleTimeout = old })
+
+	head := bytes.Repeat([]byte("h"), 32<<10) // > h2 handler buffer: flushed to the client
+	tail := []byte("tail")
+	srv := newHTTP2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		copyStream(w, &stallSource{head: head, tail: tail, stall: time.Second}, make([]byte, 64<<10))
+	}))
+
+	resp, err := srv.Client().Get(srv.URL) //nolint:noctx // test
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("proto = %s, want HTTP/2", resp.Proto)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read after %d bytes: %v (stream reset while only the source stalled)", len(body), err)
+	}
+	if want := len(head) + len(tail); len(body) != want {
+		t.Errorf("body = %d bytes, want %d", len(body), want)
+	}
+}
+
+// TestCopyStreamDropsStalledClientHTTP2: bracketing the deadline around each
+// write must not lose the real protection — a client that stops reading is
+// still dropped on HTTP/2 once its write stays blocked past the idle timeout.
+func TestCopyStreamDropsStalledClientHTTP2(t *testing.T) {
+	old := streamWriteIdleTimeout
+	streamWriteIdleTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { streamWriteIdleTimeout = old })
+
+	finished := make(chan struct{})
+	srv := newHTTP2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defer close(finished)
+		copyStream(w, infiniteReader{}, make([]byte, 256<<10))
+	}))
+
+	resp, err := srv.Client().Get(srv.URL) //nolint:noctx // test
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("proto = %s, want HTTP/2", resp.Proto)
+	}
+	// never read the body: the stream's flow-control window fills, the write
+	// blocks, and the idle deadline must release the handler.
+	select {
+	case <-finished:
+	case <-time.After(20 * time.Second):
+		t.Fatal("handler still blocked on a stalled HTTP/2 client after the idle write deadline")
 	}
 }
