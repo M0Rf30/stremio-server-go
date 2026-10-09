@@ -4,7 +4,7 @@
 
 module github.com/M0Rf30/stremio-server-go
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/anacrolix/dht/v2 v2.24.1-0.20260908044610-a669bdd3bdcf
@@ -15,7 +15,7 @@ require (
 	github.com/huin/goupnp v1.3.0
 	github.com/jlaffaye/ftp v0.2.4
 	github.com/nwaples/rardecode/v2 v2.4.1
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/time v0.16.0
 )
