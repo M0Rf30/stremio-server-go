@@ -16,7 +16,9 @@ import (
 	"io"
 	"os"
 	"path"
+	"slices"
 	"strings"
+	"sync"
 
 	rardecode "github.com/nwaples/rardecode/v2"
 )
@@ -36,12 +38,32 @@ type Entry struct {
 // be called when the Reader is no longer needed to release underlying resources.
 type Reader interface {
 	// List returns all entries recorded in the archive (including directories).
+	// Implementations memoize the result, so repeated calls on one Reader do
+	// not rescan (or, for tgz, re-decompress) the archive.
 	List() ([]Entry, error)
 	// Open returns a sequential ReadCloser for the named entry. The name must
 	// match an entry name returned by List exactly.
 	Open(name string) (io.ReadCloser, error)
 	// Close releases the Reader's resources.
 	Close() error
+}
+
+// Extent locates an entry's bytes verbatim (stored uncompressed and
+// contiguous) inside the archive file itself, so they can be served with
+// ReadAt/io.SectionReader straight from the archive without any extraction.
+type Extent struct {
+	Offset int64 // byte offset of the entry data within the archive file
+	Size   int64 // length of the entry data in bytes
+}
+
+// Locator is optionally implemented by Readers (zip, plain tar) that can
+// report where an entry's raw bytes live in the archive file. Locate returns
+// false when the entry is compressed, encrypted, sparse, a directory, absent,
+// or otherwise not addressable in place; callers then fall back to Open. The
+// Extent stays valid for as long as the archive file itself is unchanged and
+// does not depend on the Reader staying open.
+type Locator interface {
+	Locate(name string) (Extent, bool)
 }
 
 // OpenFile opens the archive at fpath and returns a Reader for its contents.
@@ -88,31 +110,45 @@ func normName(s string) string {
 
 // ── zip ──────────────────────────────────────────────────────────────────────
 
+// zipReader owns its *os.File (instead of using zip.OpenReader) so Locate can
+// bounds-check entry extents against the real archive size.
 type zipReader struct {
-	rc    *zip.ReadCloser
+	f     *os.File
+	size  int64
+	zr    *zip.Reader
 	index map[string]*zip.File // normName → file; built once in openZip for O(1) Open
 }
 
 func openZip(fpath string) (Reader, error) {
-	rc, err := zip.OpenReader(fpath)
+	f, err := os.Open(fpath)
 	if err != nil {
 		return nil, err
 	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	zr, err := zip.NewReader(f, st.Size())
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	// Build index once; first-wins matches the previous linear-scan behaviour.
-	idx := make(map[string]*zip.File, len(rc.File))
-	for _, f := range rc.File {
+	idx := make(map[string]*zip.File, len(zr.File))
+	for _, f := range zr.File {
 		if n := normName(f.Name); n != "" {
 			if _, ok := idx[n]; !ok {
 				idx[n] = f
 			}
 		}
 	}
-	return &zipReader{rc: rc, index: idx}, nil
+	return &zipReader{f: f, size: st.Size(), zr: zr, index: idx}, nil
 }
 
 func (r *zipReader) List() ([]Entry, error) {
-	out := make([]Entry, 0, len(r.rc.File))
-	for _, f := range r.rc.File {
+	out := make([]Entry, 0, len(r.zr.File))
+	for _, f := range r.zr.File {
 		fi := f.FileInfo()
 		out = append(out, Entry{
 			Name:  normName(f.Name),
@@ -131,16 +167,46 @@ func (r *zipReader) Open(name string) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("archive: %q not found in zip", name)
 }
 
-func (r *zipReader) Close() error { return r.rc.Close() }
+// zipFlagsEncrypted covers the "encrypted" (0x1) and "strong encryption"
+// (0x40) general-purpose bits; the stdlib cannot decrypt either.
+const zipFlagsEncrypted = 0x1 | 0x40
+
+// Locate reports the in-file extent of a stored (method 0), unencrypted entry.
+// Deflated entries have no addressable plaintext and return false.
+func (r *zipReader) Locate(name string) (Extent, bool) {
+	f, ok := r.index[name]
+	if !ok || f.Method != zip.Store || f.Flags&zipFlagsEncrypted != 0 || f.FileInfo().IsDir() {
+		return Extent{}, false
+	}
+	if f.CompressedSize64 != f.UncompressedSize64 || f.UncompressedSize64 > uint64(r.size) {
+		return Extent{}, false
+	}
+	off, err := f.DataOffset()
+	size := int64(f.UncompressedSize64)
+	if err != nil || off < 0 || off > r.size || size > r.size-off {
+		return Extent{}, false
+	}
+	return Extent{Offset: off, Size: size}, true
+}
+
+func (r *zipReader) Close() error { return r.f.Close() }
 
 // ── tar / tgz ────────────────────────────────────────────────────────────────
 
-// tarReader re-opens the underlying file on every List/Open call so that
-// multiple sequential entries can be accessed without state carried between
-// calls. Close is a no-op since no long-lived file handle is kept.
+// tarReader re-opens the underlying file on every Open call so that multiple
+// sequential entries can be accessed without state carried between calls.
+// Close is a no-op since no long-lived file handle is kept. The first
+// List/Locate scans the archive once and memoizes the entry list; for a plain
+// (non-gzip) tar it also records each regular entry's data offset, which makes
+// later Open calls O(1) and lets callers serve entries in place (Locator).
 type tarReader struct {
 	fpath string
 	gz    bool // true → decompress with gzip before feeding to tar
+
+	mu      sync.Mutex
+	scanned bool
+	entries []Entry
+	extents map[string]Extent // plain tar only: normName → data extent (first wins)
 }
 
 func openTar(fpath string) (Reader, error) {
@@ -199,13 +265,46 @@ func (r *tarReader) openStream() (*tar.Reader, io.Closer, error) {
 	return tar.NewReader(f), f, nil
 }
 
-func (r *tarReader) List() ([]Entry, error) {
+// tarInPlace reports whether hdr describes a regular file whose bytes are laid
+// out contiguously right after its header(s). Sparse files (old GNU 'S' type or
+// PAX GNU.sparse.* records) are excluded: tar.Reader synthesizes their holes.
+func tarInPlace(hdr *tar.Header) bool {
+	if hdr.Typeflag != tar.TypeReg {
+		return false
+	}
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return false
+		}
+	}
+	return true
+}
+
+// scan lists the archive once and memoizes the result. A failed scan is not
+// cached so a later call can retry.
+func (r *tarReader) scan() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.scanned {
+		return nil
+	}
 	tr, cl, err := r.openStream()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = cl.Close() }()
 
+	// For a plain tar the closer is the *os.File itself; tar.Reader reads
+	// header blocks without read-ahead, so the file offset right after Next()
+	// is exactly the start of the entry data.
+	var pos io.Seeker
+	var extents map[string]Extent
+	if !r.gz {
+		if s, ok := cl.(io.Seeker); ok {
+			pos, extents = s, make(map[string]Extent)
+		}
+	}
+	seen := make(map[string]struct{})
 	var out []Entry
 	for {
 		hdr, err := tr.Next()
@@ -213,15 +312,47 @@ func (r *tarReader) List() ([]Entry, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
+		name := normName(hdr.Name)
 		out = append(out, Entry{
-			Name:  normName(hdr.Name),
+			Name:  name,
 			Size:  hdr.Size,
 			IsDir: hdr.FileInfo().IsDir(),
 		})
+		if _, dup := seen[name]; dup {
+			continue // first wins, matching Open
+		}
+		seen[name] = struct{}{}
+		if pos != nil && tarInPlace(hdr) {
+			if off, err := pos.Seek(0, io.SeekCurrent); err == nil {
+				extents[name] = Extent{Offset: off, Size: hdr.Size}
+			}
+		}
 	}
-	return out, nil
+	r.entries, r.extents, r.scanned = out, extents, true
+	return nil
+}
+
+func (r *tarReader) List() ([]Entry, error) {
+	if err := r.scan(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.entries), nil
+}
+
+// Locate reports the in-file extent of a regular entry of a plain tar. A
+// gzip-compressed tar has no addressable plaintext and always returns false.
+func (r *tarReader) Locate(name string) (Extent, bool) {
+	if r.gz || r.scan() != nil {
+		return Extent{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.extents[name]
+	return e, ok
 }
 
 // tarEntryReader wraps a tar.Reader positioned at a specific entry and closes
@@ -233,7 +364,24 @@ type tarEntryReader struct {
 
 func (t *tarEntryReader) Close() error { return t.closer.Close() }
 
+// sectionReadCloser is an io.SectionReader that closes its backing file.
+type sectionReadCloser struct {
+	*io.SectionReader
+	closer io.Closer
+}
+
+func (s *sectionReadCloser) Close() error { return s.closer.Close() }
+
 func (r *tarReader) Open(name string) (io.ReadCloser, error) {
+	// Once the archive has been scanned, a plain tar entry is addressable in
+	// place: skip the sequential walk and read the section directly.
+	if ext, ok := r.cachedExtent(name); ok {
+		f, err := os.Open(r.fpath)
+		if err != nil {
+			return nil, err
+		}
+		return &sectionReadCloser{SectionReader: io.NewSectionReader(f, ext.Offset, ext.Size), closer: f}, nil
+	}
 	tr, cl, err := r.openStream()
 	if err != nil {
 		return nil, err
@@ -254,14 +402,30 @@ func (r *tarReader) Open(name string) (io.ReadCloser, error) {
 	}
 }
 
+// cachedExtent returns the memoized extent for name without triggering a scan.
+func (r *tarReader) cachedExtent(name string) (Extent, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.scanned {
+		return Extent{}, false
+	}
+	e, ok := r.extents[name]
+	return e, ok
+}
+
 func (r *tarReader) Close() error { return nil }
 
 // ── rar ──────────────────────────────────────────────────────────────────────
 
 // rarReader stores only the path; it re-opens a fresh ReadCloser for every
-// List and Open call because rardecode is inherently sequential.
+// Open call because rardecode is inherently sequential. The entry list is
+// scanned once and memoized.
 type rarReader struct {
 	fpath string
+
+	mu      sync.Mutex
+	listed  bool
+	entries []Entry
 }
 
 func openRar(fpath string) (Reader, error) {
@@ -275,6 +439,11 @@ func openRar(fpath string) (Reader, error) {
 }
 
 func (r *rarReader) List() ([]Entry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.listed {
+		return slices.Clone(r.entries), nil
+	}
 	rc, err := rardecode.OpenReader(r.fpath)
 	if err != nil {
 		return nil, err
@@ -304,7 +473,8 @@ func (r *rarReader) List() ([]Entry, error) {
 			IsDir:       hdr.IsDir,
 		})
 	}
-	return out, nil
+	r.entries, r.listed = out, true
+	return slices.Clone(out), nil
 }
 
 // rarEntryReader reads from a rardecode.ReadCloser positioned at the matched

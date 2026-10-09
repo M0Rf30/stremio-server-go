@@ -10,7 +10,8 @@
 //	GET|POST /{ext}/create/{key}       — same, with caller-supplied key
 //	GET      /{ext}/stream             — ?key=&file= redirect to full stream URL
 //	GET      /{ext}/stream/{key}       — redirect to /{ext}/stream/{key}/{selectedFile}
-//	GET      /{ext}/stream/{key}/{…}   — extract entry (once) and serve with Range support
+//	GET      /{ext}/stream/{key}/{…}   — serve the entry with Range support: stored zip/tar entries in place,
+//	                                     everything else extracted once in the background and served while it grows
 //
 // Create payload (JSON; may be gzip+base62 encoded in ?lz= query param):
 //
@@ -34,6 +35,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,33 +45,38 @@ import (
 	lzstring "github.com/daku10/go-lz-string"
 
 	"github.com/M0Rf30/stremio-server-go/internal/archive"
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 )
 
 // ── session store ────────────────────────────────────────────────────────────
 
 type archiveSession struct {
-	mu           sync.Mutex
-	key          string
-	archivePath  string // path to archive file (downloaded temp or original local)
-	isTempArch   bool   // true → archivePath is a temp file owned by this session
-	ext          string // archive format: zip|rar|7zip|tar|tgz
-	tmpDir       string // temp dir for extracted entries
-	selectedFile string // default entry selected at create time
-	created      time.Time
-	lastAccess   time.Time
-	refCount     int                              // in-flight requests; >0 blocks eviction (guarded by mu)
-	extracted    map[string]string                // entry name → extracted temp file path (cache)
-	inflight     map[string]*archiveExtractFlight // entry name → in-progress extraction (guarded by mu)
+	mu            sync.Mutex
+	key           string
+	archivePath   string // path to archive file (downloaded temp or original local)
+	isTempArch    bool   // true → archivePath is a temp file owned by this session
+	archiveBytes  int64  // on-disk size of a session-owned temp archive (counts toward archiveMaxTempBytes)
+	ext           string // archive format: zip|rar|7zip|tar|tgz
+	tmpDir        string // temp dir for extracted entries
+	selectedFile  string // default entry selected at create time
+	created       time.Time
+	lastAccess    time.Time
+	refCount      int                              // in-flight requests; >0 blocks eviction (guarded by mu)
+	extracted     map[string]string                // entry name → fully extracted temp file path (cache)
+	extractedSize map[string]int64                 // entry name → bytes of the extracted file (guarded by mu)
+	inflight      map[string]*archiveExtractFlight // entry name → in-progress extraction (guarded by mu)
+	direct        map[string]archiveDirect         // entry name → in-place extent verdict, zip/tar only (guarded by mu)
+
+	listMu  sync.Mutex
+	listing map[string]archive.Entry // entry name → entry (first wins); listed once per session (guarded by listMu)
 }
 
-// archiveExtractFlight is one in-progress extraction of a single archive entry.
-// The goroutine that created it performs the extraction; concurrent requests
-// for the same entry wait on done and share the result (single-flight).
-type archiveExtractFlight struct {
-	done chan struct{}
-	path string
-	err  error
+// archiveDirect caches whether one entry can be served in place from the
+// archive file, and where its bytes are.
+type archiveDirect struct {
+	ext archive.Extent
+	ok  bool
 }
 
 var (
@@ -79,6 +86,18 @@ var (
 )
 
 const archiveSessionTTL = time.Hour
+
+// Global caps on what idle archive sessions may keep on disk. They are checked
+// when a session is created or an extraction starts; the least recently used
+// idle sessions (no in-flight request) are dropped first, never the session
+// being served. They are variables so tests can lower them.
+var (
+	// archiveMaxSessions bounds the number of live archive sessions.
+	archiveMaxSessions = 32
+	// archiveMaxTempBytes bounds the temp bytes held by all sessions: downloaded
+	// archives plus extracted (or about-to-be-extracted) entries.
+	archiveMaxTempBytes int64 = 32 << 30 // 32 GiB
+)
 
 // archiveMaxDownloadBytes is the maximum number of bytes that archiveDownload
 // will stream from a remote URL to a local temp file. Archives larger than
@@ -176,25 +195,17 @@ func sweepStaleTemp(root string, live map[string]struct{}, minAge time.Duration,
 }
 
 func archiveEvict() {
-	type evictVictim struct {
-		tmpDir   string
-		archPath string
-		isTmp    bool
-	}
 	now := time.Now()
-	var victims []evictVictim
+	var victims []*archiveSession
 
 	archiveSessionsMu.Lock()
 	for k, sess := range archiveSessions {
 		sess.mu.Lock()
 		idle := now.Sub(sess.lastAccess)
 		inUse := sess.refCount > 0
-		isTmp := sess.isTempArch
-		archPath := sess.archivePath
-		tmpDir := sess.tmpDir
 		sess.mu.Unlock()
 		if !inUse && idle > archiveSessionTTL {
-			victims = append(victims, evictVictim{tmpDir: tmpDir, archPath: archPath, isTmp: isTmp})
+			victims = append(victims, sess)
 			delete(archiveSessions, k)
 		}
 	}
@@ -203,11 +214,163 @@ func archiveEvict() {
 	// Perform disk I/O outside the lock so concurrent archive handlers are not
 	// blocked while RemoveAll/Remove walk the filesystem.
 	for _, v := range victims {
-		_ = os.RemoveAll(v.tmpDir)
-		if v.isTmp {
-			_ = os.Remove(v.archPath)
+		archiveDestroySession(v)
+	}
+}
+
+// archiveDestroySession cancels the session's background extractions and
+// removes its temp dir (and, when it owns it, the downloaded archive). The
+// caller must already have unregistered the session.
+func archiveDestroySession(sess *archiveSession) {
+	sess.mu.Lock()
+	flights := make([]*archiveExtractFlight, 0, len(sess.inflight))
+	for _, fl := range sess.inflight {
+		flights = append(flights, fl)
+	}
+	tmpDir, archPath, isTmp := sess.tmpDir, sess.archivePath, sess.isTempArch
+	sess.mu.Unlock()
+
+	for _, fl := range flights {
+		if fl.cancel != nil {
+			fl.cancel()
 		}
 	}
+	_ = os.RemoveAll(tmpDir)
+	if isTmp {
+		_ = os.Remove(archPath)
+	}
+}
+
+// tempBytesLocked is the disk the session holds or has reserved: the
+// downloaded archive, extracted entries, and in-flight extractions (counted at
+// their declared size). Callers must hold sess.mu.
+func (s *archiveSession) tempBytesLocked() int64 {
+	total := s.archiveBytes
+	for _, n := range s.extractedSize {
+		total += n
+	}
+	for _, fl := range s.inflight {
+		if fl.size >= 0 {
+			total += fl.size
+		} else {
+			total += fl.progress()
+		}
+	}
+	return total
+}
+
+// archiveEnforceCaps drops least-recently-used idle sessions until the global
+// session-count and temp-byte caps hold again. keep (the session being created
+// or extracted for) and any session with in-flight requests are never evicted.
+func archiveEnforceCaps(keep *archiveSession) {
+	type candidate struct {
+		key   string
+		sess  *archiveSession
+		last  time.Time
+		bytes int64
+	}
+	var (
+		cands []candidate
+		total int64
+	)
+	archiveSessionsMu.Lock()
+	count := len(archiveSessions)
+	for k, s := range archiveSessions {
+		s.mu.Lock()
+		b := s.tempBytesLocked()
+		total += b
+		if s != keep && s.refCount == 0 {
+			cands = append(cands, candidate{key: k, sess: s, last: s.lastAccess, bytes: b})
+		}
+		s.mu.Unlock()
+	}
+	if count <= archiveMaxSessions && total <= archiveMaxTempBytes {
+		archiveSessionsMu.Unlock()
+		return
+	}
+	slices.SortFunc(cands, func(a, b candidate) int { return a.last.Compare(b.last) })
+	var victims []*archiveSession
+	var freed int64
+	for _, c := range cands {
+		if count <= archiveMaxSessions && total <= archiveMaxTempBytes {
+			break
+		}
+		delete(archiveSessions, c.key)
+		victims = append(victims, c.sess)
+		count--
+		total -= c.bytes
+		freed += c.bytes
+	}
+	archiveSessionsMu.Unlock()
+
+	for _, v := range victims {
+		archiveDestroySession(v)
+	}
+	if len(victims) > 0 {
+		logging.For("archive").Info("evicted idle archive sessions over cap",
+			"sessions", len(victims), "freed_bytes", freed)
+	}
+}
+
+// archiveAcquireSession looks key up and pins the session (refCount++) in one
+// step under archiveSessionsMu, so eviction — which also decides under that
+// lock — can never drop a session between lookup and pin. Callers must call
+// release when done. It returns nil when the session does not exist.
+func archiveAcquireSession(key string) *archiveSession {
+	archiveSessionsMu.Lock()
+	defer archiveSessionsMu.Unlock()
+	sess, ok := archiveSessions[key]
+	if !ok {
+		return nil
+	}
+	sess.mu.Lock()
+	sess.lastAccess = time.Now()
+	sess.refCount++
+	sess.mu.Unlock()
+	return sess
+}
+
+func (s *archiveSession) release() {
+	s.mu.Lock()
+	s.refCount--
+	s.mu.Unlock()
+}
+
+// archiveIndexEntries maps entry name → entry; the first of duplicate names
+// wins, matching what Reader.Open resolves.
+func archiveIndexEntries(entries []archive.Entry) map[string]archive.Entry {
+	m := make(map[string]archive.Entry, len(entries))
+	for _, e := range entries {
+		if _, ok := m[e.Name]; !ok {
+			m[e.Name] = e
+		}
+	}
+	return m
+}
+
+// entry returns the archive's record for name from the per-session listing,
+// listing the archive at most once (create normally primes it; a session built
+// without one lists lazily here). A failed listing is not cached.
+func (s *archiveSession) entry(name string) (archive.Entry, error) {
+	s.listMu.Lock()
+	defer s.listMu.Unlock()
+	if s.listing == nil {
+		r, err := archive.OpenFile(s.archivePath, s.ext)
+		if err != nil {
+			return archive.Entry{}, fmt.Errorf("open archive: %w", err)
+		}
+		entries, err := r.List()
+		_ = r.Close()
+		if err != nil {
+			return archive.Entry{}, fmt.Errorf("list archive: %w", err)
+		}
+		s.listing = archiveIndexEntries(entries)
+	}
+	e, ok := s.listing[name]
+	if !ok {
+		return archive.Entry{}, fmt.Errorf("entry %q not found in archive", name)
+	}
+	return e, nil
 }
 
 // ── create-payload parsing ────────────────────────────────────────────────────
@@ -742,119 +905,467 @@ func archiveEncodePath(name string) string {
 
 // ── extraction ───────────────────────────────────────────────────────────────
 
-// archiveExtractEntry extracts entryName from the session's archive to a temp
-// file under sess.tmpDir, returning the temp file path. Subsequent calls for
-// the same entryName return the cached path without re-extraction. Concurrent
-// calls for the same entry are single-flighted per entry: exactly one goroutine
-// extracts while the others wait and share its result. A failed extraction is
-// not cached, so a later request may retry.
-func archiveExtractEntry(sess *archiveSession, entryName string) (string, error) {
+// archiveCopyBufSize is the buffer used to copy a decompressed entry to disk;
+// progress is published to waiting readers once per buffer.
+const archiveCopyBufSize = 256 << 10
+
+// errArchiveOpenFile marks failures to open the extracted/archive file so the
+// handler keeps its historical "open extracted file: …" message.
+var errArchiveOpenFile = errors.New("open extracted file")
+
+// archiveExtractFlight is one background extraction of a single archive entry
+// into a temp file. The goroutine that started it does the work; every request
+// for the entry (first or later) shares it. Readers may consume the file while
+// it is still growing (archiveProgressReader), so time-to-first-byte no longer
+// includes the whole extraction. The extraction runs on its own context — a
+// client disconnect never cancels it; only session eviction does.
+type archiveExtractFlight struct {
+	done   chan struct{} // closed once the extraction finished; path/err are then final
+	path   string        // temp file being written (immutable)
+	err    error         // set (under mu) before done is closed
+	size   int64         // declared entry size; -1 when the archive does not record it (immutable)
+	cancel context.CancelFunc
+
+	// Test hooks, captured from the package-level vars when the flight is
+	// created so the goroutine never reads those vars (immutable).
+	startHook func(entryName string)
+	chunkHook func(entryName string, written int64)
+
+	mu       sync.Mutex
+	written  int64         // bytes written to path and safe to read (never beyond size when known)
+	finished bool          // done has been (or is being) closed
+	wake     chan struct{} // closed and replaced whenever written advances; closed for good on finish
+}
+
+func newArchiveExtractFlight(path string, size int64, cancel context.CancelFunc) *archiveExtractFlight {
+	return &archiveExtractFlight{
+		done:   make(chan struct{}),
+		path:   path,
+		size:   size,
+		cancel: cancel,
+		wake:   make(chan struct{}),
+	}
+}
+
+// advance publishes that n bytes of the entry are on disk and wakes waiters.
+func (fl *archiveExtractFlight) advance(n int64) {
+	fl.mu.Lock()
+	fl.written = n
+	close(fl.wake)
+	fl.wake = make(chan struct{})
+	fl.mu.Unlock()
+}
+
+// finish records the final outcome and releases every waiter.
+func (fl *archiveExtractFlight) finish(err error) {
+	fl.mu.Lock()
+	fl.err = err
+	fl.finished = true
+	close(fl.wake)
+	fl.mu.Unlock()
+	close(fl.done)
+}
+
+// progress returns the number of bytes currently readable.
+func (fl *archiveExtractFlight) progress() int64 {
+	fl.mu.Lock()
+	defer fl.mu.Unlock()
+	return fl.written
+}
+
+// waitFor blocks until at least n bytes are readable, the extraction failed or
+// ended short of n, or ctx is done. It returns the readable byte count.
+func (fl *archiveExtractFlight) waitFor(ctx context.Context, n int64) (int64, error) {
+	for {
+		fl.mu.Lock()
+		w, ch, fin, ferr := fl.written, fl.wake, fl.finished, fl.err
+		fl.mu.Unlock()
+		if fin && ferr != nil {
+			return w, ferr
+		}
+		if w >= n {
+			return w, nil
+		}
+		if fin {
+			return w, io.ErrUnexpectedEOF // finished cleanly but shorter than promised
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return w, ctx.Err()
+		}
+	}
+}
+
+// waitDone blocks until the extraction finished (returning its error) or ctx is done.
+func (fl *archiveExtractFlight) waitDone(ctx context.Context) error {
+	select {
+	case <-fl.done:
+		return fl.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+var (
+	// archiveExtractTestHook, when non-nil, is called at the start of every real
+	// (non-cached, non-waiting) extraction. Tests only.
+	archiveExtractTestHook func(entryName string)
+	// archiveExtractChunkHook, when non-nil, is called after each chunk of an
+	// extraction is written and published, with the readable byte count. Tests only.
+	archiveExtractChunkHook func(entryName string, written int64)
+)
+
+// archiveStartExtract returns how to obtain entryName as a file: either the
+// path of an already extracted copy (flight == nil) or the in-progress flight,
+// which it starts when none exists. Setup errors (unknown entry, declared size
+// over the limit, temp file creation) are returned synchronously and not
+// cached. Concurrent calls for the same entry share one flight (single-flight).
+func archiveStartExtract(sess *archiveSession, entryName string) (*archiveExtractFlight, string, error) {
+	if fl, p, ok := sess.lookupExtraction(entryName); ok {
+		return fl, p, nil
+	}
+
+	entry, err := sess.entry(entryName)
+	if err != nil {
+		return nil, "", err
+	}
+	// The declared (uncompressed) size caps the extraction and prevents
+	// zip-bomb decompression; a streamed RAR records none and is bounded by
+	// archiveMaxEntryBytes instead.
+	size, declared := entry.Size, entry.Size
+	if entry.SizeUnknown {
+		size, declared = -1, archiveMaxEntryBytes
+	}
+	if declared > archiveMaxEntryBytes {
+		return nil, "", fmt.Errorf("entry %q: declared size %d exceeds limit %d bytes", entryName, declared, archiveMaxEntryBytes)
+	}
+	f, err := os.CreateTemp(sess.tmpDir, "entry-*"+filepath.Ext(entryName))
+	if err != nil {
+		return nil, "", fmt.Errorf("create temp: %w", err)
+	}
+
 	sess.mu.Lock()
-	// Fast path: already extracted.
+	// Lost a race with a concurrent first request: join it instead.
 	if p, ok := sess.extracted[entryName]; ok {
 		sess.mu.Unlock()
-		return p, nil
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, p, nil
 	}
-	// Another request is already extracting this entry: wait for it.
 	if fl, ok := sess.inflight[entryName]; ok {
 		sess.mu.Unlock()
-		<-fl.done
-		return fl.path, fl.err
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return fl, "", nil
 	}
-	fl := &archiveExtractFlight{done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	fl := newArchiveExtractFlight(f.Name(), size, cancel)
+	fl.startHook, fl.chunkHook = archiveExtractTestHook, archiveExtractChunkHook
 	if sess.inflight == nil {
 		sess.inflight = make(map[string]*archiveExtractFlight)
 	}
 	sess.inflight[entryName] = fl
 	sess.mu.Unlock()
 
-	path, err := archiveExtractEntryUncached(sess, entryName)
+	go archiveRunExtract(ctx, sess, entryName, fl, f, declared)
+	go archiveEnforceCaps(sess) // the new flight reserves disk; make room from idle sessions
+	return fl, "", nil
+}
+
+// lookupExtraction reports an already extracted copy or an in-progress flight.
+func (s *archiveSession) lookupExtraction(entryName string) (*archiveExtractFlight, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.extracted[entryName]; ok {
+		return nil, p, true
+	}
+	if fl, ok := s.inflight[entryName]; ok {
+		return fl, "", true
+	}
+	return nil, "", false
+}
+
+// archiveExtractEntry extracts entryName from the session's archive to a temp
+// file under sess.tmpDir and returns its path once the extraction is complete.
+// Subsequent calls return the cached path without re-extraction; concurrent
+// calls share one extraction. A failed extraction is not cached, so a later
+// request may retry. The stream handler does not use this: it serves the file
+// while it is still being written (see archiveOpenEntry).
+func archiveExtractEntry(sess *archiveSession, entryName string) (string, error) {
+	fl, path, err := archiveStartExtract(sess, entryName)
+	if err != nil {
+		return "", err
+	}
+	if fl == nil {
+		return path, nil
+	}
+	<-fl.done
+	if fl.err != nil {
+		return "", fl.err
+	}
+	return fl.path, nil
+}
+
+// archiveRunExtract is the body of a flight's goroutine. It always removes the
+// partial file on failure and always finishes the flight.
+func archiveRunExtract(ctx context.Context, sess *archiveSession, entryName string, fl *archiveExtractFlight, f *os.File, declared int64) {
+	defer fl.cancel()
+	err := archiveCopyEntry(ctx, sess, entryName, fl, f, declared)
+	if cerr := f.Close(); err == nil && cerr != nil {
+		err = fmt.Errorf("extract %q: %w", entryName, cerr)
+	}
+	if err != nil {
+		_ = os.Remove(fl.path)
+	}
 
 	sess.mu.Lock()
+	delete(sess.inflight, entryName)
 	if err == nil {
 		if sess.extracted == nil {
 			sess.extracted = make(map[string]string)
 		}
-		sess.extracted[entryName] = path
+		if sess.extractedSize == nil {
+			sess.extractedSize = make(map[string]int64)
+		}
+		sess.extracted[entryName] = fl.path
+		sess.extractedSize[entryName] = fl.progress()
 	}
-	delete(sess.inflight, entryName)
-	fl.path, fl.err = path, err
 	sess.mu.Unlock()
-	close(fl.done)
-	return path, err
+	fl.finish(err)
 }
 
-// archiveExtractTestHook, when non-nil, is called at the start of every real
-// (non-cached, non-waiting) extraction. Tests only.
-var archiveExtractTestHook func(entryName string)
-
-// archiveExtractEntryUncached performs the actual extraction of entryName into
-// a new temp file under sess.tmpDir. Callers must serialise per entry (see
-// archiveExtractEntry).
-func archiveExtractEntryUncached(sess *archiveSession, entryName string) (string, error) {
-	if archiveExtractTestHook != nil {
-		archiveExtractTestHook(entryName)
+// archiveCopyEntry streams the decompressed entry into f, publishing progress
+// after every chunk. At most declared bytes become readable; if the archive
+// yields more, the extraction fails (zip-bomb guard) and the file is dropped.
+func archiveCopyEntry(ctx context.Context, sess *archiveSession, entryName string, fl *archiveExtractFlight, f *os.File, declared int64) error {
+	if fl.startHook != nil {
+		fl.startHook(entryName)
 	}
 	r, err := archive.OpenFile(sess.archivePath, sess.ext)
 	if err != nil {
-		return "", fmt.Errorf("open archive: %w", err)
+		return fmt.Errorf("open archive: %w", err)
 	}
 	defer func() { _ = r.Close() }()
-
-	// Obtain the declared (uncompressed) size from the archive index. This is
-	// used below to cap the extraction and prevent zip-bomb decompression.
-	entries, err := r.List()
-	if err != nil {
-		return "", fmt.Errorf("list archive: %w", err)
-	}
-	declaredSize := int64(-1)
-	sizeUnknown := false
-	for _, e := range entries {
-		if e.Name == entryName {
-			declaredSize, sizeUnknown = e.Size, e.SizeUnknown
-			break
-		}
-	}
-	if declaredSize < 0 {
-		return "", fmt.Errorf("entry %q not found in archive", entryName)
-	}
-	if sizeUnknown {
-		// Size not recorded (streamed RAR): extract until EOF, still bounded
-		// by archiveMaxEntryBytes via the copy limit below.
-		declaredSize = archiveMaxEntryBytes
-	}
-	if declaredSize > archiveMaxEntryBytes {
-		// Reject before opening the entry to avoid unnecessary I/O; rc is not
-		// yet open at this point (r.Open is called below).
-		return "", fmt.Errorf("entry %q: declared size %d exceeds limit %d bytes", entryName, declaredSize, archiveMaxEntryBytes)
-	}
 	rc, err := r.Open(entryName)
 	if err != nil {
-		return "", fmt.Errorf("open entry %q: %w", entryName, err)
+		return fmt.Errorf("open entry %q: %w", entryName, err)
 	}
+	defer func() { _ = rc.Close() }()
 
-	ext := filepath.Ext(entryName)
-	f, err := os.CreateTemp(sess.tmpDir, "entry-*"+ext)
+	// LimitReader(declared+1) lets us detect an over-long entry by reading one
+	// byte past the declared size without ever writing more than that.
+	src := io.LimitReader(rc, declared+1)
+	buf := make([]byte, archiveCopyBufSize)
+	var n int64
+	for {
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("extract %q: %w", entryName, cerr)
+		}
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			if _, werr := f.Write(buf[:nr]); werr != nil {
+				return fmt.Errorf("extract %q: %w", entryName, werr)
+			}
+			n += int64(nr)
+			visible := archiveMin64(n, declared)
+			fl.advance(visible)
+			if fl.chunkHook != nil {
+				fl.chunkHook(entryName, visible)
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("extract %q: %w", entryName, rerr)
+		}
+	}
+	if n > declared {
+		return fmt.Errorf("extract %q: content (%d bytes) exceeds declared size (%d bytes)", entryName, n, declared)
+	}
+	return nil
+}
+
+// ── serving ──────────────────────────────────────────────────────────────────
+
+// archiveMin64 is the smaller of a and b. The builtin min is shadowed by a
+// package-level test helper, so it cannot be used in this package.
+func archiveMin64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// archiveProgressReader is an io.ReadSeekCloser over an entry that is still
+// being extracted. Read blocks (cancellable via ctx) until the requested bytes
+// are on disk, so Range requests are answered as soon as their bytes exist. The
+// final chunk is only released once the whole extraction has verified OK (zip
+// CRC/size checks run at EOF), so a corrupt entry ends in a truncated response
+// rather than a clean-looking one.
+type archiveProgressReader struct {
+	ctx  context.Context
+	f    *os.File
+	fl   *archiveExtractFlight
+	size int64
+	pos  int64
+}
+
+func (p *archiveProgressReader) Read(b []byte) (int, error) {
+	if p.pos >= p.size {
+		return 0, io.EOF
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
+	avail, err := p.fl.waitFor(p.ctx, p.pos+1)
 	if err != nil {
-		_ = rc.Close()
-		return "", fmt.Errorf("create temp: %w", err)
+		return 0, err
+	}
+	n := archiveMin64(archiveMin64(int64(len(b)), p.size-p.pos), avail-p.pos)
+	if p.pos+n >= p.size {
+		if err := p.fl.waitDone(p.ctx); err != nil {
+			return 0, err
+		}
+	}
+	nr, err := p.f.ReadAt(b[:n], p.pos)
+	p.pos += int64(nr)
+	if nr > 0 && errors.Is(err, io.EOF) {
+		err = nil
+	}
+	return nr, err
+}
+
+func (p *archiveProgressReader) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = p.pos + offset
+	case io.SeekEnd:
+		abs = p.size + offset
+	default:
+		return 0, errors.New("archive: invalid seek whence")
+	}
+	if abs < 0 {
+		return 0, errors.New("archive: negative seek position")
+	}
+	p.pos = abs
+	return abs, nil
+}
+
+func (p *archiveProgressReader) Close() error { return p.f.Close() }
+
+// archiveSectionFile serves an in-place extent of the archive file.
+type archiveSectionFile struct {
+	*io.SectionReader
+	f *os.File
+}
+
+func (s *archiveSectionFile) Close() error { return s.f.Close() }
+
+func archiveOpenFile(path string) (io.ReadSeekCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errArchiveOpenFile, err)
+	}
+	return f, nil
+}
+
+// archiveDirectExtent reports where a stored zip/tar entry's bytes sit inside
+// the archive file, so it can be served with ReadAt and no extraction at all.
+// The verdict is cached per entry. Compressed, encrypted, directory, sparse and
+// unknown-size entries (and every other archive format) return false.
+func archiveDirectExtent(sess *archiveSession, name string) (archive.Extent, bool) {
+	if sess.ext != "zip" && sess.ext != "tar" {
+		return archive.Extent{}, false
+	}
+	sess.mu.Lock()
+	d, known := sess.direct[name]
+	sess.mu.Unlock()
+	if known {
+		return d.ext, d.ok
+	}
+	entry, err := sess.entry(name)
+	if err != nil {
+		return archive.Extent{}, false // the extraction path reports the error
+	}
+	if !entry.IsDir && !entry.SizeUnknown && entry.Size <= archiveMaxEntryBytes {
+		r, err := archive.OpenFile(sess.archivePath, sess.ext)
+		if err != nil {
+			return archive.Extent{}, false
+		}
+		if loc, ok := r.(archive.Locator); ok {
+			if ext, ok := loc.Locate(name); ok && ext.Size == entry.Size {
+				d = archiveDirect{ext: ext, ok: true}
+			}
+		}
+		_ = r.Close()
+	}
+	sess.mu.Lock()
+	if sess.direct == nil {
+		sess.direct = make(map[string]archiveDirect)
+	}
+	sess.direct[name] = d
+	sess.mu.Unlock()
+	return d.ext, d.ok
+}
+
+// archiveOpenEntry returns a seekable body for entryName. Stored zip/tar
+// entries are served in place; others come from a background extraction that
+// is consumed while it is still running. Errors detectable before any byte is
+// produced (unknown entry, unopenable/corrupt entry start, oversize) are
+// returned here so the handler can still answer 500.
+func archiveOpenEntry(ctx context.Context, sess *archiveSession, entryName string) (io.ReadSeekCloser, error) {
+	if ext, ok := archiveDirectExtent(sess, entryName); ok {
+		f, err := os.Open(sess.archivePath)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", errArchiveOpenFile, err)
+		}
+		return &archiveSectionFile{SectionReader: io.NewSectionReader(f, ext.Offset, ext.Size), f: f}, nil
 	}
 
-	// Use LimitReader(rc, declaredSize+1) to enforce the zip-bomb guard:
-	// at most declaredSize bytes are written; if the source yields more we
-	// remove the partial file and return an error.
-	n, copyErr := io.Copy(f, io.LimitReader(rc, declaredSize+1))
-	_ = rc.Close()
-	_ = f.Close()
-	if copyErr != nil {
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("extract %q: %w", entryName, copyErr)
+	fl, path, err := archiveStartExtract(sess, entryName)
+	if err != nil {
+		return nil, err
 	}
-	if n > declaredSize {
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("extract %q: content (%d bytes) exceeds declared size (%d bytes)", entryName, n, declaredSize)
+	if fl == nil {
+		return archiveOpenFile(path)
 	}
-	return f.Name(), nil
+	if fl.size < 0 {
+		// Streamed RAR: the size is only known once the entry is fully out.
+		if err := fl.waitDone(ctx); err != nil {
+			return nil, err
+		}
+		return archiveOpenFile(fl.path)
+	}
+
+	f, err := os.Open(fl.path)
+	if err != nil {
+		select {
+		case <-fl.done:
+			if fl.err != nil {
+				return nil, fl.err // the extraction already failed and dropped its file
+			}
+		default:
+		}
+		return nil, fmt.Errorf("%w: %w", errArchiveOpenFile, err)
+	}
+	// Wait for the first byte (or the end, for an empty entry) so an entry that
+	// cannot be opened or decoded still yields a clean 500 instead of a 200 that
+	// dies after the headers.
+	if fl.size == 0 {
+		err = fl.waitDone(ctx)
+	} else {
+		_, err = fl.waitFor(ctx, 1)
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &archiveProgressReader{ctx: ctx, f: f, fl: fl, size: fl.size}, nil
 }
 
 // ── handler entry point ──────────────────────────────────────────────────────
@@ -989,33 +1500,36 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 	}
 
 	now := time.Now()
+	var archiveBytes int64
+	if isTempArch {
+		if st, statErr := os.Stat(archivePath); statErr == nil {
+			archiveBytes = st.Size()
+		}
+	}
 	sess := &archiveSession{
 		key:          key,
 		archivePath:  archivePath,
 		isTempArch:   isTempArch,
+		archiveBytes: archiveBytes,
 		ext:          ext,
 		tmpDir:       tmpDir,
 		selectedFile: selected,
 		created:      now,
 		lastAccess:   now,
 		extracted:    make(map[string]string),
+		listing:      archiveIndexEntries(entries), // reuse the listing instead of re-listing per extraction
 	}
 	archiveSessionsMu.Lock()
-	if old, ok := archiveSessions[key]; ok && old.tmpDir != "" {
-		// A prior session used this key. Remove its temp dir (and, if the
-		// archive itself was a downloaded temp file, the archive too)
-		// asynchronously to avoid leaking disk space without blocking the lock.
-		oldIsTempArch := old.isTempArch
-		oldArchivePath := old.archivePath
-		go func(d, archPath string, isTmp bool) {
-			_ = os.RemoveAll(d)
-			if isTmp {
-				_ = os.Remove(archPath)
-			}
-		}(old.tmpDir, oldArchivePath, oldIsTempArch)
-	}
+	old, replaced := archiveSessions[key]
 	archiveSessions[key] = sess
 	archiveSessionsMu.Unlock()
+	if replaced && old.tmpDir != "" {
+		// A prior session used this key. Remove its temp dir (and, if the
+		// archive itself was a downloaded temp file, the archive too)
+		// asynchronously to avoid leaking disk space without blocking the request.
+		go archiveDestroySession(old)
+	}
+	go archiveEnforceCaps(sess)
 
 	if r.Method == http.MethodPost {
 		writeJSON(w, http.StatusOK, map[string]string{"key": key})
@@ -1068,23 +1582,12 @@ func (s *server) archiveHandleStream(w http.ResponseWriter, r *http.Request, seg
 	}
 
 	key := seg[2]
-	archiveSessionsMu.Lock()
-	sess, ok := archiveSessions[key]
-	archiveSessionsMu.Unlock()
-	if !ok {
+	sess := archiveAcquireSession(key)
+	if sess == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
-
-	sess.mu.Lock()
-	sess.lastAccess = time.Now()
-	sess.refCount++
-	sess.mu.Unlock()
-	defer func() {
-		sess.mu.Lock()
-		sess.refCount--
-		sess.mu.Unlock()
-	}()
+	defer sess.release()
 
 	// /{ext}/stream/{key} → redirect to selected file.
 	if len(seg) == 3 {
@@ -1097,25 +1600,23 @@ func (s *server) archiveHandleStream(w http.ResponseWriter, r *http.Request, seg
 		return
 	}
 
-	// /{ext}/stream/{key}/{file…} → extract and serve.
+	// /{ext}/stream/{key}/{file…} → serve (in place, or while extracting).
 	entryName := strings.Join(seg[3:], "/")
 
-	filePath, err := archiveExtractEntry(sess, entryName)
+	body, err := archiveOpenEntry(r.Context(), sess, entryName)
 	if err != nil {
-		http.Error(w, "extract: "+err.Error(), http.StatusInternalServerError)
+		if errors.Is(err, errArchiveOpenFile) {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		} else {
+			http.Error(w, "extract: "+err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
+	defer func() { _ = body.Close() }()
 
 	sess.mu.Lock()
 	sess.lastAccess = time.Now()
 	sess.mu.Unlock()
-
-	f, err := os.Open(filePath)
-	if err != nil {
-		http.Error(w, "open extracted file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer func() { _ = f.Close() }()
 
 	w.Header().Set("Content-Type", mimeByName(entryName))
 	w.Header().Set("Accept-Ranges", "bytes")
@@ -1123,5 +1624,5 @@ func (s *server) archiveHandleStream(w http.ResponseWriter, r *http.Request, seg
 	w.Header().Set("contentFeatures.dlna.org",
 		"DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
 
-	http.ServeContent(w, r, entryName, time.Time{}, f)
+	http.ServeContent(w, r, entryName, time.Time{}, body)
 }
