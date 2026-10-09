@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -26,6 +27,10 @@ const defaultCacheMaxBytes = 256 * 1024 * 1024
 // Upstream responses exceeding this value are refused rather than buffered
 // unboundedly; 50 MiB is generous for any real HLS/DASH segment.
 const maxSegmentBytes int64 = 50 * 1024 * 1024
+
+// inflightWaitTimeout bounds how long a request that must buffer a whole
+// segment (DRM decrypt) waits for in-flight budget before answering 503.
+const inflightWaitTimeout = 30 * time.Second
 
 // cacheEntry holds a cached segment with its metadata.
 type cacheEntry struct {
@@ -120,11 +125,19 @@ func (c *segCache) sweep() {
 
 // putFull stores a full response entry (body + headers + status).
 // It evicts least-recently-used entries to satisfy both the entry cap and the byte budget.
+// An entry larger than the whole byte budget is not stored: it could never
+// fit, and admitting it would flush every other entry and still overshoot.
 func (c *segCache) putFull(key string, val []byte, hdr http.Header, status int) {
 	c.startJanitor()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	newSize := int64(len(val))
+	if newSize > c.maxBytes {
+		if el, ok := c.items[key]; ok {
+			c.removeLocked(el) // never leave a stale copy behind
+		}
+		return
+	}
 	if el, ok := c.items[key]; ok {
 		c.lru.MoveToFront(el)
 		e := el.Value.(*cacheEntry)
@@ -135,6 +148,15 @@ func (c *segCache) putFull(key string, val []byte, hdr http.Header, status int) 
 		e.status = status
 		e.size = newSize
 		e.expiresAt = time.Now().Add(c.ttl)
+		// A larger replacement can push the cache over budget: evict from the
+		// cold end (never the entry just refreshed at the front).
+		for c.totalBytes > c.maxBytes {
+			back := c.lru.Back()
+			if back == nil || back == el {
+				break
+			}
+			c.removeLocked(back)
+		}
 		return
 	}
 	// Evict until both constraints are satisfied.
@@ -143,10 +165,7 @@ func (c *segCache) putFull(key string, val []byte, hdr http.Header, status int) 
 		if back == nil {
 			break
 		}
-		evicted := back.Value.(*cacheEntry)
-		c.totalBytes -= evicted.size
-		delete(c.items, evicted.key)
-		c.lru.Remove(back)
+		c.removeLocked(back)
 	}
 	entry := &cacheEntry{
 		key:       key,
@@ -158,6 +177,14 @@ func (c *segCache) putFull(key string, val []byte, hdr http.Header, status int) 
 	}
 	c.totalBytes += newSize
 	c.items[key] = c.lru.PushFront(entry)
+}
+
+// removeLocked drops one entry and its byte accounting. Caller holds c.mu.
+func (c *segCache) removeLocked(el *list.Element) {
+	e := el.Value.(*cacheEntry)
+	c.totalBytes -= e.size
+	delete(c.items, e.key)
+	c.lru.Remove(el)
 }
 
 // getFull returns the full cache entry, or nil when absent or expired.
@@ -258,24 +285,19 @@ func (h *Handler) cacheLookup(rawurl string, hdr http.Header) ([]byte, http.Head
 }
 
 // cachedFetch fetches rawurl, using the segment cache when configured.
-// Returns body, response headers, HTTP status, and any error.
+// Returns body, response headers, HTTP status, and any error. When the
+// in-flight buffering budget is exhausted it waits (bounded by ctx).
 func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Header, proxyURL string) ([]byte, http.Header, int, error) {
+	return h.cachedFetchMode(ctx, rawurl, hdr, proxyURL, true)
+}
+
+// cachedFetchMode is cachedFetch with a choice of what happens when the
+// in-flight budget is exhausted: wait for it (wait == true) or give up with
+// errInflightBusy (best-effort callers such as prefetch).
+func (h *Handler) cachedFetchMode(ctx context.Context, rawurl string, hdr http.Header, proxyURL string, wait bool) ([]byte, http.Header, int, error) {
 	if h.cache == nil || h.cfg.SegCacheTTL == 0 {
 		// Caching disabled — fetch directly, but cap the read to prevent OOM.
-		resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil, proxyURL)
-		if err != nil {
-			return nil, nil, 0, err
-		}
-		defer func() { _ = resp.Body.Close() }()
-		data, err := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBytes+1))
-		if err != nil {
-			return nil, nil, resp.StatusCode, err
-		}
-		if int64(len(data)) > maxSegmentBytes {
-			return nil, nil, http.StatusBadGateway,
-				fmt.Errorf("upstream segment too large (> %d bytes)", maxSegmentBytes)
-		}
-		return data, resp.Header, resp.StatusCode, nil
+		return h.fetchBuffered(ctx, "", rawurl, hdr, proxyURL, wait)
 	}
 
 	// Cache hit.
@@ -301,7 +323,7 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 		}
 		// The leader failed (possibly because its own context was cancelled):
 		// retry independently rather than inherit its error.
-		return h.fetchAndStore(ctx, key, rawurl, hdr, proxyURL)
+		return h.fetchBuffered(ctx, key, rawurl, hdr, proxyURL, wait)
 	}
 	defer func() { h.flightFinish(key, call) }()
 	// Another leader may have populated the cache between the lookup above
@@ -310,32 +332,101 @@ func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Heade
 		call.data, call.hdr, call.status = data, respHdr, status
 		return data, respHdr, status, nil
 	}
-	call.data, call.hdr, call.status, call.err = h.fetchAndStore(ctx, key, rawurl, hdr, proxyURL)
+	call.data, call.hdr, call.status, call.err = h.fetchBuffered(ctx, key, rawurl, hdr, proxyURL, wait)
 	return call.data, call.hdr, call.status, call.err
 }
 
-// fetchAndStore performs the upstream GET for a cache miss, buffering at most
-// maxSegmentBytes, and stores a 200 response in the cache under key.
-func (h *Handler) fetchAndStore(ctx context.Context, key, rawurl string, hdr http.Header, proxyURL string) ([]byte, http.Header, int, error) {
+// fetchBuffered performs an upstream GET and buffers the body, which must not
+// exceed maxSegmentBytes. The buffer is sized exactly from Content-Length when
+// the upstream sent one, and its bytes are reserved in the in-flight budget
+// for the duration of the call, so concurrent fetches cannot pile up beyond
+// it. A non-empty key stores a 200 response in the cache under that key.
+func (h *Handler) fetchBuffered(ctx context.Context, key, rawurl string, hdr http.Header, proxyURL string, wait bool) ([]byte, http.Header, int, error) {
 	resp, err := h.fetch(ctx, http.MethodGet, rawurl, hdr, nil, proxyURL)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// Bound the read: if the segment exceeds maxSegmentBytes we do not cache it
-	// (skip caching) and return an error rather than buffering unboundedly.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBytes+1))
-	if err != nil {
-		return nil, nil, resp.StatusCode, err
-	}
-	if int64(len(data)) > maxSegmentBytes {
+	tooLarge := func() ([]byte, http.Header, int, error) {
+		if key == "" {
+			return nil, nil, http.StatusBadGateway,
+				fmt.Errorf("upstream segment too large (> %d bytes)", maxSegmentBytes)
+		}
 		return nil, nil, http.StatusBadGateway,
 			fmt.Errorf("upstream segment too large to cache (> %d bytes)", maxSegmentBytes)
 	}
-	if resp.StatusCode == http.StatusOK {
+	// An advertised length over the ceiling is refused before reading a byte.
+	if resp.ContentLength > maxSegmentBytes {
+		return tooLarge()
+	}
+	n := segmentReservation(resp.ContentLength)
+	if err := h.reserveInflight(ctx, n, wait); err != nil {
+		return nil, nil, 0, err
+	}
+	defer h.inflight.release(n)
+	data, err := readSegment(resp.Body, resp.ContentLength)
+	if errors.Is(err, errSegmentTooLarge) {
+		return tooLarge()
+	}
+	if err != nil {
+		return nil, nil, resp.StatusCode, err
+	}
+	if key != "" && resp.StatusCode == http.StatusOK {
 		h.cache.putFull(key, data, resp.Header.Clone(), resp.StatusCode)
 	}
 	return data, resp.Header, resp.StatusCode, nil
+}
+
+// errSegmentTooLarge is returned by readSegment when a body exceeds maxSegmentBytes.
+var errSegmentTooLarge = errors.New("upstream segment too large")
+
+// segmentReservation is the in-flight budget a body of the advertised length
+// needs: exactly that length when known, else the worst case (maxSegmentBytes).
+func segmentReservation(contentLength int64) int64 {
+	if contentLength < 0 {
+		return maxSegmentBytes
+	}
+	return contentLength
+}
+
+// reserveInflight reserves n bytes of the in-flight budget, waiting for them
+// (bounded by ctx) when wait is set and failing fast with errInflightBusy
+// otherwise.
+func (h *Handler) reserveInflight(ctx context.Context, n int64, wait bool) error {
+	if wait {
+		return h.inflight.acquire(ctx, n)
+	}
+	if !h.inflight.tryAcquire(n) {
+		return errInflightBusy
+	}
+	return nil
+}
+
+// readSegment reads body fully, refusing anything over maxSegmentBytes with
+// errSegmentTooLarge. When contentLength is known the buffer is allocated at
+// exactly that size and filled in place — no append growth, which would
+// otherwise hold up to ~2x the segment (old backing array + new) at peak.
+// net/http enforces Content-Length on the body, so a short read surfaces as
+// io.ErrUnexpectedEOF rather than a silently truncated segment.
+func readSegment(body io.Reader, contentLength int64) ([]byte, error) {
+	if contentLength > maxSegmentBytes {
+		return nil, errSegmentTooLarge
+	}
+	if contentLength >= 0 {
+		buf := make([]byte, contentLength)
+		if _, err := io.ReadFull(body, buf); err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maxSegmentBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSegmentBytes {
+		return nil, errSegmentTooLarge
+	}
+	return data, nil
 }
 
 // flightCall is one in-flight upstream segment fetch shared by concurrent
@@ -390,7 +481,9 @@ func (h *Handler) awaitFlight(ctx context.Context, key string) {
 // Each goroutine runs under a fresh context bounded by prefetchTimeout so it
 // cannot outlive a slow upstream indefinitely. Concurrent goroutines are
 // capped by h.prefetchSem; if all slots are occupied the remaining URLs are
-// skipped rather than blocked. Errors are silently ignored.
+// skipped rather than blocked. A prefetch that finds the in-flight buffering
+// budget (h.inflight) exhausted gives up instead of queueing behind real
+// client requests. Errors are silently ignored.
 // No-op when Prebuffer <= 0 or SegCacheTTL == 0.
 func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header, proxyURL string) {
 	if h.cfg.Prebuffer <= 0 || h.cache == nil {
@@ -414,7 +507,7 @@ func (h *Handler) prefetch(ctx context.Context, urls []string, hdr http.Header, 
 			// wall-clock bound.
 			pCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prefetchTimeout)
 			defer cancel()
-			_, _, _, _ = h.cachedFetch(pCtx, u, hdr, proxyURL)
+			_, _, _, _ = h.cachedFetchMode(pCtx, u, hdr, proxyURL, false)
 		}()
 	}
 }

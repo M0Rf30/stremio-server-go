@@ -95,6 +95,10 @@ type Handler struct {
 	// prefetchSem is a semaphore that bounds the number of goroutines spawned
 	// by prefetch across all concurrent requests.
 	prefetchSem chan struct{}
+	// inflight bounds the segment bytes buffered in memory at once while an
+	// upstream body is being read (cache fills, prefetches, DRM decrypts);
+	// the segment cache's own budget only counts entries already stored.
+	inflight *byteBudget
 	// signingGCM is the pre-built AES-GCM cipher for token sign/verify (F7).
 	// nil when Secret is empty. cipher.AEAD is goroutine-safe.
 	signingGCM cipher.AEAD
@@ -158,6 +162,7 @@ func New(cfg Config) *Handler {
 		proxyClients: make(map[string]proxyClientEntry),
 		ipCache:      make(map[string]ipCacheEntry),
 		prefetchSem:  make(chan struct{}, maxConcurrentPrefetch),
+		inflight:     newByteBudget(defaultInflightMaxBytes),
 		signingGCM:   gcm,
 		// Pre-convert password bytes once to avoid per-request allocation (F11).
 		passwordBytes: []byte(cfg.Password),
@@ -193,6 +198,9 @@ type DecryptParams struct {
 // Registration hooks set by feature files in init(); foundation compiles with them nil.
 var hlsHandler func(h *Handler, w http.ResponseWriter, r *http.Request)
 var mpdHandler func(h *Handler, w http.ResponseWriter, r *http.Request)
+
+// segmentDecryptor may decrypt segment in place: the caller hands over
+// ownership and must not use segment afterwards (only the returned slice).
 var segmentDecryptor func(h *Handler, p DecryptParams, segment []byte) ([]byte, error)
 
 // Route dispatches /proxy/* sub-paths. seg[0] is "proxy". Returns true if handled.
@@ -920,15 +928,39 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			defer func() { _ = resp.Body.Close() }()
-			raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBytes+1))
+			// An advertised oversize body is refused before reading a byte.
+			// Otherwise the buffer is reserved in the in-flight budget
+			// (waiting a bounded time) so concurrent decrypts cannot pile up
+			// beyond it.
+			if resp.ContentLength > maxSegmentBytes {
+				http.Error(w, "upstream segment too large", http.StatusBadGateway)
+				return
+			}
+			held := segmentReservation(resp.ContentLength)
+			waitCtx, cancelWait := context.WithTimeout(ctx, inflightWaitTimeout)
+			acqErr := h.inflight.acquire(waitCtx, held)
+			cancelWait()
+			if acqErr != nil {
+				http.Error(w, "proxy busy", http.StatusServiceUnavailable)
+				return
+			}
+			defer func() { h.inflight.release(held) }()
+			raw, readErr := readSegment(resp.Body, resp.ContentLength)
+			if errors.Is(readErr, errSegmentTooLarge) {
+				http.Error(w, "upstream segment too large", http.StatusBadGateway)
+				return
+			}
 			if readErr != nil {
 				http.Error(w, "upstream read error", http.StatusBadGateway)
 				return
 			}
-			if int64(len(raw)) > maxSegmentBytes {
-				http.Error(w, "upstream segment too large", http.StatusBadGateway)
-				return
+			// An unknown length reserved the worst case; keep only what was read.
+			if extra := held - int64(len(raw)); extra > 0 {
+				h.inflight.release(extra)
+				held -= extra
 			}
+			// raw is exclusively ours: the decryptor works on it in place
+			// instead of allocating a second full-size copy.
 			decrypted, decErr := segmentDecryptor(h, params, raw)
 			if decErr != nil {
 				http.Error(w, "decryption error", http.StatusBadGateway)
@@ -980,23 +1012,26 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	if useCache && cacheableResponse(resp) {
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBytes+1))
-		if readErr != nil {
-			http.Error(w, "upstream read error", http.StatusBadGateway)
+	// Buffer only what the cache will actually keep (200, known length, within
+	// both the segment ceiling and the cache budget) and only while the
+	// in-flight budget has room; otherwise stream straight through unbuffered.
+	if useCache && cacheableResponse(resp) && resp.ContentLength <= h.cache.maxBytes {
+		if n := resp.ContentLength; h.inflight.tryAcquire(n) {
+			defer h.inflight.release(n)
+			data, readErr := readSegment(resp.Body, n)
+			if readErr != nil {
+				http.Error(w, "upstream read error", http.StatusBadGateway)
+				return
+			}
+			h.cache.putFull(cacheKey(opts.Dest, upHdr), data, resp.Header.Clone(), resp.StatusCode)
+			copyAllowedHeaders(w, resp.Header)
+			applyRespHeaders(w, opts.RespHeaders)
+			setProxySecurityHeaders(w)
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(data)
 			return
 		}
-		if int64(len(data)) > maxSegmentBytes {
-			http.Error(w, "upstream segment too large", http.StatusBadGateway)
-			return
-		}
-		h.cache.putFull(cacheKey(opts.Dest, upHdr), data, resp.Header.Clone(), resp.StatusCode)
-		copyAllowedHeaders(w, resp.Header)
-		applyRespHeaders(w, opts.RespHeaders)
-		setProxySecurityHeaders(w)
-		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(data)
-		return
+		logging.For("streamproxy").Debug("inflight segment budget busy; streaming uncached", "bytes", resp.ContentLength)
 	}
 
 	// Direct streaming path (Range requests, HEAD, caching off, or a response

@@ -15,7 +15,9 @@ import (
 )
 
 func init() {
-	segmentDecryptor = drmDecrypt
+	// serveStream owns the freshly read segment it hands over, so the hook
+	// decrypts in place rather than allocating a second full-size buffer.
+	segmentDecryptor = drmDecryptInPlace
 }
 
 // aesBlockCache caches AES cipher.Block values keyed by the raw key bytes (as string).
@@ -79,8 +81,29 @@ type drmBox struct {
 	Payload []byte // box body (after header)
 }
 
-// drmDecrypt dispatches segment decryption based on p.Method.
+// drmDecrypt dispatches segment decryption based on p.Method. It never
+// modifies segment: the plaintext is a separate buffer (Method "" returns
+// segment itself).
 func drmDecrypt(h *Handler, p DecryptParams, segment []byte) ([]byte, error) {
+	return drmDecryptBuf(h, p, segment, false)
+}
+
+// drmDecryptInPlace is drmDecrypt for a caller that owns segment and no
+// longer needs the ciphertext: it decrypts inside segment's own backing array
+// instead of allocating a full-size copy. The returned slice aliases segment
+// (CBC additionally trims the PKCS7 padding); segment must not be used again,
+// including after an error, as it may be partially decrypted.
+//
+// In-place is safe for every supported method: CBC decrypts with dst == src
+// (cipher.BlockMode permits exact overlap), and the CENC/CBCS path already
+// did all of its parsing and rewriting on a private copy of the segment, so
+// pointing it at segment itself changes nothing but whose bytes get rewritten.
+func drmDecryptInPlace(h *Handler, p DecryptParams, segment []byte) ([]byte, error) {
+	return drmDecryptBuf(h, p, segment, true)
+}
+
+// drmDecryptBuf implements drmDecrypt/drmDecryptInPlace.
+func drmDecryptBuf(_ *Handler, p DecryptParams, segment []byte, inPlace bool) ([]byte, error) {
 	method := strings.TrimSpace(strings.ToUpper(p.Method))
 	switch method {
 	case "":
@@ -93,7 +116,7 @@ func drmDecrypt(h *Handler, p DecryptParams, segment []byte) ([]byte, error) {
 		if len(p.IV) != 16 {
 			return nil, fmt.Errorf("AES-128: IV must be 16 bytes, got %d", len(p.IV))
 		}
-		return drmDecryptCBC(p.Key, p.IV, segment)
+		return drmCBC(p.Key, p.IV, segment, inPlace)
 
 	case "SAMPLE-AES":
 		return nil, fmt.Errorf("SAMPLE-AES decryption is not supported")
@@ -102,15 +125,21 @@ func drmDecrypt(h *Handler, p DecryptParams, segment []byte) ([]byte, error) {
 		if len(p.Key) != 16 {
 			return nil, fmt.Errorf("%s: key must be 16 bytes, got %d", method, len(p.Key))
 		}
-		return drmDecryptCENC(method, p.Key, p.IV, segment)
+		return drmDecryptCENC(method, p.Key, p.IV, segment, inPlace)
 
 	default:
 		return nil, fmt.Errorf("unsupported decryption method %q", p.Method)
 	}
 }
 
-// drmDecryptCBC decrypts a full HLS segment using AES-128-CBC and strips PKCS7 padding.
+// drmDecryptCBC decrypts a full HLS segment using AES-128-CBC and strips PKCS7
+// padding. data is left untouched.
 func drmDecryptCBC(key, iv, data []byte) ([]byte, error) {
+	return drmCBC(key, iv, data, false)
+}
+
+// drmCBC is drmDecryptCBC with the option to decrypt inside data itself.
+func drmCBC(key, iv, data []byte, inPlace bool) ([]byte, error) {
 	if len(key) != 16 {
 		return nil, fmt.Errorf("CBC: key must be 16 bytes, got %d", len(key))
 	}
@@ -127,8 +156,11 @@ func drmDecryptCBC(key, iv, data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("CBC: %w", err)
 	}
-	out := make([]byte, len(data))
-	copy(out, data)
+	out := data
+	if !inPlace {
+		out = make([]byte, len(data))
+		copy(out, data)
+	}
 	cipher.NewCBCDecrypter(block, iv).CryptBlocks(out, out)
 	return drmStripPKCS7(out)
 }
@@ -159,10 +191,14 @@ func drmStripPKCS7(b []byte) ([]byte, error) {
 // ---------------------------------------------------------------------------
 
 // drmDecryptCENC walks an fMP4 segment, locates moof/traf boxes, reads senc/trun/tfhd,
-// and decrypts the corresponding mdat ranges in place.
-func drmDecryptCENC(method string, key, iv []byte, segment []byte) ([]byte, error) {
-	out := make([]byte, len(segment))
-	copy(out, segment)
+// and decrypts the corresponding mdat ranges in place. With inPlace the ranges are
+// rewritten inside segment itself; otherwise inside a private copy.
+func drmDecryptCENC(method string, key, iv []byte, segment []byte, inPlace bool) ([]byte, error) {
+	out := segment
+	if !inPlace {
+		out = make([]byte, len(segment))
+		copy(out, segment)
+	}
 
 	boxes, err := drmParseBoxes(out)
 	if err != nil {
