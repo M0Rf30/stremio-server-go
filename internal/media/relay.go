@@ -7,6 +7,7 @@ package media
 import (
 	"bufio"
 	"bytes"
+	"container/list"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -34,7 +35,8 @@ const relayTokenTTL = 2 * time.Hour
 // relayMaxTokens caps the number of live relay tokens. Playlist rewriting
 // registers one token per URI line, so an attacker-controlled upstream could
 // otherwise grow the map without bound within relayTokenTTL. When the cap is
-// hit, expired tokens are dropped first, then the oldest registrations.
+// hit, expired tokens are dropped first, then the least recently registered
+// (or re-registered) ones.
 const relayMaxTokens = 16384
 
 // relayJanitorInterval is how often expired relay tokens are swept.
@@ -67,8 +69,10 @@ var hopHeaders = map[string]bool{
 	"Proxy-Authorization": true,
 }
 
-// relayEntry is one registered upstream URL a relay token maps to.
+// relayEntry is one registered upstream URL a relay token maps to. It is the
+// value of an element of mediaRelay.order.
 type relayEntry struct {
+	token     string
 	url       string
 	expiresAt time.Time
 }
@@ -100,9 +104,14 @@ type mediaRelay struct {
 	srv       *http.Server
 
 	mu     sync.Mutex
-	tokens map[string]relayEntry
-	byURL  map[string]string // upstream URL → token (dedupe)
-	order  []string          // tokens in registration order (eviction queue)
+	tokens map[string]*list.Element // token → element of order (*relayEntry)
+	byURL  map[string]string        // upstream URL → token (dedupe)
+	// order holds every live entry, least recently (re-)registered at the
+	// front. Every registration or refresh sets expiresAt = now+relayTokenTTL
+	// and moves the entry to the back, so the list is also sorted by expiry:
+	// both the expired-first sweep and the oldest-first eviction are pops from
+	// the front, O(1) amortized, with no scan or allocation.
+	order *list.List
 }
 
 // globalRelay is the process-wide relay instance used by every ffmpeg/
@@ -117,8 +126,9 @@ var globalRelay = newMediaRelay(true)
 // with blockPrivate=false instead of mutating globalRelay.
 func newMediaRelay(blockPrivate bool) *mediaRelay {
 	return &mediaRelay{
-		tokens: make(map[string]relayEntry),
+		tokens: make(map[string]*list.Element),
 		byURL:  make(map[string]string),
+		order:  list.New(),
 		client: &http.Client{
 			// No overall Timeout: http.Client.Timeout also bounds reading
 			// the response body, which would cut every media stream relayed
@@ -132,6 +142,13 @@ func newMediaRelay(blockPrivate bool) *mediaRelay {
 				}).DialContext,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ResponseHeaderTimeout: 30 * time.Second,
+				// ffmpeg fetches many segments from the same few hosts;
+				// keep a handful of idle connections per host (the
+				// net/http default of 2 forces re-dials under the
+				// parallel segment prefetch) but drop them when unused.
+				MaxIdleConns:        64,
+				MaxIdleConnsPerHost: 8,
+				IdleConnTimeout:     90 * time.Second,
 			},
 			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
 				if len(via) >= relayMaxRedirects {
@@ -183,19 +200,21 @@ func (r *mediaRelay) register(rawURL string) (string, error) {
 	defer r.mu.Unlock()
 	token, ok := r.byURL[rawURL]
 	if ok {
-		if e, live := r.tokens[token]; live && e.url == rawURL {
-			// Same upstream URL already has a token: reuse it (refreshing
-			// its expiry) so re-fetched playlists don't mint fresh tokens.
-			e.expiresAt = exp
-			r.tokens[token] = e
-			return fmt.Sprintf("http://127.0.0.1:%d/r/%s", r.port(), token), nil
+		if el, live := r.tokens[token]; live {
+			if e := el.Value.(*relayEntry); e.url == rawURL {
+				// Same upstream URL already has a token: reuse it (refreshing
+				// its expiry and recency) so re-fetched playlists don't mint
+				// fresh tokens.
+				e.expiresAt = exp
+				r.order.MoveToBack(el)
+				return fmt.Sprintf("http://127.0.0.1:%d/r/%s", r.port(), token), nil
+			}
 		}
 	}
 	r.evictLocked(now)
 	token = randomRelayToken()
-	r.tokens[token] = relayEntry{url: rawURL, expiresAt: exp}
+	r.tokens[token] = r.order.PushBack(&relayEntry{token: token, url: rawURL, expiresAt: exp})
 	r.byURL[rawURL] = token
-	r.order = append(r.order, token)
 	return fmt.Sprintf("http://127.0.0.1:%d/r/%s", r.port(), token), nil
 }
 
@@ -206,38 +225,24 @@ func (r *mediaRelay) evictLocked(now time.Time) {
 		return
 	}
 	r.sweepLocked(now)
-	for len(r.tokens) >= relayMaxTokens && len(r.order) > 0 {
-		tok := r.order[0]
-		r.order = r.order[1:]
-		r.deleteTokenLocked(tok)
+	for len(r.tokens) >= relayMaxTokens && r.order.Len() > 0 {
+		r.deleteElemLocked(r.order.Front())
 	}
 }
 
-// sweepLocked drops expired tokens and compacts the eviction queue.
-// r.mu must be held.
+// sweepLocked drops expired tokens. order is sorted by expiry (see
+// mediaRelay.order), so this only pops the expired prefix. r.mu must be held.
 func (r *mediaRelay) sweepLocked(now time.Time) {
-	for k, v := range r.tokens {
-		if now.After(v.expiresAt) {
-			r.deleteTokenLocked(k)
-		}
+	for el := r.order.Front(); el != nil && now.After(el.Value.(*relayEntry).expiresAt); el = r.order.Front() {
+		r.deleteElemLocked(el)
 	}
-	live := make([]string, 0, len(r.tokens))
-	for _, tok := range r.order {
-		if _, ok := r.tokens[tok]; ok {
-			live = append(live, tok)
-		}
-	}
-	r.order = live
 }
 
-// deleteTokenLocked removes token from both indexes. r.mu must be held.
-func (r *mediaRelay) deleteTokenLocked(token string) {
-	e, ok := r.tokens[token]
-	if !ok {
-		return
-	}
-	delete(r.tokens, token)
-	if r.byURL[e.url] == token {
+// deleteElemLocked removes one entry from every index. r.mu must be held.
+func (r *mediaRelay) deleteElemLocked(el *list.Element) {
+	e := r.order.Remove(el).(*relayEntry)
+	delete(r.tokens, e.token)
+	if r.byURL[e.url] == e.token {
 		delete(r.byURL, e.url)
 	}
 }
@@ -253,8 +258,12 @@ func randomRelayToken() string {
 func (r *mediaRelay) resolve(token string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e, ok := r.tokens[token]
-	if !ok || time.Now().After(e.expiresAt) {
+	el, ok := r.tokens[token]
+	if !ok {
+		return "", false
+	}
+	e := el.Value.(*relayEntry)
+	if time.Now().After(e.expiresAt) {
 		return "", false
 	}
 	return e.url, true

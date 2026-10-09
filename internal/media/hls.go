@@ -93,7 +93,8 @@ type hlsSession struct {
 	isTS            bool                   // source container is MPEG-TS
 	seekIndexed     bool                   // source container's input seek is frame-accurate (see isSeekIndexed)
 	color           videoColor             // probed colour metadata of the first video stream (HDR detection)
-	segLocks        map[string]*sync.Mutex // keyed by segment filename
+	segLocks        map[string]*sync.Mutex // keyed by segment filename; guarded by mu
+	segIdx          segIndex               // on-disk segment cache accounting (see segindex.go)
 	lastAccess      atomic.Int64           // unix nanoseconds; updated on each StartHLS/HLSFile call
 	// inFlight counts calls currently executing HLSFile (which covers
 	// transcodeSegment/extractSubtitle/writePlaylist) for this session.
@@ -195,13 +196,14 @@ type hlsManager struct {
 	// here, because the new session would reuse the same <base>/<id>
 	// directory and the pending RemoveAll would wipe it. Lazily allocated.
 	draining map[string]*hlsSession
-	// semHeld is the number of concurrent ffmpeg segment-transcode slots
-	// currently held, bounded by currentConcurrency() (see
-	// acquireTranscodeSlot). A plain atomic counter instead of a
-	// fixed-capacity channel so the limit can change live via /settings
-	// without rebuilding the primitive.
-	semHeld atomic.Int32
-	stopCh  chan struct{} // closed by CloseHLS to stop the reaper
+	// slots bounds concurrent ffmpeg segment-transcode jobs by
+	// currentConcurrency() (see acquireTranscodeSlot). A resizable FIFO
+	// semaphore instead of a fixed-capacity channel so the limit can change
+	// live via /settings without rebuilding the primitive.
+	slots slotSem
+	// subs bounds concurrent subtitle extractions (see extractSubtitle).
+	subs   slotSem
+	stopCh chan struct{} // closed by CloseHLS to stop the reaper
 	// reaperWG tracks the reaper goroutine (startReaper). With persistence
 	// on, CloseHLS waits on it so its own flush is the last session.json
 	// write and a reaper flush that read an older lastAccess can't land
@@ -1156,6 +1158,17 @@ func (s *hlsSession) writePlaylist(path, segPrefix string) error {
 		// Already rendered and written to disk on a prior request — skip rebuild.
 		return nil
 	}
+	// Serialize the render+write per file: two concurrent first requests
+	// used to share one ".tmp" path and could interleave their writes.
+	l := s.lockFor(filepath.Base(path))
+	l.Lock()
+	defer l.Unlock()
+	s.mu.RLock()
+	_, done := s.playlistData[path]
+	s.mu.RUnlock()
+	if done {
+		return nil
+	}
 	n := 0
 	if dur > 0 {
 		n = int(math.Ceil(dur / segDur))
@@ -1177,26 +1190,14 @@ func (s *hlsSession) writePlaylist(path, segPrefix string) error {
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 	data := []byte(b.String())
-	// Write via temp file + rename so a concurrent reader never sees a
-	// truncated playlist.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	// Store rendered bytes so future requests for the same path skip the
+	// Store rendered state so future requests for the same path skip the
 	// O(n_segments) format loop and disk write entirely.  Keyed by path, not
 	// segPrefix: playlist.m3u8 and video.m3u8 share prefix "" but are
 	// distinct files.
-	s.mu.Lock()
-	if s.playlistData == nil {
-		s.playlistData = make(map[string]struct{})
+	if err := writeFileAtomic(path, data); err != nil {
+		return err
 	}
-	s.playlistData[path] = struct{}{}
-	s.mu.Unlock()
+	s.markPlaylistWritten(path)
 	return nil
 }
 
@@ -1205,9 +1206,25 @@ func (s *hlsSession) writePlaylist(path, segPrefix string) error {
 // Using a single segment spanning the full duration is correct: subtitle
 // parsers handle the full VTT at once, and the player seeks within it natively.
 func (s *hlsSession) writeSubPlaylist(path string, k int) error {
+	// Same pattern as writePlaylist: rendered once per path (lock-free
+	// check first), then serialized per file so concurrent first requests
+	// never interleave writes.
 	s.mu.RLock()
+	_, done := s.playlistData[path]
+	s.mu.RUnlock()
+	if done {
+		return nil
+	}
+	l := s.lockFor(filepath.Base(path))
+	l.Lock()
+	defer l.Unlock()
+	s.mu.RLock()
+	_, done = s.playlistData[path]
 	dur := s.duration
 	s.mu.RUnlock()
+	if done {
+		return nil
+	}
 	if dur <= 0 {
 		dur = 0
 	}
@@ -1220,7 +1237,37 @@ func (s *hlsSession) writeSubPlaylist(path string, k int) error {
 	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n#EXT-X-MEDIA-SEQUENCE:0\n", targetDur)
 	fmt.Fprintf(&b, "#EXTINF:%.3f,\nsub%d.vtt\n", dur, k)
 	b.WriteString("#EXT-X-ENDLIST\n")
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	if err := writeFileAtomic(path, []byte(b.String())); err != nil {
+		return err
+	}
+	if dur > 0 { // a degraded (unknown-duration) playlist must be re-rendered later
+		s.markPlaylistWritten(path)
+	}
+	return nil
+}
+
+// markPlaylistWritten records that the playlist at path has been rendered.
+func (s *hlsSession) markPlaylistWritten(path string) {
+	s.mu.Lock()
+	if s.playlistData == nil {
+		s.playlistData = make(map[string]struct{})
+	}
+	s.playlistData[path] = struct{}{}
+	s.mu.Unlock()
+}
+
+// writeFileAtomic writes data via a temp file + rename so a concurrent reader
+// never sees a truncated file. Callers serialize writers of the same path.
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // extractSubtitle extracts subtitle track k from the session media file to a
@@ -1241,6 +1288,15 @@ func (m *hlsManager) extractSubtitle(ctx context.Context, s *hlsSession, k int) 
 	if fi, err := os.Stat(vttFile); err == nil && fi.Size() > 0 {
 		return vttFile, nil // already extracted
 	}
+
+	// Bound concurrent subtitle extractions: each one demuxes the whole
+	// input through ffmpeg, so a client asking for every track at once must
+	// not fork them all. Waiting honours the request context and happens
+	// before the extraction timeout starts, so queueing does not eat it.
+	if err := m.subs.acquire(ctx, subtitleLimit); err != nil {
+		return "", err
+	}
+	defer m.subs.release(subtitleLimit)
 
 	tmp := vttFile + ".tmp"
 	ctx, cancel := context.WithTimeout(ctx, m.cfg.SubtitleTimeout)
@@ -1287,13 +1343,23 @@ func (m *hlsManager) extractSubtitle(ctx context.Context, s *hlsSession, k int) 
 
 // lockFor returns (creating if necessary) the per-filename mutex.
 // Keyed by the segment filename so concurrent requests for different streams
-// (e.g. "seg0.ts" and "a1seg0.ts") do not block each other.
+// (e.g. "seg0.ts" and "a1seg0.ts") do not block each other. The common case
+// (the mutex already exists, e.g. a cache-hit segment request) only takes the
+// read lock; the write lock is needed once per filename.
 func (s *hlsSession) lockFor(filename string) *sync.Mutex {
+	s.mu.RLock()
+	l, ok := s.segLocks[filename]
+	s.mu.RUnlock()
+	if ok {
+		return l
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	l, ok := s.segLocks[filename]
-	if !ok {
+	if l, ok = s.segLocks[filename]; !ok {
 		l = &sync.Mutex{}
+		if s.segLocks == nil {
+			s.segLocks = map[string]*sync.Mutex{}
+		}
 		s.segLocks[filename] = l
 	}
 	return l
@@ -1301,31 +1367,28 @@ func (s *hlsSession) lockFor(filename string) *sync.Mutex {
 
 // ── transcode concurrency ───────────────────────────────────────────────────
 
+// subtitleConcurrency caps concurrent subtitle extractions per process.
+const subtitleConcurrency = 2
+
+// subtitleLimit is the fixed limit for hlsManager.subs.
+func subtitleLimit() int { return subtitleConcurrency }
+
 // acquireTranscodeSlot blocks until a concurrent-transcode slot is available
-// or ctx is done. Unlike a fixed-capacity channel, currentConcurrency() is
-// re-read on every attempt, so a live POST /settings transcodeConcurrency
-// change takes effect for the very next queued transcode — concurrency
-// bounds a single process-wide resource shared by every session, so
-// "session creation time" (used by the other /settings-overridable knobs)
-// isn't a natural fit here.
+// or ctx is done. Waiters queue FIFO on a semaphore woken by
+// releaseTranscodeSlot (no polling); the limit is re-read from
+// currentConcurrency() on every acquire/release and by blocked waiters on a
+// slow tick, so a live POST /settings transcodeConcurrency change takes effect
+// without rebuilding anything — concurrency bounds a single process-wide
+// resource shared by every session, so "session creation time" (used by the
+// other /settings-overridable knobs) isn't a natural fit here.
 func (m *hlsManager) acquireTranscodeSlot(ctx context.Context) error {
-	for {
-		limit := int32(m.currentConcurrency())
-		cur := m.semHeld.Load()
-		if cur < limit && m.semHeld.CompareAndSwap(cur, cur+1) {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
+	return m.slots.acquire(ctx, m.currentConcurrency)
 }
 
-// releaseTranscodeSlot releases a slot acquired by acquireTranscodeSlot.
+// releaseTranscodeSlot releases a slot acquired by acquireTranscodeSlot and
+// wakes the next queued waiter, if any.
 func (m *hlsManager) releaseTranscodeSlot() {
-	m.semHeld.Add(-1)
+	m.slots.release(m.currentConcurrency)
 }
 
 // currentConcurrency resolves the live effective SegmentConcurrency: the
@@ -1414,7 +1477,8 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	l.Lock()
 	defer l.Unlock()
 	if fi, err := os.Stat(segFile); err == nil && fi.Size() > 0 {
-		return segFile, nil // already transcoded; serve from cache
+		s.noteSegment(filename, fi.Size(), time.Now()) // refresh LRU recency
+		return segFile, nil                            // already transcoded; serve from cache
 	}
 
 	// Bound concurrent ffmpeg spawns: a client prefetch burst must not fork
@@ -1534,7 +1598,18 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 		}
 		return "", fmt.Errorf("hls: transcode %s: %w", filename, err)
 	}
-	return s.installSegment(filename, out, reason)
+	p, err := s.installSegment(filename, out, reason)
+	if err == nil && reason == "" {
+		// Account the freshly cached segment and trim the session cache
+		// back under its cap (never touching this segment, see
+		// evictSegments).
+		now := time.Now()
+		if fi, serr := os.Stat(p); serr == nil {
+			s.noteSegment(filename, fi.Size(), now)
+		}
+		s.evictSegments(m.segmentCacheBytes(s), filename, now)
+	}
+	return p, err
 }
 
 // segmentJob carries the per-segment inputs of buildSegmentArgs, resolved

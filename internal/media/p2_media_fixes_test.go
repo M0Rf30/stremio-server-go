@@ -279,13 +279,15 @@ func TestMediaRelayTokenCapSweepsExpiredFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Expire the 100 most recent registrations; the oldest must survive.
+	// Expire the 100 oldest registrations (the order list is sorted by
+	// expiry, oldest first); only those may be dropped, no live token.
 	r.mu.Lock()
-	for _, tok := range r.order[len(r.order)-100:] {
-		e := r.tokens[tok]
-		e.expiresAt = time.Now().Add(-time.Minute)
-		r.tokens[tok] = e
+	el := r.order.Front()
+	for range 100 {
+		el.Value.(*relayEntry).expiresAt = time.Now().Add(-time.Minute)
+		el = el.Next()
 	}
+	liveFirst := el.Value.(*relayEntry).token
 	r.mu.Unlock()
 
 	u, err := r.register("http://93.184.216.34/fresh.ts")
@@ -297,6 +299,9 @@ func TestMediaRelayTokenCapSweepsExpiredFirst(t *testing.T) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.tokens[liveFirst]; !ok {
+		t.Error("a live token was evicted although expired ones were available")
+	}
 	if len(r.tokens) != relayMaxTokens-100+1 {
 		t.Errorf("tokens = %d, want %d (expired swept, no live evictions)", len(r.tokens), relayMaxTokens-100+1)
 	}
