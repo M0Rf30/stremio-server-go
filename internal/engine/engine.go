@@ -225,7 +225,9 @@ type manager struct {
 	establishedConnsPerTorrent int
 
 	// refetching dedupes in-flight VerifyData re-downloads of evicted in-RAM
-	// pieces, keyed by refetchKey. Only exercised when the in-RAM cache is on.
+	// pieces, keyed by refetchKey. The value is the chan struct{} closed when
+	// that verify has finished, which evicted reads wait on. Only exercised
+	// when the in-RAM cache is on.
 	refetching sync.Map
 
 	// purging tracks infohashes whose on-disk cache directory is mid-delete
@@ -233,6 +235,10 @@ type manager struct {
 	// m.mu — see beginPurge). EnsureEngine waits on the channel instead of
 	// recreating the same directory while the delete is still running.
 	purging map[string]chan struct{}
+
+	// scan memoises the last under-budget cache walk so the janitor can skip
+	// re-walking the cache on ticks where nothing could have grown (evictTick).
+	scan diskScan
 }
 
 // Compile-time interface satisfaction checks.
@@ -251,22 +257,36 @@ type refetchKey struct {
 // dirty-chunk bitmap and re-requests it, and the reader blocks for the
 // re-download instead of spinning reader.readAt into a stack overflow. Each
 // (infohash, piece) verify runs at most once concurrently.
-func (m *manager) refetchPiece(ih metainfo.Hash, piece int) {
+//
+// The returned channel is closed once that verify has finished (the piece is
+// then pending a re-download), so the evicted read can wait on it instead of
+// polling; callers that join an in-flight verify get the same channel. It is
+// nil when there is no live torrent to verify.
+func (m *manager) refetchPiece(ih metainfo.Hash, piece int) <-chan struct{} {
 	key := ih.HexString()
 	m.mu.RLock()
 	e := m.engines[key]
 	m.mu.RUnlock()
-	if e == nil || e.t == nil {
-		return
+	// NumPieces panics before the metadata (Info) has arrived; storage only
+	// exists once it has, but the guard keeps the hook safe regardless.
+	if e == nil || e.t == nil || e.t.Info() == nil {
+		return nil
 	}
 	if piece < 0 || piece >= e.t.NumPieces() {
-		return
+		return nil
 	}
 	rk := refetchKey{infoHash: key, piece: piece}
-	if _, inflight := m.refetching.LoadOrStore(rk, struct{}{}); inflight {
-		return
+	if v, inflight := m.refetching.Load(rk); inflight {
+		return v.(chan struct{})
+	}
+	done := make(chan struct{})
+	if v, inflight := m.refetching.LoadOrStore(rk, done); inflight {
+		return v.(chan struct{})
 	}
 	go func() {
+		// Deferred in this order so the dedupe entry is gone before waiters
+		// wake: a read that retries immediately starts a fresh verify.
+		defer close(done)
 		defer m.refetching.Delete(rk)
 		// Guard: re-check the engine is still active before calling
 		// VerifyData. A torrent that has been Drop()ped must not be used;
@@ -280,6 +300,7 @@ func (m *manager) refetchPiece(ih metainfo.Hash, piece int) {
 		}
 		_ = e.t.Piece(piece).VerifyData()
 	}()
+	return done
 }
 
 // New creates a dual-stack anacrolix torrent Client and returns an EngineManager.
@@ -682,7 +703,7 @@ func (m *manager) StartJanitor(cacheSizeFn func() int64) {
 		for {
 			select {
 			case <-ticker.C:
-				m.evict(cacheSizeFn())
+				m.evictTick(cacheSizeFn())
 				m.evictIdle(m.cfg.IdleTimeout)
 				m.enforceSeedRatio(m.cfg.MaxSeedRatio)
 			case <-m.done:
@@ -942,34 +963,29 @@ func (m *manager) evict(budget int64) {
 		return
 	}
 
-	// Single filesystem walk of the cache root — attribute sizes to engine
-	// subdirectories. This replaces N separate WalkDir calls (one per engine)
-	// with one pass, reducing inode pressure on every janitor tick.
+	// In-RAM mode keeps no piece data on disk, so there is nothing to measure or
+	// evict by size: skip the walk entirely.
+	if m.cfg.MemoryCacheSize > 0 {
+		return
+	}
+
+	// Measure each live engine's cache directory. Only those directories are
+	// walked, not the whole cache root, so leftover directories of torrents that
+	// are no longer loaded (and any other files under the root) cost no stats.
+	// Peer data counters are sampled before the walk so growth during it shows
+	// up on the next tick (see cacheQuiet).
 	type entry struct {
 		e           *engine
 		size        int64
 		lastAccess  time.Time
 		openReaders int
 	}
+	dl := make(map[*engine]int64, len(snap))
 	dirSizes := make(map[string]int64, len(snap))
-	_ = filepath.WalkDir(m.cfg.CacheRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		rel, rerr := filepath.Rel(m.cfg.CacheRoot, path)
-		if rerr != nil {
-			return nil
-		}
-		// First path component is the info-hash subdirectory.
-		ih := rel
-		if i := strings.IndexByte(rel, byte(filepath.Separator)); i >= 0 {
-			ih = rel[:i]
-		}
-		if info, err2 := d.Info(); err2 == nil {
-			dirSizes[ih] += allocatedSize(info)
-		}
-		return nil
-	})
+	for _, e := range snap {
+		dl[e] = e.downloaded()
+		dirSizes[e.infoHash] = dirAllocated(filepath.Join(m.cfg.CacheRoot, e.infoHash))
+	}
 
 	entries := make([]entry, 0, len(snap))
 	var total int64
@@ -984,8 +1000,10 @@ func (m *manager) evict(budget int64) {
 	}
 
 	if total <= budget {
+		m.scan.remember(total, dl)
 		return
 	}
+	m.scan.forget()
 
 	// Sort ascending by lastAccess (oldest first). The MRU engine is last and
 	// is always preserved — we iterate only up to len(entries)-1.
@@ -1026,6 +1044,100 @@ func (m *manager) evict(budget int64) {
 		total -= ent.size
 		logging.For("engine").Info("evicted torrent", "info_hash", ih, "freed_bytes", ent.size, "budget_bytes", budget)
 	}
+}
+
+// diskScanMaxAge bounds how long the janitor trusts a cache-size measurement
+// without walking the cache again, whatever the download counters say. It
+// backstops the activity heuristic in cacheQuiet (filesystems that allocate
+// whole files up front, external writers), so a stale reading is corrected
+// within a few ticks.
+const diskScanMaxAge = 5 * time.Minute
+
+// diskScan is the janitor's memo of its last under-budget cache walk.
+type diskScan struct {
+	mu    sync.Mutex
+	at    time.Time         // when the walk was taken
+	total int64             // allocated bytes attributed to the live engines then
+	dl    map[*engine]int64 // per-engine peer data bytes received at that point; nil = no memo
+}
+
+func (s *diskScan) remember(total int64, dl map[*engine]int64) {
+	s.mu.Lock()
+	s.at, s.total, s.dl = time.Now(), total, dl
+	s.mu.Unlock()
+}
+
+func (s *diskScan) forget() {
+	s.mu.Lock()
+	s.dl = nil
+	s.mu.Unlock()
+}
+
+// downloaded returns the cumulative peer data bytes received for the torrent
+// (0 without a live torrent). Cache growth only follows received data, so an
+// unchanged value means no new piece data reached the cache.
+func (e *engine) downloaded() int64 {
+	if e.t == nil {
+		return 0
+	}
+	ts := e.t.Stats()
+	return ts.BytesReadData.Int64()
+}
+
+// dirAllocated returns the allocated bytes (see allocatedSize) of every file
+// under dir. A missing or unreadable dir or entry counts as zero.
+func dirAllocated(dir string) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, ierr := d.Info(); ierr == nil {
+			total += allocatedSize(info)
+		}
+		return nil
+	})
+	return total
+}
+
+// evictTick is the janitor's size-based pass: evict, except when a cheap check
+// proves the on-disk cache cannot have outgrown the budget since the last walk,
+// which spares stat'ing every cached file each tick. Direct evict calls always
+// walk.
+func (m *manager) evictTick(budget int64) {
+	if budget > 0 && m.cacheQuiet(budget) {
+		return
+	}
+	m.evict(budget)
+}
+
+// cacheQuiet reports whether the last walk found the cache within budget and
+// nothing has been written since: the same engines are loaded, none has
+// received a data byte (cache files only grow when piece data arrives), and the
+// reading is younger than diskScanMaxAge. The check costs one Stats() per
+// engine and no filesystem access.
+func (m *manager) cacheQuiet(budget int64) bool {
+	m.scan.mu.Lock()
+	defer m.scan.mu.Unlock()
+	if m.scan.dl == nil || m.scan.total > budget || time.Since(m.scan.at) >= diskScanMaxAge {
+		return false
+	}
+	m.mu.RLock()
+	live := make([]*engine, 0, len(m.engines))
+	for _, e := range m.engines {
+		live = append(live, e)
+	}
+	m.mu.RUnlock()
+	if len(live) != len(m.scan.dl) {
+		return false
+	}
+	for _, e := range live {
+		base, ok := m.scan.dl[e]
+		if !ok || e.downloaded() != base {
+			return false
+		}
+	}
+	return true
 }
 
 // purgeReaderless drops every engine in snap that currently has no open

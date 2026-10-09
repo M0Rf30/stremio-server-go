@@ -9,8 +9,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
@@ -589,10 +591,11 @@ func TestMemStorageEvictedReadTriggersRefetch(t *testing.T) {
 		mu    sync.Mutex
 		calls []refetchCall
 	)
-	s.refetch = func(ih metainfo.Hash, piece int) {
+	s.refetch = func(ih metainfo.Hash, piece int) <-chan struct{} {
 		mu.Lock()
 		calls = append(calls, refetchCall{ih: ih, piece: piece})
 		mu.Unlock()
+		return nil
 	}
 
 	ih := metainfo.NewHashFromHex("0123456789abcdef0123456789abcdef01234567")
@@ -658,10 +661,11 @@ func TestMemStoragePastEndReadNoRefetch(t *testing.T) {
 		mu    sync.Mutex
 		calls []refetchCall
 	)
-	s.refetch = func(ih metainfo.Hash, piece int) {
+	s.refetch = func(ih metainfo.Hash, piece int) <-chan struct{} {
 		mu.Lock()
 		calls = append(calls, refetchCall{ih: ih, piece: piece})
 		mu.Unlock()
+		return nil
 	}
 
 	ih := metainfo.NewHashFromHex("89abcdef0123456789abcdef0123456789abcdef")
@@ -697,4 +701,483 @@ func TestMemStoragePastEndReadNoRefetch(t *testing.T) {
 	if len(calls) != 0 {
 		t.Fatalf("resident past-end read must not refetch; got calls = %+v", calls)
 	}
+}
+
+// openMemTorrent opens a torrent with numPieces pieces on s and returns its
+// storage and info; ti.Close is registered for cleanup.
+func openMemTorrent(t *testing.T, s *memStorage, id byte, pieceLen int64, numPieces int) (storage.TorrentImpl, *metainfo.Info) {
+	t.Helper()
+	info := syntheticInfo(pieceLen, numPieces)
+	ti, err := s.OpenTorrent(context.Background(), info, metainfo.Hash{id})
+	if err != nil {
+		t.Fatalf("OpenTorrent: %v", err)
+	}
+	t.Cleanup(func() {
+		if ti.Close != nil {
+			_ = ti.Close()
+		}
+	})
+	return ti, info
+}
+
+// TestMemStorageEvictionIsExactLRU drives a random mix of completions and
+// reads and checks, after every step, that the resident set equals a reference
+// strict-LRU model: the heap-based eviction must pick exactly the least
+// recently used complete piece, however reads and completions interleave.
+func TestMemStorageEvictionIsExactLRU(t *testing.T) {
+	const (
+		pieceLen  = 64
+		numPieces = 200
+		resident  = 16
+		steps     = 5000
+	)
+	s := newMemStorage(resident * pieceLen)
+	t.Cleanup(func() { _ = s.Close() })
+	ti, info := openMemTorrent(t, s, 1, pieceLen, numPieces)
+	pieces := make([]storage.PieceImpl, numPieces)
+	for i := range pieces {
+		pieces[i] = ti.Piece(info.Piece(i))
+	}
+
+	rng := rand.New(rand.NewPCG(7, 7))
+	var order []int // resident complete pieces, least recently used first
+	indexOf := func(idx int) int {
+		for i, v := range order {
+			if v == idx {
+				return i
+			}
+		}
+		return -1
+	}
+	touch := func(idx int) {
+		if i := indexOf(idx); i >= 0 {
+			order = append(order[:i], order[i+1:]...)
+		}
+		order = append(order, idx)
+	}
+
+	buf := make([]byte, 8)
+	for step := range steps {
+		if len(order) > 0 && rng.IntN(3) > 0 {
+			idx := order[rng.IntN(len(order))]
+			if n, err := pieces[idx].ReadAt(buf, 0); n != len(buf) || err != nil {
+				t.Fatalf("step %d: ReadAt(%d) = (%d, %v)", step, idx, n, err)
+			}
+			touch(idx)
+		} else {
+			idx := rng.IntN(numPieces)
+			if indexOf(idx) >= 0 {
+				continue
+			}
+			if _, err := pieces[idx].WriteAt(fillPattern(idx, pieceLen), 0); err != nil {
+				t.Fatalf("step %d: WriteAt(%d): %v", step, idx, err)
+			}
+			if err := pieces[idx].MarkComplete(); err != nil {
+				t.Fatalf("step %d: MarkComplete(%d): %v", step, idx, err)
+			}
+			touch(idx)
+			if len(order) > resident {
+				order = order[1:]
+			}
+		}
+		for idx, p := range pieces {
+			if want, got := indexOf(idx) >= 0, p.Completion().Complete; want != got {
+				t.Fatalf("step %d: piece %d resident = %v, LRU model says %v", step, idx, got, want)
+			}
+		}
+	}
+}
+
+// TestMemStorageConcurrentFirstWriteReservesOnce races many chunk writers into
+// one non-resident piece: the budget must be charged exactly once and every
+// chunk must land, so a duplicated reservation never evicts a neighbour.
+func TestMemStorageConcurrentFirstWriteReservesOnce(t *testing.T) {
+	const (
+		pieceLen = 1024
+		chunkLen = 64
+		writers  = pieceLen / chunkLen
+	)
+	for round := range 50 {
+		s := newMemStorage(2 * pieceLen)
+		ti, info := openMemTorrent(t, s, byte(round), pieceLen, 2)
+		neighbour := ti.Piece(info.Piece(1))
+		if _, err := neighbour.WriteAt(fillPattern(1, pieceLen), 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := neighbour.MarkComplete(); err != nil {
+			t.Fatal(err)
+		}
+
+		p := ti.Piece(info.Piece(0))
+		want := fillPattern(0, pieceLen)
+		var wg sync.WaitGroup
+		for w := range writers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				off := int64(w * chunkLen)
+				if n, err := p.WriteAt(want[off:off+chunkLen], off); n != chunkLen || err != nil {
+					t.Errorf("WriteAt(%d) = (%d, %v)", off, n, err)
+				}
+			}()
+		}
+		wg.Wait()
+
+		s.mu.Lock()
+		used := s.used
+		s.mu.Unlock()
+		if used != 2*pieceLen {
+			t.Fatalf("round %d: used = %d, want %d (piece charged once, neighbour kept)", round, used, int64(2*pieceLen))
+		}
+		if c := neighbour.Completion(); !c.Complete {
+			t.Fatalf("round %d: neighbour evicted by a duplicated reservation", round)
+		}
+		if err := p.MarkComplete(); err != nil {
+			t.Fatalf("round %d: MarkComplete: %v", round, err)
+		}
+		if got, err := readFull(p, pieceLen); err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("round %d: read back = (%d bytes, %v), want the written pattern", round, len(got), err)
+		}
+		_ = s.Close()
+	}
+}
+
+// TestMemStorageStressAccounting hammers shared-budget pieces across torrents
+// with every storage operation, including torrent close/reopen, then checks the
+// bookkeeping invariants: successful reads return exact bytes, resident bytes
+// equal the accounted total, and the LRU holds exactly the complete pieces.
+// Run under -race it also exercises the lock ordering (a deadlock would hang).
+func TestMemStorageStressAccounting(t *testing.T) {
+	const (
+		pieceLen   = 64
+		numPieces  = 32
+		stable     = 2 // torrents the workers share
+		workers    = 6
+		iterations = 3000
+	)
+	s := newMemStorage(12 * pieceLen)
+	t.Cleanup(func() { _ = s.Close() })
+
+	var all []*memPiece
+	pieceAt := make([][]storage.PieceImpl, stable)
+	for tor := range stable {
+		ti, info := openMemTorrent(t, s, byte(tor), pieceLen, numPieces)
+		for i := range numPieces {
+			p := ti.Piece(info.Piece(i))
+			pieceAt[tor] = append(pieceAt[tor], p)
+			all = append(all, p.(*memPiece))
+		}
+	}
+
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rng := rand.New(rand.NewPCG(uint64(w), 1))
+			buf := make([]byte, pieceLen)
+			for range iterations {
+				tor, idx := rng.IntN(stable), rng.IntN(numPieces)
+				p := pieceAt[tor][idx]
+				want := fillPattern(tor*numPieces+idx, pieceLen)
+				switch rng.IntN(6) {
+				case 0, 1:
+					if _, err := p.WriteAt(want, 0); err != nil {
+						t.Errorf("WriteAt: %v", err)
+						return
+					}
+					if err := p.MarkComplete(); err != nil && !errors.Is(err, errPieceEvicted) {
+						t.Errorf("MarkComplete: %v", err)
+						return
+					}
+				case 2, 3:
+					n, err := p.ReadAt(buf, 0)
+					if err == nil && !bytes.Equal(buf[:n], want[:n]) {
+						t.Error("ReadAt returned wrong bytes")
+						return
+					}
+				case 4:
+					_ = p.MarkNotComplete()
+				default:
+					var sink bytes.Buffer
+					if n, err := p.(io.WriterTo).WriteTo(&sink); err == nil && (n != pieceLen || !bytes.Equal(sink.Bytes(), want)) {
+						t.Errorf("WriteTo = (%d, nil) with wrong bytes", n)
+						return
+					}
+				}
+			}
+		}()
+	}
+	// A torrent that is repeatedly filled and closed while the workers run.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for round := range 200 {
+			info := syntheticInfo(pieceLen, 8)
+			ti, err := s.OpenTorrent(context.Background(), info, metainfo.Hash{byte(100 + round%100)})
+			if err != nil {
+				t.Errorf("OpenTorrent: %v", err)
+				return
+			}
+			for i := range 8 {
+				p := ti.Piece(info.Piece(i))
+				_, _ = p.WriteAt(fillPattern(i, pieceLen), 0)
+				_ = p.MarkComplete()
+			}
+			_ = ti.Close()
+		}
+	}()
+	wg.Wait()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var resident int64
+	for _, mp := range all {
+		mp.mu.RLock()
+		hasData, complete := mp.data != nil, mp.complete
+		mp.mu.RUnlock()
+		if hasData {
+			resident += mp.length
+		}
+		if inLRU := mp.lruIdx >= 0; inLRU != (complete && hasData) {
+			t.Errorf("piece %d: inLRU = %v but complete = %v, resident = %v", mp.index, inLRU, complete, hasData)
+		}
+	}
+	if resident != s.used {
+		t.Errorf("resident bytes = %d, accounted used = %d", resident, s.used)
+	}
+	for i, mp := range s.lru {
+		if mp.lruIdx != i {
+			t.Errorf("lru[%d].lruIdx = %d", i, mp.lruIdx)
+		}
+	}
+}
+
+// TestMemStorageWriteTo covers the io.WriterTo fast path the hasher uses: a
+// resident piece streams its exact bytes, a non-resident one fails fast with
+// errPieceEvicted without invoking the refetch hook or waiting (the hook's own
+// VerifyData is what is hashing, so waiting would block on itself), and writer
+// errors surface.
+func TestMemStorageWriteTo(t *testing.T) {
+	const pieceLen = 3*writeToChunk + 123 // several scratch chunks plus a remainder
+	s := newMemStorage(2 * pieceLen)
+	s.refetchBackoff = 10 * time.Second // a wait on the hook would blow the deadline below
+	var calls int
+	s.refetch = func(metainfo.Hash, int) <-chan struct{} { calls++; return nil }
+	t.Cleanup(func() { _ = s.Close() })
+	ti, info := openMemTorrent(t, s, 1, pieceLen, 3)
+
+	p0 := ti.Piece(info.Piece(0))
+	want := make([]byte, pieceLen)
+	_, _ = rand.NewChaCha8([32]byte{3}).Read(want)
+	if _, err := p0.WriteAt(want, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := p0.MarkComplete(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got bytes.Buffer
+	if n, err := p0.(io.WriterTo).WriteTo(&got); n != pieceLen || err != nil {
+		t.Fatalf("WriteTo(resident) = (%d, %v), want (%d, nil)", n, err, pieceLen)
+	}
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatal("WriteTo(resident) wrote wrong bytes")
+	}
+
+	// A failing writer's error is returned as-is, with the partial count.
+	boom := errors.New("boom")
+	if n, err := p0.(io.WriterTo).WriteTo(failingWriter{after: 10, err: boom}); !errors.Is(err, boom) || n != 10 {
+		t.Fatalf("WriteTo(failing writer) = (%d, %v), want (10, boom)", n, err)
+	}
+	if _, err := p0.(io.WriterTo).WriteTo(shortWriter{}); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("WriteTo(short writer) err = %v, want io.ErrShortWrite", err)
+	}
+
+	// Evict p0 by completing p1 and p2 in a two-piece budget.
+	for _, idx := range []int{1, 2} {
+		p := ti.Piece(info.Piece(idx))
+		if _, err := p.WriteAt(make([]byte, pieceLen), 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.MarkComplete(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := p0.Completion(); c.Complete {
+		t.Fatal("p0 should have been evicted")
+	}
+	start := time.Now()
+	n, err := p0.(io.WriterTo).WriteTo(io.Discard)
+	if n != 0 || !errors.Is(err, errPieceEvicted) {
+		t.Fatalf("WriteTo(evicted) = (%d, %v), want (0, errPieceEvicted)", n, err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("WriteTo(evicted) took %v; it must not wait on the refetch hook", d)
+	}
+	if calls != 0 {
+		t.Fatalf("WriteTo(evicted) called the refetch hook %d times, want 0", calls)
+	}
+}
+
+// failingWriter accepts after bytes and then fails with err.
+type failingWriter struct {
+	after int
+	err   error
+}
+
+func (w failingWriter) Write(b []byte) (int, error) {
+	if len(b) > w.after {
+		return w.after, w.err
+	}
+	return len(b), nil
+}
+
+// shortWriter reports one byte short without an error.
+type shortWriter struct{}
+
+func (shortWriter) Write(b []byte) (int, error) { return len(b) - 1, nil }
+
+// evictedMemPiece returns an evicted piece of a fresh single-slot store.
+func evictedMemPiece(t *testing.T, s *memStorage) storage.PieceImpl {
+	t.Helper()
+	const pieceLen = 64
+	ti, info := openMemTorrent(t, s, 9, pieceLen, 2)
+	for idx := range 2 { // the second completion evicts the first
+		p := ti.Piece(info.Piece(idx))
+		if _, err := p.WriteAt(fillPattern(idx, pieceLen), 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.MarkComplete(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p0 := ti.Piece(info.Piece(0))
+	if p0.Completion().Complete {
+		t.Fatal("piece 0 should have been evicted")
+	}
+	return p0
+}
+
+// TestMemStorageEvictedReadWaitsForRefetchSignal verifies the event-driven
+// wait: an evicted read blocks until the hook's channel closes — however long
+// the safety cap — and returns promptly once it does, instead of sleeping a
+// fixed backoff.
+func TestMemStorageEvictedReadWaitsForRefetchSignal(t *testing.T) {
+	s := newMemStorage(64)
+	s.refetchBackoff = time.Minute // the cap must not be what ends the wait
+	t.Cleanup(func() { _ = s.Close() })
+	done := make(chan struct{})
+	called := make(chan struct{})
+	s.refetch = func(metainfo.Hash, int) <-chan struct{} {
+		close(called)
+		return done
+	}
+	p := evictedMemPiece(t, s)
+
+	ret := make(chan error, 1)
+	go func() {
+		_, err := p.ReadAt(make([]byte, 8), 0)
+		ret <- err
+	}()
+	<-called
+	select {
+	case err := <-ret:
+		t.Fatalf("evicted ReadAt returned (%v) before the refetch signal", err)
+	default:
+	}
+	close(done)
+	select {
+	case err := <-ret:
+		if !errors.Is(err, errPieceEvicted) {
+			t.Fatalf("evicted ReadAt err = %v, want errPieceEvicted", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("evicted ReadAt did not return after the refetch signal")
+	}
+}
+
+// TestMemStorageEvictedReadCapAndThrottle verifies the two bounds that keep
+// anacrolix's retry recursion finite when the re-pend never lands: a signal
+// that never fires is cut off at refetchBackoff, and repeated evicted reads of
+// one piece sleep an escalating floor even when the signal is already closed.
+func TestMemStorageEvictedReadCapAndThrottle(t *testing.T) {
+	t.Run("cap", func(t *testing.T) {
+		s := newMemStorage(64)
+		s.refetchBackoff = 30 * time.Millisecond
+		t.Cleanup(func() { _ = s.Close() })
+		s.refetch = func(metainfo.Hash, int) <-chan struct{} { return make(chan struct{}) } // never closes
+		p := evictedMemPiece(t, s)
+		start := time.Now()
+		if _, err := p.ReadAt(make([]byte, 8), 0); !errors.Is(err, errPieceEvicted) {
+			t.Fatalf("err = %v, want errPieceEvicted", err)
+		}
+		if d := time.Since(start); d < s.refetchBackoff {
+			t.Fatalf("returned after %v, before the %v cap", d, s.refetchBackoff)
+		}
+	})
+
+	t.Run("throttle", func(t *testing.T) {
+		s := newMemStorage(64)
+		s.refetchBackoff = time.Second
+		t.Cleanup(func() { _ = s.Close() })
+		closed := make(chan struct{})
+		close(closed)
+		s.refetch = func(metainfo.Hash, int) <-chan struct{} { return closed }
+		p := evictedMemPiece(t, s)
+		for read, floor := range []time.Duration{0, refetchSettle, 2 * refetchSettle, 4 * refetchSettle, 8 * refetchSettle} {
+			start := time.Now()
+			if _, err := p.ReadAt(make([]byte, 8), 0); !errors.Is(err, errPieceEvicted) {
+				t.Fatalf("read %d: err = %v, want errPieceEvicted", read, err)
+			}
+			if d := time.Since(start); d < floor {
+				t.Fatalf("read %d returned after %v, want at least the %v throttle floor", read, d, floor)
+			}
+		}
+
+		// Becoming resident again clears the escalation.
+		if _, err := p.WriteAt(fillPattern(0, 64), 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := p.(*memPiece).evictedReads.Load(); got != 0 {
+			t.Fatalf("evictedReads = %d after the piece became resident, want 0", got)
+		}
+	})
+
+	t.Run("idle gap resets the escalation", func(t *testing.T) {
+		s := newMemStorage(64)
+		s.refetchBackoff = 100 * time.Millisecond // far above the few ms the spin's own floors take
+		t.Cleanup(func() { _ = s.Close() })
+		closed := make(chan struct{})
+		close(closed)
+		s.refetch = func(metainfo.Hash, int) <-chan struct{} { return closed }
+		p := evictedMemPiece(t, s)
+		mp := p.(*memPiece)
+		for range 3 { // a spin escalates
+			_, _ = p.ReadAt(make([]byte, 8), 0)
+		}
+		if got := mp.evictedReads.Load(); got != 3 {
+			t.Fatalf("evictedReads = %d after a rapid spin, want 3", got)
+		}
+		time.Sleep(3 * s.refetchBackoff) // an unrelated read much later is not part of the spin
+		_, _ = p.ReadAt(make([]byte, 8), 0)
+		if got := mp.evictedReads.Load(); got != 1 {
+			t.Fatalf("evictedReads = %d after an idle gap, want 1 (fresh start)", got)
+		}
+	})
+
+	t.Run("no hook result sleeps the backoff", func(t *testing.T) {
+		s := newMemStorage(64)
+		s.refetchBackoff = 20 * time.Millisecond
+		t.Cleanup(func() { _ = s.Close() })
+		s.refetch = func(metainfo.Hash, int) <-chan struct{} { return nil }
+		p := evictedMemPiece(t, s)
+		start := time.Now()
+		if _, err := p.ReadAt(make([]byte, 8), 0); !errors.Is(err, errPieceEvicted) {
+			t.Fatalf("err = %v, want errPieceEvicted", err)
+		}
+		if d := time.Since(start); d < s.refetchBackoff {
+			t.Fatalf("returned after %v, want at least the %v backoff", d, s.refetchBackoff)
+		}
+	})
 }
