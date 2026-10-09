@@ -1036,7 +1036,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 		if r.Method == http.MethodHead {
 			return
 		}
-		_, _ = io.CopyBuffer(w, io.LimitReader(rc, end-start+1), *bufp)
+		copyStream(w, io.LimitReader(rc, end-start+1), *bufp)
 		return
 	}
 
@@ -1045,7 +1045,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg
 	if r.Method == http.MethodHead {
 		return
 	}
-	_, _ = io.CopyBuffer(w, rc, *bufp)
+	copyStream(w, rc, *bufp)
 }
 
 // resolveIndex picks the file index from the URL segment, a fileMustInclude
@@ -2104,6 +2104,19 @@ var streamBufPool = sync.Pool{
 	},
 }
 
+// writerOnly hides an http.ResponseWriter's io.ReaderFrom. io.CopyBuffer
+// ignores the buffer it is given when the destination implements ReaderFrom,
+// and *http.response does: its ReadFrom only uses sendfile for *os.File and
+// otherwise copies through net/http's own 32 KB pool, so the pooled 256 KB
+// buffer was never used and torrent readers were read 32 KB at a time.
+type writerOnly struct{ io.Writer }
+
+// copyStream copies src to w through buf (a streamBufPool buffer), in
+// buf-sized reads.
+func copyStream(w io.Writer, src io.Reader, buf []byte) {
+	_, _ = io.CopyBuffer(writerOnly{w}, src, buf)
+}
+
 // buildStreamProxyConfig converts types.Config proxy fields to a streamproxy.Config.
 func buildStreamProxyConfig(cfg types.Config, client *http.Client, privateAllow *netguard.Allow) streamproxy.Config {
 	// Decode ProxySecret: try hex then base64url then base64std.
@@ -2232,7 +2245,7 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []strin
 	if r.Method != http.MethodHead {
 		bufp := streamBufPool.Get().(*[]byte)
 		defer streamBufPool.Put(bufp)
-		_, _ = io.CopyBuffer(w, resp.Body, *bufp)
+		copyStream(w, resp.Body, *bufp)
 	}
 }
 
