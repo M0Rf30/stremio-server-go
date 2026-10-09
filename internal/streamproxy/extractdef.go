@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,13 @@ const (
 type DefSet struct {
 	Version    int                   `json:"version"`
 	Extractors map[string]*Extractor `json:"extractors"`
+
+	matchers []namedExtractor // extractors with a match pattern, sorted by name
+}
+
+type namedExtractor struct {
+	name string
+	ex   *Extractor
 }
 
 // Extractor is a single host definition.
@@ -134,6 +142,14 @@ func ParseDefSet(b []byte) (*DefSet, error) {
 		norm[strings.ToLower(strings.TrimSpace(name))] = ex
 	}
 	ds.Extractors = norm
+	// Matchers sorted by name, so /proxy/stream's per-request match is a
+	// plain loop with a deterministic winner.
+	for name, ex := range norm {
+		if ex.match != nil {
+			ds.matchers = append(ds.matchers, namedExtractor{name: name, ex: ex})
+		}
+	}
+	slices.SortFunc(ds.matchers, func(a, b namedExtractor) int { return strings.Compare(a.name, b.name) })
 	return &ds, nil
 }
 

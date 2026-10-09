@@ -15,9 +15,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
@@ -46,14 +46,22 @@ type defRegistry struct {
 	// ed25519 signature, not from the address.
 	client *http.Client
 
-	mu        sync.Mutex
-	local     *DefSet
-	localMod  time.Time
-	lastCheck time.Time
-	remote    *DefSet
+	mu       sync.Mutex // serialises reloads and remote updates (writers only)
+	local    *DefSet
+	localMod time.Time
+	remote   *DefSet
+	// lastCheck is the UnixNano time of the last local-file stat; snap is
+	// the published {local, remote} pair read lock-free by every request.
+	lastCheck atomic.Int64
+	snap      atomic.Pointer[defSnapshot]
 
 	stopOnce sync.Once
 	stop     chan struct{}
+}
+
+// defSnapshot is an immutable {local, remote} pair published atomically.
+type defSnapshot struct {
+	local, remote *DefSet
 }
 
 func newDefRegistry(cfg Config) *defRegistry {
@@ -82,6 +90,11 @@ func newDefRegistry(cfg Config) *defRegistry {
 			go reg.refreshLoop()
 		}
 	}
+	// Load the local file now so the first request already sees it.
+	reg.mu.Lock()
+	reg.reloadLocalLocked()
+	reg.publishLocked()
+	reg.mu.Unlock()
 	return reg
 }
 
@@ -117,20 +130,39 @@ func decodeSig(b []byte) ([]byte, error) {
 	return nil, errors.New("bad signature encoding")
 }
 
-// lookup returns the definition for a host name, reloading the local file
-// if it changed.
-func (reg *defRegistry) lookup(name string) (*Extractor, bool) {
-	name = strings.ToLower(strings.TrimSpace(name))
-	reg.mu.Lock()
-	defer reg.mu.Unlock()
-	reg.reloadLocalLocked()
-	if reg.local != nil {
-		if ex, ok := reg.local.Extractors[name]; ok {
-			return ex, true
+// snapshot returns the current definitions, first reloading the local file
+// if its recheck interval has elapsed. Readers never block: the reload is
+// rate-limited by an atomic timestamp and done by whichever request wins
+// TryLock; everyone else (and that request, on failure) keeps using the
+// last published snapshot.
+func (reg *defRegistry) snapshot() *defSnapshot {
+	if reg.localPath != "" {
+		if now := time.Now().UnixNano(); now-reg.lastCheck.Load() >= int64(localDefRecheck) && reg.mu.TryLock() {
+			reg.reloadLocalLocked()
+			reg.mu.Unlock()
 		}
 	}
-	if reg.remote != nil {
-		if ex, ok := reg.remote.Extractors[name]; ok {
+	if s := reg.snap.Load(); s != nil {
+		return s
+	}
+	return &defSnapshot{}
+}
+
+// publishLocked makes the current local/remote sets visible to readers.
+// Must be called with reg.mu held.
+func (reg *defRegistry) publishLocked() {
+	reg.snap.Store(&defSnapshot{local: reg.local, remote: reg.remote})
+}
+
+// lookup returns the definition for a host name.
+func (reg *defRegistry) lookup(name string) (*Extractor, bool) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	s := reg.snapshot()
+	for _, ds := range [...]*DefSet{s.local, s.remote} {
+		if ds == nil {
+			continue
+		}
+		if ex, ok := ds.Extractors[name]; ok {
 			return ex, true
 		}
 	}
@@ -138,25 +170,18 @@ func (reg *defRegistry) lookup(name string) (*Extractor, bool) {
 }
 
 // match returns the first definition (local before remote, by name) whose
-// match pattern accepts dest.
+// match pattern accepts dest. It runs on every /proxy/stream request, so it
+// is lock- and allocation-free: the sorted matcher list is built at parse
+// time.
 func (reg *defRegistry) match(dest string) (string, *Extractor, bool) {
-	reg.mu.Lock()
-	defer reg.mu.Unlock()
-	reg.reloadLocalLocked()
-	for _, ds := range []*DefSet{reg.local, reg.remote} {
+	s := reg.snapshot()
+	for _, ds := range [...]*DefSet{s.local, s.remote} {
 		if ds == nil {
 			continue
 		}
-		names := make([]string, 0, len(ds.Extractors))
-		for n, ex := range ds.Extractors {
-			if ex.match != nil {
-				names = append(names, n)
-			}
-		}
-		sort.Strings(names)
-		for _, n := range names {
-			if ds.Extractors[n].match.MatchString(dest) {
-				return n, ds.Extractors[n], true
+		for _, m := range ds.matchers {
+			if m.ex.match.MatchString(dest) {
+				return m.name, m.ex, true
 			}
 		}
 	}
@@ -164,16 +189,19 @@ func (reg *defRegistry) match(dest string) (string, *Extractor, bool) {
 }
 
 func (reg *defRegistry) reloadLocalLocked() {
-	if reg.localPath == "" || time.Since(reg.lastCheck) < localDefRecheck {
+	if reg.localPath == "" {
 		return
 	}
-	reg.lastCheck = time.Now()
+	reg.lastCheck.Store(time.Now().UnixNano())
 	fi, err := os.Stat(reg.localPath)
 	if err != nil {
 		if reg.local != nil && errors.Is(err, os.ErrNotExist) {
 			logging.For("extractor").Info("local extractors removed", "path", reg.localPath)
 		}
-		reg.local, reg.localMod = nil, time.Time{}
+		if reg.local != nil {
+			reg.local, reg.localMod = nil, time.Time{}
+			reg.publishLocked()
+		}
 		return
 	}
 	if fi.ModTime().Equal(reg.localMod) {
@@ -192,6 +220,7 @@ func (reg *defRegistry) reloadLocalLocked() {
 		return
 	}
 	reg.local = ds
+	reg.publishLocked()
 	logging.For("extractor").Info("local extractors loaded", "path", reg.localPath, "count", len(ds.Extractors))
 }
 
@@ -227,6 +256,7 @@ func (reg *defRegistry) loadRemoteCache() {
 	}
 	reg.mu.Lock()
 	reg.remote = ds
+	reg.publishLocked()
 	reg.mu.Unlock()
 }
 
@@ -280,6 +310,7 @@ func (reg *defRegistry) fetchRemote() error {
 	}
 	reg.mu.Lock()
 	reg.remote = ds
+	reg.publishLocked()
 	reg.mu.Unlock()
 	logging.For("extractor").Info("remote extractors loaded", "url", reg.remoteURL, "count", len(ds.Extractors))
 	if reg.cachePath != "" {
