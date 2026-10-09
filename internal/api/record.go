@@ -175,7 +175,7 @@ func parseDurationSeconds(raw string) (time.Duration, error) {
 	}
 	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
-		return 0, errors.New("Duration must be a number")
+		return 0, errors.New("Duration must be a number") //nolint:staticcheck // ST1005: verbatim EasyProxy message clients may match on
 	}
 	if n <= 0 {
 		return 0, nil // default
