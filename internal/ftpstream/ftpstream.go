@@ -6,14 +6,16 @@
 // FTP/FTPS servers and HTTP/HTTPS URLs.
 //
 // FTP connections are established using the RFC 959 protocol. FTPS uses
-// implicit TLS (the connection is wrapped in TLS from the start). HTTP/HTTPS
-// connections use the standard net/http client with a Range header when an
-// offset is requested.
+// implicit TLS (the connection is wrapped in TLS from the start). Logged-in
+// control connections are pooled per (server, credentials) for a short TTL so
+// the many short ranged opens of a seeking player skip dial+login (see
+// pool.go). HTTP/HTTPS connections use the standard net/http client with a
+// Range header when an offset is requested.
 package ftpstream
 
 import (
 	"context"
-	"crypto/tls"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +31,7 @@ import (
 
 	"github.com/jlaffaye/ftp"
 
+	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 )
 
@@ -46,12 +49,19 @@ func ftpAllowPrivate() bool {
 // address is disallowed by netguard.ValidateIP, giving a fast, clear error
 // before any protocol handshake begins. The real enforcement point remains
 // the dialer's Control hook (netguard.DialControl via ftpDialControl /
-// openFTP's dialer), which re-validates the specific resolved IP at connect
-// time and forecloses DNS-rebinding; this is a defense-in-depth fast-fail
-// layer, not a substitute for it. A DNS resolution failure is not itself
-// treated as a block — the real dial/request attempt surfaces that error
-// naturally.
+// the FTP session dialer), which re-validates the specific resolved IP at
+// connect time and forecloses DNS-rebinding; this is a defense-in-depth
+// fast-fail layer, not a substitute for it. A DNS resolution failure is not
+// itself treated as a block — the real dial/request attempt surfaces that
+// error naturally.
+//
+// Verdicts (but not resolution failures) are cached for preflightTTL per
+// (host, blockPrivate) so a burst of ranged requests costs one DNS lookup.
 func preflightHost(ctx context.Context, host string, blockPrivate bool) error {
+	k := preflightKey{host: host, blockPrivate: blockPrivate}
+	if hit, verdict := preflightGet(k); hit {
+		return verdict
+	}
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil || len(addrs) == 0 {
 		return nil
@@ -64,8 +74,10 @@ func preflightHost(ctx context.Context, host string, blockPrivate bool) error {
 			}
 			continue
 		}
-		return nil
+		firstErr = nil
+		break
 	}
+	preflightPut(k, firstErr)
 	return firstErr
 }
 
@@ -147,17 +159,18 @@ const ftpDialTimeout = 10 * time.Second
 
 // deadlineConn re-arms a per-operation deadline before every Read and Write so
 // a stalling server cannot block the caller forever. The deadline is the
-// earlier of now+idle and the request context's deadline (when it has one).
+// earlier of now+idle and the deadline of the request context the session is
+// currently leased to (when it has one).
 type deadlineConn struct {
 	net.Conn
-	idle  time.Duration
-	ctxDL time.Time
+	idle time.Duration
+	sess *ftpSession
 }
 
 func (c *deadlineConn) arm() {
 	dl := time.Now().Add(c.idle)
-	if !c.ctxDL.IsZero() && c.ctxDL.Before(dl) {
-		dl = c.ctxDL
+	if l := c.sess.lease.Load(); l != nil && !l.ctxDL.IsZero() && l.ctxDL.Before(dl) {
+		dl = l.ctxDL
 	}
 	_ = c.SetDeadline(dl)
 }
@@ -203,118 +216,142 @@ func (t *ftpConns) closeAll() {
 	t.conns = nil
 }
 
-// ftpReadCloser wraps an FTP data response and its underlying control
-// connection. Close drains the data response then quits the control connection.
+// ftpReadCloser wraps an FTP data response and the session it was opened on.
+// Close drains the data response and, when the control connection is provably
+// still in sync, parks the session in the idle pool for the next request
+// instead of quitting it.
 type ftpReadCloser struct {
 	resp *ftp.Response
-	conn *ftp.ServerConn
+	sess *ftpSession
 	stop func() bool // detaches the ctx-cancellation hook
-	all  *ftpConns
+
+	once sync.Once
+	err  error
 }
 
 func (f *ftpReadCloser) Read(p []byte) (int, error) {
 	return f.resp.Read(p)
 }
 
+// Close is idempotent: the session must be released exactly once.
 func (f *ftpReadCloser) Close() error {
-	f.stop()
-	err := f.resp.Close()
-	_ = f.conn.Quit()
-	f.all.closeAll()
-	return err
+	f.once.Do(func() {
+		// stopped is false when the ctx hook already fired (or is firing):
+		// every connection of the session was force-closed.
+		stopped := f.stop()
+		f.err = f.resp.Close()
+		if stopped && ftpReplySynced(f.err) {
+			ftpPoolPut(f.sess)
+		} else {
+			f.sess.discard()
+		}
+	})
+	return f.err
 }
 
 // openFTP opens a data connection for path on the FTP server described by
 // rawURL, positioned at offset bytes from the beginning.
+func openFTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, int64, error) {
+	rc, size, _, err := openFTPAt(ctx, rawURL, offset, false)
+	return rc, size, err
+}
+
+// openFTPAt is openFTP with the OpenRanged size policy (see there); pos is the
+// position the reader starts at.
 //
-// Every control and data connection is wrapped with a per-operation deadline
+// A logged-in control connection is taken from the idle pool when one exists
+// for this (server, credentials) and otherwise dialled; either way every
+// control and data connection carries a per-operation deadline
 // (ftpIdleTimeout) and is force-closed when ctx is cancelled, so neither a
 // stalling server nor a disconnected client can pin the goroutine and the FTP
-// session.
-func openFTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, int64, error) {
+// session. A reused connection that turns out stale (server idle timeout,
+// restart) is discarded and the open retried once on a fresh connection.
+func openFTPAt(ctx context.Context, rawURL string, offset int64, requireSize bool) (io.ReadCloser, int64, int64, error) {
 	p, err := parseFTPURL(rawURL)
 	if err != nil {
-		return nil, -1, err
+		return nil, -1, 0, err
 	}
-	if err := preflightHost(ctx, p.host, !ftpAllowPrivate()); err != nil {
-		return nil, -1, fmt.Errorf("ftpstream: %w", err)
-	}
-
-	dialer := net.Dialer{
-		Timeout: ftpDialTimeout,
-		Control: netguard.DialControl(!ftpAllowPrivate()),
-	}
-	var tlsCfg *tls.Config
-	if p.tls {
-		tlsCfg = &tls.Config{ServerName: p.host}
-	}
-	ctxDL, _ := ctx.Deadline()
-	all := &ftpConns{}
-	// Registered before the first dial so a cancel during greeting/Login/
-	// SIZE/RETR also aborts the blocked operation.
-	stop := context.AfterFunc(ctx, all.closeAll)
-
-	// dialFunc serves the control connection and every data connection.
-	dialFunc := func(network, address string) (net.Conn, error) {
-		raw, derr := dialer.DialContext(ctx, network, address)
-		if derr != nil {
-			return nil, derr
-		}
-		if !all.add(raw) {
-			return nil, ctx.Err()
-		}
-		c := raw
-		if tlsCfg != nil {
-			// Handshake is deferred to the first Read/Write, which the
-			// deadline wrapper below bounds.
-			c = tls.Client(raw, tlsCfg)
-		}
-		return &deadlineConn{Conn: c, idle: ftpIdleTimeout, ctxDL: ctxDL}, nil
+	allowPrivate := ftpAllowPrivate()
+	key := ftpPoolKey{
+		addr:         p.addr,
+		user:         p.user,
+		passSum:      sha256.Sum256([]byte(p.pass)),
+		tls:          p.tls,
+		allowPrivate: allowPrivate,
 	}
 
-	fail := func(conn *ftp.ServerConn) {
-		if conn != nil {
-			_ = conn.Quit()
+	// dialFresh runs the (cached) SSRF pre-flight and opens on a new session.
+	dialFresh := func() (io.ReadCloser, int64, int64, error) {
+		if err := preflightHost(ctx, p.host, !allowPrivate); err != nil {
+			return nil, -1, 0, fmt.Errorf("ftpstream: %w", err)
 		}
+		return (&ftpSession{key: key}).open(ctx, p, offset, requireSize)
+	}
+
+	s := ftpPoolGet(key)
+	if s == nil {
+		return dialFresh()
+	}
+	rc, size, pos, err := s.open(ctx, p, offset, requireSize)
+	if err != nil && ctx.Err() == nil {
+		logging.For("ftpstream").Debug("pooled ftp session unusable, redialling", "err", err)
+		return dialFresh()
+	}
+	return rc, size, pos, err
+}
+
+// open binds the session to ctx and starts the transfer: connect+login when
+// the session is new, SIZE (cached for seeks, always fresh for offset 0), then
+// RETR (with REST when offset > 0). On any error the session is discarded.
+func (s *ftpSession) open(ctx context.Context, p *ftpParsed, offset int64, requireSize bool) (io.ReadCloser, int64, int64, error) {
+	stop := s.bind(ctx)
+	fail := func(err error) (io.ReadCloser, int64, int64, error) {
 		stop()
-		all.closeAll()
+		s.discard()
+		return nil, -1, 0, err
 	}
 
-	conn, err := ftp.Dial(p.addr, ftp.DialWithDialFunc(dialFunc))
-	if err != nil {
-		fail(nil)
-		return nil, -1, fmt.Errorf("ftpstream: dial %s: %w", p.addr, err)
-	}
-
-	if err := conn.Login(p.user, p.pass); err != nil {
-		fail(conn)
-		return nil, -1, fmt.Errorf("ftpstream: login as %q: %w", p.user, err)
+	if s.conn == nil {
+		if err := s.connect(p); err != nil {
+			return fail(err)
+		}
 	}
 
 	// Best-effort size; -1 when the server does not support SIZE or the command
 	// fails (e.g., the path does not exist — RETR will surface the real error).
-	size := int64(-1)
-	if s, ferr := conn.FileSize(p.path); ferr == nil {
-		size = s
+	sk := ftpSizeKey{addr: p.addr, user: p.user, path: p.path}
+	size, cached := int64(-1), false
+	if offset > 0 {
+		size, cached = ftpSizeGet(sk)
+	}
+	if !cached {
+		size = -1
+		if sz, ferr := s.conn.FileSize(p.path); ferr == nil && sz >= 0 {
+			size = sz
+			ftpSizePut(sk, sz)
+		}
+	}
+	if requireSize && offset > 0 && size < 0 {
+		offset = 0
 	}
 
 	var resp *ftp.Response
+	var err error
 	if offset > 0 {
-		resp, err = conn.RetrFrom(p.path, uint64(offset))
+		resp, err = s.conn.RetrFrom(p.path, uint64(offset))
 	} else {
-		resp, err = conn.Retr(p.path)
+		resp, err = s.conn.Retr(p.path)
 	}
 	if err != nil {
-		fail(conn)
-		return nil, -1, fmt.Errorf("ftpstream: RETR %s: %w", p.path, err)
+		ftpSizeForget(sk)
+		return fail(fmt.Errorf("ftpstream: RETR %s: %w", p.path, err))
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		_ = resp.Close()
-		fail(conn)
-		return nil, -1, fmt.Errorf("ftpstream: %w", cerr)
+		return fail(fmt.Errorf("ftpstream: %w", cerr))
 	}
 
-	return &ftpReadCloser{resp: resp, conn: conn, stop: stop, all: all}, size, nil
+	return &ftpReadCloser{resp: resp, sess: s, stop: stop}, size, offset, nil
 }
 
 // ErrRangeNotSatisfiable is returned (wrapped) by Open when the requested
@@ -397,16 +434,50 @@ func openHTTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, 
 // Supported schemes: ftp, ftps, http, https.
 // The caller must close the returned ReadCloser when done.
 func Open(ctx context.Context, rawURL string, offset int64) (rc io.ReadCloser, size int64, err error) {
+	rc, size, _, err = openAt(ctx, rawURL, offset, false)
+	return rc, size, err
+}
+
+// OpenRanged is Open for callers that can only answer a ranged request when
+// the total size is known (a 206 needs "Content-Range: bytes a-b/total"). It
+// opens at offset when the size is known; when offset > 0 and the size cannot
+// be determined it opens from byte 0 instead and reports that in pos, so the
+// caller serves the full body without a wasted seek-then-reopen. For FTP the
+// size is learned (SIZE) before the transfer starts, so no second open is
+// ever needed; HTTP only learns it from the response and reopens in that
+// rare case.
+//
+// pos is the byte position the returned reader starts at: offset, or 0 on the
+// unknown-size fallback.
+func OpenRanged(ctx context.Context, rawURL string, offset int64) (rc io.ReadCloser, size, pos int64, err error) {
+	return openAt(ctx, rawURL, offset, true)
+}
+
+func openAt(ctx context.Context, rawURL string, offset int64, requireSize bool) (io.ReadCloser, int64, int64, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, -1, fmt.Errorf("ftpstream: parse URL: %w", err)
+		return nil, -1, 0, fmt.Errorf("ftpstream: parse URL: %w", err)
 	}
 	switch u.Scheme {
 	case "ftp", "ftps":
-		return openFTP(ctx, rawURL, offset)
+		return openFTPAt(ctx, rawURL, offset, requireSize)
 	case "http", "https":
-		return openHTTP(ctx, rawURL, offset)
+		rc, size, herr := openHTTP(ctx, rawURL, offset)
+		if herr != nil {
+			return nil, -1, 0, herr
+		}
+		if requireSize && offset > 0 && size < 0 {
+			// No total size => no valid Content-Range; the caller serves
+			// the whole resource, so start over from byte 0.
+			_ = rc.Close()
+			rc, size, herr = openHTTP(ctx, rawURL, 0)
+			if herr != nil {
+				return nil, -1, 0, herr
+			}
+			return rc, size, 0, nil
+		}
+		return rc, size, offset, nil
 	default:
-		return nil, -1, fmt.Errorf("ftpstream: unsupported URL scheme %q", u.Scheme)
+		return nil, -1, 0, fmt.Errorf("ftpstream: unsupported URL scheme %q", u.Scheme)
 	}
 }

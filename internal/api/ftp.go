@@ -132,14 +132,14 @@ func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string)
 		return
 	}
 
-	// Seek to start for the common case (FTP REST / HTTP Range). We don't know
-	// the total size until after Open returns, so we open optimistically and
-	// reopen at 0 if size is unknown — a valid 206 Content-Range requires the
-	// total size, so we must fall back to 200 when it is unavailable.
+	// Seek to the requested start for the common case (FTP REST / HTTP Range).
+	// A valid 206 Content-Range needs the total size, so when the size cannot
+	// be determined OpenRanged opens from byte 0 itself (pos != start) and we
+	// serve a 200 instead — no second open of the resource.
 	rangeHdr := r.Header.Get("Range")
 	start, hasRange := ftpExtractRangeStart(rangeHdr)
 
-	rc, size, err := ftpstream.Open(r.Context(), payload.FtpURL, start)
+	rc, size, pos, err := ftpstream.OpenRanged(r.Context(), payload.FtpURL, start)
 	if errors.Is(err, ftpstream.ErrRangeNotSatisfiable) {
 		http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
@@ -148,19 +148,10 @@ func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string)
 		http.Error(w, "stream open: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	// Range was requested and we seeked ahead, but total size is unknown so a
-	// valid Content-Range header cannot be emitted. Close this connection and
-	// reopen from byte 0; serve 200 instead.
-	if hasRange && size < 0 && start > 0 {
-		_ = rc.Close()
-		rc, size, err = ftpstream.Open(r.Context(), payload.FtpURL, 0)
-		if err != nil {
-			http.Error(w, "stream open: "+err.Error(), http.StatusBadGateway)
-			return
-		}
+	defer func() { _ = rc.Close() }()
+	if pos != start {
 		hasRange = false
 	}
-	defer func() { _ = rc.Close() }()
 
 	hdr := w.Header()
 	hdr.Set("Content-Type", mimeByName(filename))
