@@ -303,12 +303,23 @@ func TestArchiveDestroySession_CancelsVerification(t *testing.T) {
 	archiveSessionsMu.Lock()
 	delete(archiveSessions, key)
 	archiveSessionsMu.Unlock()
-	archiveDestroySession(sess)
+	// The teardown waits for the parked verification to stop before it removes
+	// anything, so it runs beside the test until the gate opens.
+	destroyed := make(chan struct{})
+	go func() {
+		archiveDestroySession(sess)
+		close(destroyed)
+	}()
 	gate.Release()
 	select {
 	case <-v.done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("cancelled verification did not stop")
+	}
+	select {
+	case <-destroyed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("teardown did not finish after the verification stopped")
 	}
 	if !errors.Is(v.err, context.Canceled) {
 		t.Errorf("verification err = %v, want context.Canceled", v.err)

@@ -5,6 +5,13 @@
 // Package archive provides a uniform streaming reader over local archive files
 // (zip, tar, tgz, rar, 7zip). All implementations are pure Go; no cgo or
 // external binaries are required.
+//
+// The zip, tar and tgz Readers keep no OS file handle between reads (see
+// OpenReaderAt): a Reader, a listing, a Locate or an entry stream that is
+// parked in the background never pins the archive, so on Windows — where an
+// open handle blocks deleting or replacing the file — the user's archive and a
+// downloaded temp archive stay removable. The rar and 7zip libraries open the
+// archive themselves and keep it open while an entry is being read.
 package archive
 
 import (
@@ -165,28 +172,24 @@ func normName(s string) string {
 
 // ── zip ──────────────────────────────────────────────────────────────────────
 
-// zipReader owns its *os.File (instead of using zip.OpenReader) so Locate can
-// bounds-check entry extents against the real archive size.
+// zipReader keeps no OS file handle (see OpenReaderAt): the central directory
+// is parsed once, and every Open reads the entry's bytes through a ReaderAt
+// that opens the archive only for the read in progress. A long-running
+// extraction therefore never pins the archive file, and the real archive size
+// is known for Locate to bounds-check entry extents against.
 type zipReader struct {
-	f     *os.File
 	size  int64
 	zr    *zip.Reader
 	index map[string]*zip.File // normName → file; built once in openZip for O(1) Open
 }
 
 func openZip(fpath string) (Reader, error) {
-	f, err := os.Open(fpath)
+	fa, err := newFileAt(fpath)
 	if err != nil {
 		return nil, err
 	}
-	st, err := f.Stat()
+	zr, err := zip.NewReader(fa, fa.size)
 	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	zr, err := zip.NewReader(f, st.Size())
-	if err != nil {
-		_ = f.Close()
 		return nil, err
 	}
 	// Build index once; first-wins matches the previous linear-scan behaviour.
@@ -198,7 +201,7 @@ func openZip(fpath string) (Reader, error) {
 			}
 		}
 	}
-	return &zipReader{f: f, size: st.Size(), zr: zr, index: idx}, nil
+	return &zipReader{size: fa.size, zr: zr, index: idx}, nil
 }
 
 func (r *zipReader) List() ([]Entry, error) {
@@ -253,16 +256,17 @@ func (r *zipReader) Locate(name string) (Extent, bool) {
 	return Extent{Offset: off, Size: size, CRC32: f.CRC32, HasCRC: hasCRC}, true
 }
 
-func (r *zipReader) Close() error { return r.f.Close() }
+func (r *zipReader) Close() error { return nil }
 
 // ── tar / tgz ────────────────────────────────────────────────────────────────
 
-// tarReader re-opens the underlying file on every Open call so that multiple
+// tarReader re-opens the archive on every Open call so that multiple
 // sequential entries can be accessed without state carried between calls.
-// Close is a no-op since no long-lived file handle is kept. The first
-// List/Locate scans the archive once and memoizes the entry list; for a plain
-// (non-gzip) tar it also records each regular entry's data offset, which makes
-// later Open calls O(1) and lets callers serve entries in place (Locator).
+// Close is a no-op since no long-lived file handle is kept — not even while an
+// entry is being read: streams go through OpenReaderAt's per-read handle. The
+// first List/Locate scans the archive once and memoizes the entry list; for a
+// plain (non-gzip) tar it also records each regular entry's data offset, which
+// makes later Open calls O(1) and lets callers serve entries in place (Locator).
 type tarReader struct {
 	fpath string
 	gz    bool // true → decompress with gzip before feeding to tar
@@ -296,37 +300,30 @@ func openTgz(fpath string) (Reader, error) {
 	return &tarReader{fpath: fpath, gz: true}, nil
 }
 
-// seqCloser closes a stack of io.Closers in LIFO order.
-type seqCloser struct {
-	closers []io.Closer
-}
+// noClose is the Close of a stream that owns no OS resource.
+type noClose struct{}
 
-func (sc *seqCloser) Close() error {
-	var last error
-	for i := len(sc.closers) - 1; i >= 0; i-- {
-		if err := sc.closers[i].Close(); err != nil {
-			last = err
-		}
-	}
-	return last
-}
+func (noClose) Close() error { return nil }
 
-// openStream opens the underlying file (and optional gzip layer) and returns a
-// *tar.Reader positioned at the start of the archive.
-func (r *tarReader) openStream() (*tar.Reader, io.Closer, error) {
-	f, err := os.Open(r.fpath)
+// openStream returns a *tar.Reader positioned at the start of the archive,
+// reading through a handle-less ReaderAt (plus a gzip layer for tgz). For a
+// plain tar it also returns the seeker over the raw file: right after
+// tar.Reader.Next the offset is exactly the start of the entry data, because
+// tar.Reader reads header blocks without read-ahead.
+func (r *tarReader) openStream() (*tar.Reader, io.Seeker, io.Closer, error) {
+	fa, err := newFileAt(r.fpath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+	sr := io.NewSectionReader(fa, 0, fa.size)
 	if r.gz {
-		gr, err := gzip.NewReader(f)
+		gr, err := gzip.NewReader(sr)
 		if err != nil {
-			_ = f.Close()
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return tar.NewReader(gr), &seqCloser{closers: []io.Closer{gr, f}}, nil
+		return tar.NewReader(gr), nil, gr, nil
 	}
-	return tar.NewReader(f), f, nil
+	return tar.NewReader(sr), sr, noClose{}, nil
 }
 
 // tarInPlace reports whether hdr describes a regular file whose bytes are laid
@@ -352,21 +349,17 @@ func (r *tarReader) scan() error {
 	if r.scanned {
 		return nil
 	}
-	tr, cl, err := r.openStream()
+	tr, pos, cl, err := r.openStream()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = cl.Close() }()
 
-	// For a plain tar the closer is the *os.File itself; tar.Reader reads
-	// header blocks without read-ahead, so the file offset right after Next()
-	// is exactly the start of the entry data.
-	var pos io.Seeker
+	// pos is non-nil for a plain tar only: gzip-compressed entries have no
+	// addressable plaintext.
 	var extents map[string]Extent
-	if !r.gz {
-		if s, ok := cl.(io.Seeker); ok {
-			pos, extents = s, make(map[string]Extent)
-		}
+	if pos != nil {
+		extents = make(map[string]Extent)
 	}
 	seen := make(map[string]struct{})
 	var out []Entry
@@ -420,7 +413,7 @@ func (r *tarReader) Locate(name string) (Extent, bool) {
 }
 
 // tarEntryReader wraps a tar.Reader positioned at a specific entry and closes
-// the underlying file stack when Close is called.
+// the underlying stream (the gzip layer, for a tgz) when Close is called.
 type tarEntryReader struct {
 	io.Reader
 	closer io.Closer
@@ -428,25 +421,25 @@ type tarEntryReader struct {
 
 func (t *tarEntryReader) Close() error { return t.closer.Close() }
 
-// sectionReadCloser is an io.SectionReader that closes its backing file.
+// sectionReadCloser is an io.SectionReader over a handle-less ReaderAt: there
+// is nothing to close.
 type sectionReadCloser struct {
 	*io.SectionReader
-	closer io.Closer
 }
 
-func (s *sectionReadCloser) Close() error { return s.closer.Close() }
+func (s *sectionReadCloser) Close() error { return nil }
 
 func (r *tarReader) Open(name string) (io.ReadCloser, error) {
 	// Once the archive has been scanned, a plain tar entry is addressable in
 	// place: skip the sequential walk and read the section directly.
 	if ext, ok := r.cachedExtent(name); ok {
-		f, err := os.Open(r.fpath)
+		fa, err := newFileAt(r.fpath)
 		if err != nil {
 			return nil, err
 		}
-		return &sectionReadCloser{SectionReader: io.NewSectionReader(f, ext.Offset, ext.Size), closer: f}, nil
+		return &sectionReadCloser{SectionReader: io.NewSectionReader(fa, ext.Offset, ext.Size)}, nil
 	}
-	tr, cl, err := r.openStream()
+	tr, _, cl, err := r.openStream()
 	if err != nil {
 		return nil, err
 	}

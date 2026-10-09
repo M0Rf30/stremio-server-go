@@ -407,10 +407,12 @@ func TestArchiveCreate_LocalFileChangeRebuilds(t *testing.T) {
 		t.Error("changed size did not rebuild the session")
 	}
 
-	// The file disappears: create fails as it always did.
-	if err := os.Remove(p); err != nil {
-		t.Fatal(err)
-	}
+	// The file disappears: create fails as it always did. The server keeps no
+	// handle on a local archive, but the last request may still be finishing
+	// (and its extraction winding down): on Windows a delete races with that,
+	// so let it settle first.
+	progWaitFlights(t, s5)
+	archRemoveEventually(t, p)
 	if _, st := archReuseCreate(t, srv.URL, "zip", key, payload); st != http.StatusBadRequest {
 		t.Errorf("create for a vanished local archive: status %d, want 400", st)
 	}
