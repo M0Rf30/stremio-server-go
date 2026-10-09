@@ -167,3 +167,18 @@ func TestHlsRewriteMediaAudio(t *testing.T) {
 		t.Errorf("GROUP-ID attribute removed:\n%s", got)
 	}
 }
+
+// TestHlsRewriteMediaNoExtension: rendition URIs without ".m3u8" (e.g.
+// /playlist/1?type=audio) are still media playlists and must use the HLS
+// endpoint, otherwise their keys/segments are never rewritten.
+func TestHlsRewriteMediaNoExtension(t *testing.T) {
+	h := hlsNewHandler()
+	r := httptest.NewRequest("GET", "/proxy/hls/manifest.m3u8", nil)
+	opts := hlsNewOpts()
+	playlist := "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",URI=\"/playlist/1?type=audio&rendition=ita\"\n" +
+		"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=1,URI=\"/playlist/1?type=iframe\"\n"
+	got := hlsRewrite(h, r, opts, playlist)
+	if strings.Contains(got, "/proxy/stream?") || strings.Count(got, "/proxy/hls/manifest.m3u8?d=") != 2 {
+		t.Errorf("extension-less rendition URIs not routed via hls:\n%s", got)
+	}
+}
