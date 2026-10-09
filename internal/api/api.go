@@ -2113,16 +2113,20 @@ func buildStreamProxyConfig(cfg types.Config, client *http.Client) streamproxy.C
 	}
 
 	return streamproxy.Config{
-		Password:       cfg.ProxyPassword,
-		Secret:         secret,
-		IPACL:          ipACL,
-		Prebuffer:      cfg.ProxyPrebuffer,
-		SegCacheTTL:    time.Duration(cfg.ProxySegCacheTTL) * time.Second,
-		PublicURL:      cfg.ProxyPublicURL,
-		Client:         client,
-		UpstreamProxy:  cfg.ProxyUpstream,
-		BlockPrivate:   !proxyAllowPrivate(),
-		TrustedProxies: parseTrustedProxies(os.Getenv("STREMIO_TRUSTED_PROXIES")),
+		Password:         cfg.ProxyPassword,
+		Secret:           secret,
+		IPACL:            ipACL,
+		Prebuffer:        cfg.ProxyPrebuffer,
+		SegCacheTTL:      time.Duration(cfg.ProxySegCacheTTL) * time.Second,
+		PublicURL:        cfg.ProxyPublicURL,
+		Client:           client,
+		UpstreamProxy:    cfg.ProxyUpstream,
+		BlockPrivate:     !proxyAllowPrivate(),
+		TrustedProxies:   parseTrustedProxies(os.Getenv("STREMIO_TRUSTED_PROXIES")),
+		AppPath:          cfg.AppPath,
+		ExtractorsFile:   cfg.ExtractorsFile,
+		ExtractorsURL:    cfg.ExtractorsURL,
+		ExtractorsPubKey: cfg.ExtractorsPubKey,
 	}
 }
 

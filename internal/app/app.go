@@ -137,6 +137,9 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		ProxySegCacheTTL:    envInt(lookup, "STREMIO_PROXY_SEG_CACHE_TTL", 300),
 		ProxyPublicURL:      proxyPublicURL,
 		ProxyUpstream:       getenv(lookup, "STREMIO_PROXY_UPSTREAM", ""),
+		ExtractorsFile:      getenv(lookup, "STREMIO_EXTRACTORS_FILE", ""),
+		ExtractorsURL:       optionalURL(lookup, "STREMIO_EXTRACTORS_URL"), // remote extractor definitions; "" / off disables
+		ExtractorsPubKey:    getenv(lookup, "STREMIO_EXTRACTORS_PUBKEY", ""),
 		BitmagnetURL:        getenv(lookup, "STREMIO_BITMAGNET_URL", ""),
 		TorznabURL:          getenv(lookup, "STREMIO_TORZNAB_URL", ""),
 		TorznabAPIKey:       getenv(lookup, "STREMIO_TORZNAB_APIKEY", ""),
