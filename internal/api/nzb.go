@@ -23,7 +23,10 @@
 //	                         wait for the whole file)
 //
 // Sessions expire after 1 hour of inactivity; extracted temp files are removed
-// by a background janitor started lazily on first create.
+// by a background janitor started lazily on first create. Re-creating an
+// existing key replaces its session; a replaced session that a response is
+// still streaming from lives on until that response ends, so players that
+// re-request the create URL on every open/seek never cut off a playing stream.
 package api
 
 import (
@@ -72,6 +75,11 @@ type nzbFileState struct {
 	path    string        // temp file backing asm
 	started time.Time     // stable Last-Modified while the file fills up
 	restart int           // how many times a failed assembly was restarted
+
+	// closed is closed once the temp file of asm — and of every assembly this
+	// state ran before it — has been closed. discard waits on it so the
+	// directory is never deleted under an open file (Windows refuses that).
+	closed chan struct{}
 }
 
 // nzbSession holds all state for one NZB streaming session.
@@ -84,6 +92,11 @@ type nzbSession struct {
 	lastAccess time.Time
 	refCount   int // in-flight requests; >0 blocks eviction (guarded by nzbSessionsMu)
 
+	// closeFile closes an assembly's temp file; nil means (*os.File).Close.
+	// It is a test seam for asserting close-before-delete ordering; tests
+	// set it under nzbSessionsMu before the session's first request.
+	closeFile func(*os.File) error
+
 	mu         sync.Mutex
 	fileStates map[string]*nzbFileState // file Name → assembly state
 }
@@ -92,6 +105,12 @@ var (
 	nzbSessionsMu  sync.Mutex
 	nzbSessions    = map[string]*nzbSession{}
 	nzbJanitorOnce sync.Once
+
+	// nzbOrphans holds sessions that were replaced under their key while a
+	// request was still reading from them (guarded by nzbSessionsMu). They are
+	// no longer reachable through nzbSessions, so the last request to finish
+	// discards them (nzbRelease) instead of eviction or replacement.
+	nzbOrphans = map[*nzbSession]struct{}{}
 )
 
 func nzbStartJanitor() {
@@ -121,10 +140,44 @@ func nzbSweepStale(root string) {
 	for _, sess := range nzbSessions {
 		live[sess.tmpDir] = struct{}{}
 	}
+	for sess := range nzbOrphans {
+		live[sess.tmpDir] = struct{}{}
+	}
 	nzbSessionsMu.Unlock()
 	sweepStaleTemp(root, live, time.Hour, func(e os.DirEntry) bool {
 		return e.IsDir() && strings.HasPrefix(e.Name(), nzbTmpDirPrefix)
 	})
+}
+
+// nzbRetire is called, under nzbSessionsMu, for a session that has just been
+// replaced under its key. A session no request is reading from is returned
+// for immediate discard; one that is still streaming is parked in nzbOrphans
+// (and nil is returned) so its assembly keeps feeding those responses until
+// the last of them finishes — cancelling it now would truncate a playing
+// stream, and players re-request the create URL on every open/seek.
+func nzbRetire(old *nzbSession) *nzbSession {
+	if old.refCount > 0 {
+		nzbOrphans[old] = struct{}{}
+		return nil
+	}
+	return old
+}
+
+// nzbRelease drops one in-flight request from sess. The last request to leave
+// an orphaned session discards it, in the background so the (already
+// complete) response is not held up by the teardown.
+func nzbRelease(sess *nzbSession) {
+	nzbSessionsMu.Lock()
+	sess.refCount--
+	_, orphan := nzbOrphans[sess]
+	last := orphan && sess.refCount == 0
+	if last {
+		delete(nzbOrphans, sess)
+	}
+	nzbSessionsMu.Unlock()
+	if last {
+		go sess.discard()
+	}
 }
 
 // nzbEvictIdle removes sessions that have not been accessed in the last hour
@@ -161,19 +214,36 @@ func (sess *nzbSession) discard() {
 
 	for _, fs := range states {
 		fs.mu.Lock()
-		asm := fs.asm
+		asm, closed := fs.asm, fs.closed
 		fs.mu.Unlock()
 		if asm == nil {
 			continue
 		}
 		asm.Cancel()
-		select {
-		case <-asm.Done():
-		case <-time.After(5 * time.Second):
-		}
+		waitBounded(asm.Done(), nzbDiscardWait)
+		// Done only says the workers are gone: the temp file is closed by a
+		// separate goroutine, and an open file cannot be deleted on Windows.
+		waitBounded(closed, nzbDiscardWait)
 	}
 	if sess.tmpDir != "" {
 		_ = os.RemoveAll(sess.tmpDir)
+	}
+}
+
+// nzbDiscardWait bounds how long discard waits for one assembly's workers
+// (and then its temp file) to wind down before deleting the directory anyway.
+const nzbDiscardWait = 5 * time.Second
+
+// waitBounded waits for ch to close, for at most d.
+func waitBounded(ch <-chan struct{}, d time.Duration) {
+	if ch == nil {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ch:
+	case <-t.C:
 	}
 }
 
@@ -371,12 +441,19 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 	}
 
 	nzbSessionsMu.Lock()
-	// Evict any previous session under the same key.
+	// Retire any previous session under the same key. One that a response is
+	// still streaming from is kept alive until that response finishes
+	// (nzbRetire/nzbRelease): discarding it now would cancel the assembly
+	// mid-stream and truncate the playing file.
+	var discard *nzbSession
 	if old, ok := nzbSessions[key]; ok {
-		go old.discard()
+		discard = nzbRetire(old)
 	}
 	nzbSessions[key] = sess
 	nzbSessionsMu.Unlock()
+	if discard != nil {
+		go discard.discard()
+	}
 
 	if r.Method == http.MethodPost {
 		writeJSON(w, http.StatusOK, map[string]any{"key": key})
@@ -484,11 +561,7 @@ func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string)
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
 		return
 	}
-	defer func() {
-		nzbSessionsMu.Lock()
-		sess.refCount--
-		nzbSessionsMu.Unlock()
-	}()
+	defer nzbRelease(sess)
 
 	files := sess.files
 	if len(files) == 0 {
@@ -608,13 +681,30 @@ func (fs *nzbFileState) ensure(sess *nzbSession, target *nzb.File, fileIdx int) 
 		_ = os.Remove(tmpPath)
 		return nil, "", time.Time{}, fmt.Errorf("nzb assemble: %w", err)
 	}
+	// Close the temp file once the workers are gone, then announce it:
+	// discard waits on closed before deleting the directory. prev chains the
+	// files of earlier (failed, restarted) assemblies so closed means all of
+	// them are closed.
+	prev, closed := fs.closed, make(chan struct{})
 	go func() {
 		<-asm.Done()
-		_ = f.Close()
+		_ = sess.closeTemp(f)
+		if prev != nil {
+			<-prev
+		}
+		close(closed)
 	}()
 
-	fs.asm, fs.path, fs.started = asm, tmpPath, time.Now()
+	fs.asm, fs.path, fs.started, fs.closed = asm, tmpPath, time.Now(), closed
 	return fs.asm, fs.path, fs.started, nil
+}
+
+// closeTemp closes one of the session's assembly temp files.
+func (sess *nzbSession) closeTemp(f *os.File) error {
+	if sess.closeFile != nil {
+		return sess.closeFile(f)
+	}
+	return f.Close()
 }
 
 // nzbProgressiveFile is the io.ReadSeeker http.ServeContent reads while the
