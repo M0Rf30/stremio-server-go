@@ -295,7 +295,7 @@ func sideEffectingRoute(r *http.Request) bool {
 		return len(seg) >= 2 && seg[1] == "create"
 	case "hlsv2":
 		return strings.Contains(r.URL.Path, "probe")
-	case "proxy", "yt":
+	case "proxy", "yt", "extractor":
 		// <video>/<audio>/<track> loads of these are legitimate cross-site
 		// (stremio-web); any other destination is an attack vector.
 		switch strings.ToLower(r.Header.Get("Sec-Fetch-Dest")) {
@@ -316,7 +316,7 @@ func mediaRoute(r *http.Request) bool {
 		return len(seg) >= 2 && seg[1] != "create" && seg[1] != "remove"
 	}
 	switch first {
-	case "stream", "hlsv2", "yt", "proxy", "base64":
+	case "stream", "hlsv2", "yt", "proxy", "base64", "extractor":
 		return true
 	case "zip", "rar", "7zip", "tar", "tgz":
 		return len(seg) >= 2 && seg[1] == "stream"
@@ -705,6 +705,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleProxy(w, r, seg)
 	case "base64":
 		s.sp.HandleBase64(w, r, splitEncodedPath(r))
+	case "extractor":
+		s.sp.HandleExtractor(w, r, splitEncodedPath(r))
 	// /list — active infohash array handled above (single-segment hot path)
 	// /stream/:infoHash/:fileIdx — alias to /:infoHash/:fileIdx
 	case "stream":
