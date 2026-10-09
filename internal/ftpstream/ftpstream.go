@@ -157,10 +157,19 @@ var ftpIdleTimeout = 30 * time.Second
 // ftpDialTimeout bounds the TCP connect of each FTP control/data connection.
 const ftpDialTimeout = 10 * time.Second
 
+// ftpAbortGrace bounds the read of the server's final reply to a transfer
+// whose request context was cancelled (an aborted range request). The context
+// can no longer bound the read, so a short grace does: long enough for a
+// healthy server to notice the dropped data connection and answer (426/226),
+// short enough that a stalled one cannot hold the handler. It is a variable so
+// tests can shorten it.
+var ftpAbortGrace = 2 * time.Second
+
 // deadlineConn re-arms a per-operation deadline before every Read and Write so
 // a stalling server cannot block the caller forever. The deadline is the
-// earlier of now+idle and the deadline of the request context the session is
-// currently leased to (when it has one).
+// earliest of now+idle, the deadline of the request context the session is
+// currently leased to (when it has one) and, while a cancelled transfer is
+// being settled, the short abort grace that replaces the dead context's.
 type deadlineConn struct {
 	net.Conn
 	idle time.Duration
@@ -169,10 +178,27 @@ type deadlineConn struct {
 
 func (c *deadlineConn) arm() {
 	dl := time.Now().Add(c.idle)
-	if l := c.sess.lease.Load(); l != nil && !l.ctxDL.IsZero() && l.ctxDL.Before(dl) {
-		dl = l.ctxDL
+	if l := c.sess.lease.Load(); l != nil {
+		bound := l.ctxDL
+		if st := l.settleDL.Load(); st != 0 {
+			bound = time.Unix(0, st)
+		}
+		if !bound.IsZero() && bound.Before(dl) {
+			dl = bound
+		}
 	}
 	_ = c.SetDeadline(dl)
+}
+
+// Close closes the wrapped connection. One the session's cancel hook already
+// force-closed is not an error: otherwise ftp.Response.Close would report the
+// double close next to the server's final reply and hide that reply from
+// ftpReplySynced.
+func (c *deadlineConn) Close() error {
+	if err := c.Conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 func (c *deadlineConn) Read(p []byte) (int, error) {
@@ -216,6 +242,13 @@ func (t *ftpConns) closeAll() {
 	t.conns = nil
 }
 
+// isClosed reports whether closeAll ran.
+func (t *ftpConns) isClosed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed
+}
+
 // ftpReadCloser wraps an FTP data response and the session it was opened on.
 // Close drains the data response and, when the control connection is provably
 // still in sync, parks the session in the idle pool for the next request
@@ -234,13 +267,22 @@ func (f *ftpReadCloser) Read(p []byte) (int, error) {
 }
 
 // Close is idempotent: the session must be released exactly once.
+//
+// stop reports false when the ctx hook already fired (or is firing), i.e. the
+// request was aborted mid-transfer — the usual way a player seeks. The hook
+// then closed only the data connection (see bind), so the control connection
+// is intact and the session still poolable: the server's reply to the
+// abandoned transfer is read, within ftpAbortGrace rather than the dead
+// request context, and the session is parked when that reply proves the
+// control connection in sync. Anything else — no reply in time, a transport
+// error, a preliminary or 421 reply, a closed control connection — discards.
 func (f *ftpReadCloser) Close() error {
 	f.once.Do(func() {
-		// stopped is false when the ctx hook already fired (or is firing):
-		// every connection of the session was force-closed.
-		stopped := f.stop()
+		if !f.stop() {
+			f.sess.settle(ftpAbortGrace)
+		}
 		f.err = f.resp.Close()
-		if stopped && ftpReplySynced(f.err) {
+		if ftpReplySynced(f.err) && !f.sess.ctl.isClosed() {
 			ftpPoolPut(f.sess)
 		} else {
 			f.sess.discard()
@@ -265,7 +307,9 @@ func openFTP(ctx context.Context, rawURL string, offset int64) (io.ReadCloser, i
 // (ftpIdleTimeout) and is force-closed when ctx is cancelled, so neither a
 // stalling server nor a disconnected client can pin the goroutine and the FTP
 // session. A reused connection that turns out stale (server idle timeout,
-// restart) is discarded and the open retried once on a fresh connection.
+// restart, 421) is discarded and the open retried once on a fresh connection;
+// a healthy session that merely met a refusal (see ftpSessionHealthy) is
+// returned to the pool and the refusal reported as is.
 func openFTPAt(ctx context.Context, rawURL string, offset int64, requireSize bool) (io.ReadCloser, int64, int64, error) {
 	p, err := parseFTPURL(rawURL)
 	if err != nil {
@@ -293,7 +337,7 @@ func openFTPAt(ctx context.Context, rawURL string, offset int64, requireSize boo
 		return dialFresh()
 	}
 	rc, size, pos, err := s.open(ctx, p, offset, requireSize)
-	if err != nil && ctx.Err() == nil {
+	if err != nil && ctx.Err() == nil && !ftpSessionHealthy(err) {
 		logging.For("ftpstream").Debug("pooled ftp session unusable, redialling", "err", err)
 		return dialFresh()
 	}
@@ -302,12 +346,24 @@ func openFTPAt(ctx context.Context, rawURL string, offset int64, requireSize boo
 
 // open binds the session to ctx and starts the transfer: connect+login when
 // the session is new, SIZE (cached for seeks, always fresh for offset 0), then
-// RETR (with REST when offset > 0). On any error the session is discarded.
+// RETR (with REST when offset > 0). On any error the session is discarded,
+// except when the server merely refused the transfer and the session is
+// provably healthy (ftpSessionHealthy): it then goes back to the pool.
 func (s *ftpSession) open(ctx context.Context, p *ftpParsed, offset int64, requireSize bool) (io.ReadCloser, int64, int64, error) {
 	stop := s.bind(ctx)
 	fail := func(err error) (io.ReadCloser, int64, int64, error) {
 		stop()
 		s.discard()
+		return nil, -1, 0, err
+	}
+	// refused ends the open on a failure that left the control connection in
+	// sync. stop reports false when ctx fired first, which closed it.
+	refused := func(err error) (io.ReadCloser, int64, int64, error) {
+		if stop() {
+			ftpPoolPut(s)
+		} else {
+			s.discard()
+		}
 		return nil, -1, 0, err
 	}
 
@@ -344,13 +400,24 @@ func (s *ftpSession) open(ctx context.Context, p *ftpParsed, offset int64, requi
 	}
 	if err != nil {
 		ftpSizeForget(sk)
-		return fail(fmt.Errorf("ftpstream: RETR %s: %w", p.path, err))
+		err = fmt.Errorf("ftpstream: RETR %s: %w", p.path, err)
+		if ftpSessionHealthy(err) {
+			return refused(err)
+		}
+		return fail(err)
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		_ = resp.Close()
 		return fail(fmt.Errorf("ftpstream: %w", cerr))
 	}
 
+	// From here no control-connection read is pending until Close: a ctx
+	// cancel need only tear down the data connection. beginTransfer loses
+	// only to a hook that already closed the control connection.
+	if !s.beginTransfer() {
+		_ = resp.Close()
+		return fail(fmt.Errorf("ftpstream: %w", ctx.Err()))
+	}
 	return &ftpReadCloser{resp: resp, sess: s, stop: stop}, size, offset, nil
 }
 
