@@ -17,16 +17,21 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	lzstring "github.com/daku10/go-lz-string"
 )
 
 // apiFakeFTP is a minimal loopback FTP server (login, SIZE, EPSV, REST, RETR)
 // that counts what the /ftp handler cost it. noSize makes SIZE fail with 502.
+// hold > 0 makes RETR send only the first hold bytes and then stall, as a
+// flow-controlled transfer does, until the client drops the data connection
+// (answered with 426).
 type apiFakeFTP struct {
 	ln      net.Listener
 	content []byte
 	noSize  bool
+	hold    atomic.Int64
 
 	conns, logins, sizes, rests, retrs atomic.Int64
 }
@@ -119,6 +124,14 @@ func (f *apiFakeFTP) serve(c net.Conn, done <-chan struct{}) {
 			}
 			body := f.content[off:]
 			restOff = 0
+			if hold := int(f.hold.Load()); hold > 0 && len(body) > hold {
+				go func() { <-done; _ = dc.Close() }()
+				_, _ = dc.Write(body[:hold])
+				_, _ = io.Copy(io.Discard, dc) // returns when the client drops the data connection
+				_ = dc.Close()
+				w("426 transfer aborted")
+				continue
+			}
 			_, werr := dc.Write(body)
 			_ = dc.Close()
 			if werr != nil {
@@ -181,6 +194,68 @@ func TestHandlerFTP_SequentialRangesReuseSession(t *testing.T) {
 	}
 	if srv.sizes.Load() != 1 {
 		t.Errorf("SIZE commands = %d; want 1 (cached for seeks)", srv.sizes.Load())
+	}
+	if srv.retrs.Load() != int64(len(starts)) {
+		t.Errorf("RETR = %d; want %d", srv.retrs.Load(), len(starts))
+	}
+}
+
+// TestHandlerFTP_AbortedRangesReuseSession is the seek pattern over real HTTP:
+// each ranged GET is abandoned by the client after a few KiB (the player
+// seeks again), which cancels the request context mid-transfer. Every abort
+// used to throw the logged-in control connection away (N aborts = N logins);
+// the aborted transfers must now share one session.
+func TestHandlerFTP_AbortedRangesReuseSession(t *testing.T) {
+	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	data := make([]byte, 1<<20)
+	for i := range data {
+		data[i] = byte('a' + i%26)
+	}
+	srv := newAPIFakeFTP(t, data, false)
+	srv.hold.Store(64 << 10)
+	h := newHandler(t)
+	handled := make(chan struct{}, 1)
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { handled <- struct{}{} }()
+		h.ServeHTTP(w, r)
+	}))
+	defer hs.Close()
+	target := hs.URL + ftpLZPath(t, "ftp://"+srv.ln.Addr().String()+"/video.mkv")
+
+	starts := []int{0, 400000, 100, 900000, 5000}
+	const first = 4096
+	for _, s := range starts {
+		req, err := http.NewRequest(http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", s))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("start=%d: %v", s, err)
+		}
+		if resp.StatusCode != http.StatusPartialContent {
+			t.Fatalf("start=%d status = %d; want 206", s, resp.StatusCode)
+		}
+		got := make([]byte, first)
+		if _, err := io.ReadFull(resp.Body, got); err != nil {
+			t.Fatalf("start=%d read: %v", s, err)
+		}
+		if !bytes.Equal(got, data[s:s+first]) {
+			t.Fatalf("start=%d body mismatch", s)
+		}
+		_ = resp.Body.Close() // the client abandons the range mid-body
+		select {
+		case <-handled:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("start=%d: handler still running after the client disconnected", s)
+		}
+	}
+	t.Logf("aborted requests=%d control_conns=%d logins=%d size_cmds=%d retr=%d",
+		len(starts), srv.conns.Load(), srv.logins.Load(), srv.sizes.Load(), srv.retrs.Load())
+	if srv.conns.Load() != 1 || srv.logins.Load() != 1 {
+		t.Errorf("control conns = %d, logins = %d; want 1 and 1 for %d aborted requests",
+			srv.conns.Load(), srv.logins.Load(), len(starts))
 	}
 	if srv.retrs.Load() != int64(len(starts)) {
 		t.Errorf("RETR = %d; want %d", srv.retrs.Load(), len(starts))

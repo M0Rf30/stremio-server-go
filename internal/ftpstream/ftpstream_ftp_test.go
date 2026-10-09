@@ -35,8 +35,18 @@ type fakeFTPServer struct {
 	content []byte
 	done    chan struct{}
 
+	// retrReply, when set, is sent (instead of serving a transfer) in answer
+	// to every RETR — e.g. "550 no such file". A "421 ..." reply also drops
+	// the control connection, as a server closing on the client does.
+	retrReply atomic.Pointer[string]
+	// epsvPort, when non-zero, is advertised by EPSV instead of the port of
+	// the real data listener (e.g. a closed port, so the data dial fails).
+	epsvPort atomic.Int64
+
 	// Counters (control connections accepted, PASS, SIZE, REST, RETR, QUIT).
 	conns, logins, sizes, rests, retrs, quits atomic.Int64
+	// completed counts transfers the server finished writing (226 sent).
+	completed atomic.Int64
 
 	ctlMu sync.Mutex
 	ctl   []net.Conn
@@ -140,7 +150,10 @@ func (f *fakeFTPServer) serve(c net.Conn) {
 				w("425 no data")
 				continue
 			}
-			port := dataLn.Addr().(*net.TCPAddr).Port
+			port := int64(dataLn.Addr().(*net.TCPAddr).Port)
+			if o := f.epsvPort.Load(); o != 0 {
+				port = o
+			}
 			w(fmt.Sprintf("229 Entering Extended Passive Mode (|||%d|)", port))
 		case "REST":
 			f.rests.Add(1)
@@ -148,6 +161,13 @@ func (f *fakeFTPServer) serve(c net.Conn) {
 			w("350 ok")
 		case "RETR":
 			f.retrs.Add(1)
+			if reply := f.retrReply.Load(); reply != nil {
+				w(*reply)
+				if strings.HasPrefix(*reply, "421") {
+					return
+				}
+				continue
+			}
 			if dataLn == nil {
 				w("425 no data")
 				continue
@@ -172,6 +192,7 @@ func (f *fakeFTPServer) serve(c net.Conn) {
 				w("426 transfer aborted")
 				continue
 			}
+			f.completed.Add(1)
 			w("226 done")
 		case "QUIT":
 			f.quits.Add(1)
@@ -230,6 +251,7 @@ func TestOpenFTPReadsContent(t *testing.T) {
 
 func TestOpenFTPCtxCancelUnblocksRead(t *testing.T) {
 	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	setAbortGrace(t, 100*time.Millisecond)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: []byte("abcdef"), stallData: true})
 
 	ctx, cancel := context.WithCancel(t.Context())

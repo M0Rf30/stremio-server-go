@@ -344,10 +344,13 @@ func TestOpenFTPPoolTTLEvicts(t *testing.T) {
 }
 
 // TestOpenFTPCtxCancelNotPooled verifies a session whose request context was
-// cancelled mid-transfer is torn down, never parked for reuse.
+// cancelled mid-transfer against a server that never answers the abandoned
+// transfer is torn down, never parked for reuse — and that Close waits for
+// that reply only for the short abort grace, not the idle timeout.
 func TestOpenFTPCtxCancelNotPooled(t *testing.T) {
 	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
+	setAbortGrace(t, 100*time.Millisecond)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: []byte("abcdef"), stallData: true})
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -361,7 +364,11 @@ func TestOpenFTPCtxCancelNotPooled(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancel()
+	start := time.Now()
 	_ = rc.Close()
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("Close took %v after cancel; want about the abort grace, not the idle timeout", d)
+	}
 	if poolIdle() != 0 {
 		t.Errorf("idle after cancelled transfer = %d, want 0", poolIdle())
 	}
