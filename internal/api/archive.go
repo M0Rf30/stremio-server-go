@@ -63,6 +63,7 @@ type archiveSession struct {
 	created       time.Time
 	lastAccess    time.Time
 	refCount      int                              // in-flight requests; >0 blocks eviction (guarded by mu)
+	retired       bool                             // key re-created while refCount>0; the last release destroys the session (guarded by mu)
 	extracted     map[string]string                // entry name → fully extracted temp file path (cache)
 	extractedSize map[string]int64                 // entry name → bytes of the extracted file (guarded by mu)
 	inflight      map[string]*archiveExtractFlight // entry name → in-progress extraction (guarded by mu)
@@ -73,16 +74,23 @@ type archiveSession struct {
 }
 
 // archiveDirect caches whether one entry can be served in place from the
-// archive file, and where its bytes are.
+// archive file, where its bytes are, and (stored zip entries) the state of the
+// CRC-32 verification of those bytes.
 type archiveDirect struct {
 	ext archive.Extent
 	ok  bool
+	v   *archiveVerify // nil when the archive records no checksum for the entry (tar)
 }
 
 var (
 	archiveSessions    = map[string]*archiveSession{}
 	archiveSessionsMu  sync.Mutex
 	archiveJanitorOnce sync.Once
+	// archiveRetired holds sessions whose key was re-created while requests were
+	// still reading them: out of archiveSessions (nothing new can reach them) but
+	// alive until their last release(). The sweeper must not reap their temp
+	// files and the byte cap still counts them. Guarded by archiveSessionsMu.
+	archiveRetired = map[*archiveSession]struct{}{}
 )
 
 const archiveSessionTTL = time.Hour
@@ -154,11 +162,17 @@ const (
 func archiveSweepStale(root string) {
 	live := map[string]struct{}{}
 	archiveSessionsMu.Lock()
-	for _, sess := range archiveSessions {
+	markLive := func(sess *archiveSession) {
 		sess.mu.Lock()
 		live[sess.tmpDir] = struct{}{}
 		live[sess.archivePath] = struct{}{}
 		sess.mu.Unlock()
+	}
+	for _, sess := range archiveSessions {
+		markLive(sess)
+	}
+	for sess := range archiveRetired { // replaced, but still being read
+		markLive(sess)
 	}
 	archiveSessionsMu.Unlock()
 	sweepStaleTemp(root, live, archiveSessionTTL, func(e os.DirEntry) bool {
@@ -219,13 +233,20 @@ func archiveEvict() {
 }
 
 // archiveDestroySession cancels the session's background extractions and
-// removes its temp dir (and, when it owns it, the downloaded archive). The
-// caller must already have unregistered the session.
+// verifications and removes its temp dir (and, when it owns it, the downloaded
+// archive). The caller must already have unregistered the session, and no
+// request may still be reading it (see archiveRetireLocked).
 func archiveDestroySession(sess *archiveSession) {
 	sess.mu.Lock()
 	flights := make([]*archiveExtractFlight, 0, len(sess.inflight))
 	for _, fl := range sess.inflight {
 		flights = append(flights, fl)
+	}
+	var verifies []*archiveVerify
+	for _, d := range sess.direct {
+		if d.v != nil {
+			verifies = append(verifies, d.v)
+		}
 	}
 	tmpDir, archPath, isTmp := sess.tmpDir, sess.archivePath, sess.isTempArch
 	sess.mu.Unlock()
@@ -235,10 +256,32 @@ func archiveDestroySession(sess *archiveSession) {
 			fl.cancel()
 		}
 	}
+	for _, v := range verifies {
+		v.cancel()
+	}
 	_ = os.RemoveAll(tmpDir)
 	if isTmp {
 		_ = os.Remove(archPath)
 	}
+}
+
+// archiveRetireLocked unregisters s's key for good after the key was re-created
+// (the caller has already replaced the map entry under archiveSessionsMu, which
+// it holds). A session no request is reading is returned as destroyNow: the
+// caller destroys it. One that is being read — typically a progressive/ranged
+// stream whose player re-requests /{ext}/create/{key} on every open or seek —
+// is only marked retired: destroying it now would cancel the extraction those
+// readers depend on and cut their response mid-body. Its last release() destroys
+// it, so nothing leaks and nothing new can reach it (it is out of the map).
+func archiveRetireLocked(s *archiveSession) (destroyNow bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.refCount == 0 {
+		return true
+	}
+	s.retired = true
+	archiveRetired[s] = struct{}{}
+	return false
 }
 
 // tempBytesLocked is the disk the session holds or has reserved: the
@@ -262,6 +305,13 @@ func (s *archiveSession) tempBytesLocked() int64 {
 // archiveEnforceCaps drops least-recently-used idle sessions until the global
 // session-count and temp-byte caps hold again. keep (the session being created
 // or extracted for) and any session with in-flight requests are never evicted.
+//
+// Eviction only happens where it helps the cap that is exceeded. A session
+// that holds no bytes (served in place, or a local-path archive) is never
+// evicted for the byte cap; and when even dropping every idle session could not
+// bring the total under the byte cap — the overage belongs to the kept,
+// in-use or retired sessions — nothing is evicted for it, since that would only
+// 404 other users' next Range request without freeing the disk that matters.
 func archiveEnforceCaps(keep *archiveSession) {
 	type candidate struct {
 		key   string
@@ -270,8 +320,9 @@ func archiveEnforceCaps(keep *archiveSession) {
 		bytes int64
 	}
 	var (
-		cands []candidate
-		total int64
+		cands     []candidate
+		total     int64
+		candBytes int64 // what evicting every candidate would free
 	)
 	archiveSessionsMu.Lock()
 	count := len(archiveSessions)
@@ -281,7 +332,13 @@ func archiveEnforceCaps(keep *archiveSession) {
 		total += b
 		if s != keep && s.refCount == 0 {
 			cands = append(cands, candidate{key: k, sess: s, last: s.lastAccess, bytes: b})
+			candBytes += b
 		}
+		s.mu.Unlock()
+	}
+	for s := range archiveRetired { // replaced sessions still being read hold disk too
+		s.mu.Lock()
+		total += s.tempBytesLocked()
 		s.mu.Unlock()
 	}
 	if count <= archiveMaxSessions && total <= archiveMaxTempBytes {
@@ -289,11 +346,17 @@ func archiveEnforceCaps(keep *archiveSession) {
 		return
 	}
 	slices.SortFunc(cands, func(a, b candidate) int { return a.last.Compare(b.last) })
+	byteCapReachable := total-candBytes <= archiveMaxTempBytes
 	var victims []*archiveSession
 	var freed int64
 	for _, c := range cands {
-		if count <= archiveMaxSessions && total <= archiveMaxTempBytes {
+		overCount := count > archiveMaxSessions
+		overBytes := byteCapReachable && total > archiveMaxTempBytes
+		if !overCount && !overBytes {
 			break
+		}
+		if !overCount && c.bytes == 0 {
+			continue // frees nothing towards the byte cap
 		}
 		delete(archiveSessions, c.key)
 		victims = append(victims, c.sess)
@@ -330,10 +393,20 @@ func archiveAcquireSession(key string) *archiveSession {
 	return sess
 }
 
+// release drops the pin taken by archiveAcquireSession. The last release of a
+// retired session (its key was re-created while requests were reading it)
+// destroys it.
 func (s *archiveSession) release() {
 	s.mu.Lock()
 	s.refCount--
+	last := s.retired && s.refCount == 0
 	s.mu.Unlock()
+	if last {
+		archiveSessionsMu.Lock()
+		delete(archiveRetired, s)
+		archiveSessionsMu.Unlock()
+		go archiveDestroySession(s) // disk I/O off the request path
+	}
 }
 
 // archiveIndexEntries maps entry name → entry; the first of duplicate names
@@ -1258,10 +1331,116 @@ func (p *archiveProgressReader) Seek(offset int64, whence int) (int64, error) {
 
 func (p *archiveProgressReader) Close() error { return p.f.Close() }
 
-// archiveSectionFile serves an in-place extent of the archive file.
+// archiveVerify is the CRC-32 verification of one stored zip entry served in
+// place. It runs once per session and entry, in the background, on its own
+// context (a client disconnect never cancels it; only session destruction does).
+type archiveVerify struct {
+	done   chan struct{} // closed once err is final
+	err    error         // nil: the bytes match the recorded CRC-32 (set before done is closed)
+	cancel context.CancelFunc
+}
+
+// finished reports whether the verdict is final.
+func (v *archiveVerify) finished() bool {
+	select {
+	case <-v.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// wait blocks until the verdict is final (returning it) or ctx is done.
+func (v *archiveVerify) wait(ctx context.Context) error {
+	select {
+	case <-v.done:
+		return v.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+var (
+	// archiveEagerVerifyBytes is the largest stored entry that is verified
+	// before its first byte is served. Beyond it, serving starts at once and
+	// only the entry's final chunk waits for the verification. A variable so
+	// tests can lower it.
+	archiveEagerVerifyBytes int64 = 16 << 20
+	// archiveVerifyTestHook, when non-nil, is called before each read of a
+	// verification with the offset (within the entry) about to be hashed.
+	// Tests only.
+	archiveVerifyTestHook func(entryName string, off int64)
+)
+
+// archiveVerifyReaderAt reports each read to a test hook.
+type archiveVerifyReaderAt struct {
+	r      io.ReaderAt
+	base   int64 // archive offset of the entry
+	name   string
+	onRead func(entryName string, off int64)
+}
+
+func (a archiveVerifyReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	a.onRead(a.name, off-a.base)
+	return a.r.ReadAt(p, off)
+}
+
+// archiveRunVerify is the body of a verification goroutine: it opens its own
+// handle on the archive, hashes the extent and publishes the verdict.
+func archiveRunVerify(ctx context.Context, archivePath, name string, ext archive.Extent, v *archiveVerify, hook func(string, int64)) {
+	defer v.cancel()
+	v.err = archiveVerifyExtent(ctx, archivePath, name, ext, hook)
+	close(v.done)
+}
+
+func archiveVerifyExtent(ctx context.Context, archivePath, name string, ext archive.Extent, hook func(string, int64)) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("verify %q: %w", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	var r io.ReaderAt = f
+	if hook != nil {
+		r = archiveVerifyReaderAt{r: f, base: ext.Offset, name: name, onRead: hook}
+	}
+	if err := ext.Verify(ctx, r); err != nil {
+		return fmt.Errorf("verify %q: %w", name, err)
+	}
+	return nil
+}
+
+// archiveSectionFile serves an in-place extent of the archive file. While the
+// extent's CRC-32 is still being verified (v != nil), a Read that could reach
+// the entry's last byte waits for the verdict and fails if it is negative, so a
+// corrupt entry ends in a truncated response rather than a clean-looking one.
+// It deliberately exposes only Read/Seek/Close (no ReadAt) so nothing can
+// bypass that gate.
 type archiveSectionFile struct {
-	*io.SectionReader
-	f *os.File
+	sr   *io.SectionReader
+	f    *os.File
+	ctx  context.Context
+	size int64
+	v    *archiveVerify // nil once verified (or when nothing is recorded)
+}
+
+func (s *archiveSectionFile) Read(b []byte) (int, error) {
+	if s.v != nil && len(b) > 0 {
+		pos, err := s.sr.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, err
+		}
+		if pos+int64(len(b)) >= s.size {
+			if err := s.v.wait(s.ctx); err != nil {
+				return 0, err
+			}
+			s.v = nil
+		}
+	}
+	return s.sr.Read(b)
+}
+
+func (s *archiveSectionFile) Seek(offset int64, whence int) (int64, error) {
+	return s.sr.Seek(offset, whence)
 }
 
 func (s *archiveSectionFile) Close() error { return s.f.Close() }
@@ -1277,25 +1456,28 @@ func archiveOpenFile(path string) (io.ReadSeekCloser, error) {
 // archiveDirectExtent reports where a stored zip/tar entry's bytes sit inside
 // the archive file, so it can be served with ReadAt and no extraction at all.
 // The verdict is cached per entry. Compressed, encrypted, directory, sparse and
-// unknown-size entries (and every other archive format) return false.
-func archiveDirectExtent(sess *archiveSession, name string) (archive.Extent, bool) {
+// unknown-size entries (and every other archive format) return a zero value
+// (ok false). For a stored zip entry the first call also starts the one
+// background CRC-32 verification of its bytes (archiveVerify) that every
+// request for the entry then consults.
+func archiveDirectExtent(sess *archiveSession, name string) archiveDirect {
 	if sess.ext != "zip" && sess.ext != "tar" {
-		return archive.Extent{}, false
+		return archiveDirect{}
 	}
 	sess.mu.Lock()
 	d, known := sess.direct[name]
 	sess.mu.Unlock()
 	if known {
-		return d.ext, d.ok
+		return d
 	}
 	entry, err := sess.entry(name)
 	if err != nil {
-		return archive.Extent{}, false // the extraction path reports the error
+		return archiveDirect{} // the extraction path reports the error
 	}
 	if !entry.IsDir && !entry.SizeUnknown && entry.Size <= archiveMaxEntryBytes {
 		r, err := archive.OpenFile(sess.archivePath, sess.ext)
 		if err != nil {
-			return archive.Extent{}, false
+			return archiveDirect{}
 		}
 		if loc, ok := r.(archive.Locator); ok {
 			if ext, ok := loc.Locate(name); ok && ext.Size == entry.Size {
@@ -1304,27 +1486,100 @@ func archiveDirectExtent(sess *archiveSession, name string) (archive.Extent, boo
 		}
 		_ = r.Close()
 	}
+
 	sess.mu.Lock()
+	if cur, ok := sess.direct[name]; ok {
+		// Lost a race with a concurrent first request: share its verdict (and
+		// its verification) instead of starting a second one.
+		sess.mu.Unlock()
+		return cur
+	}
+	var (
+		vctx context.Context
+		hook func(string, int64)
+	)
+	if d.ok && d.ext.HasCRC {
+		var cancel context.CancelFunc
+		vctx, cancel = context.WithCancel(context.Background())
+		d.v = &archiveVerify{done: make(chan struct{}), cancel: cancel}
+		hook = archiveVerifyTestHook
+	}
 	if sess.direct == nil {
 		sess.direct = make(map[string]archiveDirect)
 	}
 	sess.direct[name] = d
 	sess.mu.Unlock()
-	return d.ext, d.ok
+	if d.v != nil {
+		go archiveRunVerify(vctx, sess.archivePath, name, d.ext, d.v, hook)
+	}
+	return d
+}
+
+// archiveDisableDirect records that name must not be served in place any more
+// (its bytes could not be verified); requests then extract it.
+func (s *archiveSession) archiveDisableDirect(name string) {
+	s.mu.Lock()
+	s.direct[name] = archiveDirect{}
+	s.mu.Unlock()
+}
+
+// archiveOpenInPlace opens d for serving straight from the archive file. A
+// stored zip entry is CRC-checked like zip.File.Open does at EOF, but without
+// extracting it:
+//   - entries up to archiveEagerVerifyBytes are verified before the first byte,
+//     so no response (not even a ranged one) can carry unverified bytes;
+//   - larger entries start serving at once and withhold their final chunk until
+//     the background verification succeeded (archiveSectionFile), the same
+//     contract as archiveProgressReader. Ranges that end before the entry's end
+//     are answered unverified; a mismatch found later only affects requests that
+//     reach the end or arrive afterwards.
+//
+// A mismatch is returned as an error (a clean 500 before any byte). A failed
+// verification that is not a mismatch (I/O error) makes it return (nil, nil):
+// the caller extracts the entry instead.
+func archiveOpenInPlace(ctx context.Context, sess *archiveSession, name string, d archiveDirect) (io.ReadSeekCloser, error) {
+	gate := d.v
+	if gate != nil && d.ext.Size <= archiveEagerVerifyBytes {
+		select {
+		case <-gate.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if gate != nil && gate.finished() {
+		if err := gate.err; err != nil {
+			if errors.Is(err, archive.ErrChecksum) {
+				return nil, fmt.Errorf("entry %q: %w", name, err)
+			}
+			sess.archiveDisableDirect(name)
+			return nil, nil
+		}
+		gate = nil // verified: nothing to wait for
+	}
+	f, err := os.Open(sess.archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errArchiveOpenFile, err)
+	}
+	return &archiveSectionFile{
+		sr: io.NewSectionReader(f, d.ext.Offset, d.ext.Size), f: f,
+		ctx: ctx, size: d.ext.Size, v: gate,
+	}, nil
 }
 
 // archiveOpenEntry returns a seekable body for entryName. Stored zip/tar
-// entries are served in place; others come from a background extraction that
-// is consumed while it is still running. Errors detectable before any byte is
-// produced (unknown entry, unopenable/corrupt entry start, oversize) are
-// returned here so the handler can still answer 500.
+// entries are served in place (after/while their zip CRC-32 is verified, see
+// archiveOpenInPlace); others come from a background extraction that is
+// consumed while it is still running. Errors detectable before any byte is
+// produced (unknown entry, unopenable/corrupt entry start, oversize, a stored
+// entry whose CRC-32 does not match) are returned here so the handler can still
+// answer 500.
 func archiveOpenEntry(ctx context.Context, sess *archiveSession, entryName string) (io.ReadSeekCloser, error) {
-	if ext, ok := archiveDirectExtent(sess, entryName); ok {
-		f, err := os.Open(sess.archivePath)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", errArchiveOpenFile, err)
+	if d := archiveDirectExtent(sess, entryName); d.ok {
+		body, err := archiveOpenInPlace(ctx, sess, entryName, d)
+		if body != nil || err != nil {
+			return body, err
 		}
-		return &archiveSectionFile{SectionReader: io.NewSectionReader(f, ext.Offset, ext.Size), f: f}, nil
+		// The in-place bytes could not be checked: extract (and verify) instead.
 	}
 
 	fl, path, err := archiveStartExtract(sess, entryName)
@@ -1522,11 +1777,17 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 	archiveSessionsMu.Lock()
 	old, replaced := archiveSessions[key]
 	archiveSessions[key] = sess
-	archiveSessionsMu.Unlock()
+	destroyOld := false
 	if replaced && old.tmpDir != "" {
-		// A prior session used this key. Remove its temp dir (and, if the
-		// archive itself was a downloaded temp file, the archive too)
-		// asynchronously to avoid leaking disk space without blocking the request.
+		destroyOld = archiveRetireLocked(old)
+	}
+	archiveSessionsMu.Unlock()
+	if destroyOld {
+		// A prior session used this key and nothing is reading it. Remove its
+		// temp dir (and, if the archive itself was a downloaded temp file, the
+		// archive too) asynchronously to avoid leaking disk space without
+		// blocking the request. A session that is still being read is instead
+		// retired: its last release() destroys it (see archiveRetireLocked).
 		go archiveDestroySession(old)
 	}
 	go archiveEnforceCaps(sess)
