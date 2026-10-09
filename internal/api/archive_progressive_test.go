@@ -764,13 +764,24 @@ func TestArchiveDestroySession_CancelsBackgroundExtraction(t *testing.T) {
 	archiveSessionsMu.Lock()
 	delete(archiveSessions, key)
 	archiveSessionsMu.Unlock()
-	archiveDestroySession(sess)
+	// The teardown waits for the parked extraction to stop before it removes
+	// anything, so it runs beside the test until the gate opens.
+	destroyed := make(chan struct{})
+	go func() {
+		archiveDestroySession(sess)
+		close(destroyed)
+	}()
 	gate.Release()
 
 	select {
 	case <-fl.done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("cancelled extraction did not stop")
+	}
+	select {
+	case <-destroyed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("teardown did not finish after the extraction stopped")
 	}
 	if !errors.Is(fl.err, context.Canceled) {
 		t.Errorf("flight err = %v, want context.Canceled", fl.err)

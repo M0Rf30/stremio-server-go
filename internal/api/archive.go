@@ -31,6 +31,18 @@
 // are unchanged; a remote URL is not re-checked upstream, so a changed remote
 // archive is picked up at most one TTL later. A different payload replaces the
 // session as before.
+//
+// For zip, tar and tgz no archive file handle outlives a request, and none is
+// held while background work is merely parked: the listing and the in-place
+// extents (offset, size, CRC-32) are cached in the session, and every request,
+// extraction and verification reads the archive through its own short-lived
+// handle (archive.OpenReaderAt; an in-place response holds one for its
+// duration). rar and 7zip libraries keep the archive open while an entry is
+// being extracted. On Windows an open handle blocks deleting or replacing the
+// file, so the user can still remove their local archive between requests, and
+// a session teardown waits for its goroutines before it deletes the downloaded
+// archive and the extracted entries. A temp entry file of a failed extraction
+// is removed only after its last reader closed it (archiveExtractFlight.dropFile).
 package api
 
 import (
@@ -50,6 +62,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -251,10 +264,16 @@ func archiveEvict() {
 	}
 }
 
+// archiveDestroyWait bounds how long archiveDestroySession waits for the
+// session's background goroutines to stop. A variable so tests can lower it.
+var archiveDestroyWait = 30 * time.Second
+
 // archiveDestroySession cancels the session's background extractions and
-// verifications and removes its temp dir (and, when it owns it, the downloaded
-// archive). The caller must already have unregistered the session, and no
-// request may still be reading it (see archiveRetireLocked).
+// verifications, waits for them to let go of their files, and removes its temp
+// dir (and, when it owns it, the downloaded archive). The caller must already
+// have unregistered the session, and no request may still be reading it (see
+// archiveRetireLocked). It blocks until the goroutines stopped (bounded by
+// archiveDestroyWait), so callers run it off the request path.
 func archiveDestroySession(sess *archiveSession) {
 	sess.mu.Lock()
 	flights := make([]*archiveExtractFlight, 0, len(sess.inflight))
@@ -278,10 +297,68 @@ func archiveDestroySession(sess *archiveSession) {
 	for _, v := range verifies {
 		v.cancel()
 	}
-	_ = os.RemoveAll(tmpDir)
+	// Windows cannot delete a file that still has an open handle, and the
+	// goroutines may be reading the archive or writing an entry right now:
+	// removing the files first would leave them (a downloaded archive can be
+	// gigabytes) behind until the next stale sweep.
+	archiveAwaitStopped(flights, verifies)
+	archiveRemoveAll(tmpDir)
 	if isTmp {
-		_ = os.Remove(archPath)
+		archiveRemove(archPath)
 	}
+}
+
+// archiveAwaitStopped blocks until every flight and verification has finished
+// (they were cancelled and notice at their next chunk) or archiveDestroyWait
+// passed.
+func archiveAwaitStopped(flights []*archiveExtractFlight, verifies []*archiveVerify) {
+	if len(flights)+len(verifies) == 0 {
+		return
+	}
+	timer := time.NewTimer(archiveDestroyWait)
+	defer timer.Stop()
+	for _, fl := range flights {
+		select {
+		case <-fl.done:
+		case <-timer.C:
+			logging.For("archive").Warn("session teardown gave up waiting for an extraction to stop")
+			return
+		}
+	}
+	for _, v := range verifies {
+		select {
+		case <-v.done:
+		case <-timer.C:
+			logging.For("archive").Warn("session teardown gave up waiting for a verification to stop")
+			return
+		}
+	}
+}
+
+// archiveRemoveTestHook, when set, is called with the path right before the
+// session machinery removes a temp file or directory. Tests only: Windows
+// refuses to delete a file that still has an open handle, so they assert none
+// is left open at that moment. An atomic pointer because removals run on
+// background goroutines.
+var archiveRemoveTestHook atomic.Pointer[func(path string)]
+
+func archiveRemoveNotify(path string) {
+	if h := archiveRemoveTestHook.Load(); h != nil {
+		(*h)(path)
+	}
+}
+
+// archiveRemove deletes a temp file the session owns. Every handle on it must
+// already be closed (see archiveExtractFlight.dropFile).
+func archiveRemove(path string) {
+	archiveRemoveNotify(path)
+	_ = os.Remove(path)
+}
+
+// archiveRemoveAll is archiveRemove for a temp directory tree.
+func archiveRemoveAll(path string) {
+	archiveRemoveNotify(path)
+	_ = os.RemoveAll(path)
 }
 
 // archiveRetireLocked unregisters s's key for good after the key was re-created
@@ -1043,6 +1120,9 @@ type archiveExtractFlight struct {
 	written  int64         // bytes written to path and safe to read (never beyond size when known)
 	finished bool          // done has been (or is being) closed
 	wake     chan struct{} // closed and replaced whenever written advances; closed for good on finish
+	readers  int           // requests holding (or about to open) a handle on path: acquireReader … releaseReader
+	dropped  bool          // the extraction failed: path is deleted once no reader holds it
+	removed  bool          // path has been deleted
 }
 
 func newArchiveExtractFlight(path string, size int64, cancel context.CancelFunc) *archiveExtractFlight {
@@ -1052,6 +1132,52 @@ func newArchiveExtractFlight(path string, size int64, cancel context.CancelFunc)
 		size:   size,
 		cancel: cancel,
 		wake:   make(chan struct{}),
+	}
+}
+
+// acquireReader registers a request that is about to open path. It fails when
+// the extraction already failed and dropped its file. Every success must be
+// paired with a releaseReader after the request's handle (if it got one) is
+// closed.
+func (fl *archiveExtractFlight) acquireReader() bool {
+	fl.mu.Lock()
+	defer fl.mu.Unlock()
+	if fl.dropped {
+		return false
+	}
+	fl.readers++
+	return true
+}
+
+// releaseReader unregisters a reader whose handle is closed. The last one out
+// removes the file of a failed extraction.
+func (fl *archiveExtractFlight) releaseReader() {
+	fl.mu.Lock()
+	fl.readers--
+	remove := fl.dropped && fl.readers == 0 && !fl.removed
+	if remove {
+		fl.removed = true
+	}
+	fl.mu.Unlock()
+	if remove {
+		archiveRemove(fl.path)
+	}
+}
+
+// dropFile discards the partial file of a failed extraction. The extraction's
+// own handle must already be closed. Windows cannot delete a file somebody
+// still has open — a request may be reading it — so while a reader holds it the
+// removal is left to the last releaseReader.
+func (fl *archiveExtractFlight) dropFile() {
+	fl.mu.Lock()
+	fl.dropped = true
+	remove := fl.readers == 0 && !fl.removed
+	if remove {
+		fl.removed = true
+	}
+	fl.mu.Unlock()
+	if remove {
+		archiveRemove(fl.path)
 	}
 }
 
@@ -1158,13 +1284,13 @@ func archiveStartExtract(sess *archiveSession, entryName string) (*archiveExtrac
 	if p, ok := sess.extracted[entryName]; ok {
 		sess.mu.Unlock()
 		_ = f.Close()
-		_ = os.Remove(f.Name())
+		archiveRemove(f.Name())
 		return nil, p, nil
 	}
 	if fl, ok := sess.inflight[entryName]; ok {
 		sess.mu.Unlock()
 		_ = f.Close()
-		_ = os.Remove(f.Name())
+		archiveRemove(f.Name())
 		return fl, "", nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1215,8 +1341,9 @@ func archiveExtractEntry(sess *archiveSession, entryName string) (string, error)
 	return fl.path, nil
 }
 
-// archiveRunExtract is the body of a flight's goroutine. It always removes the
-// partial file on failure and always finishes the flight.
+// archiveRunExtract is the body of a flight's goroutine. It always discards the
+// partial file on failure (once nobody has it open) and always finishes the
+// flight.
 func archiveRunExtract(ctx context.Context, sess *archiveSession, entryName string, fl *archiveExtractFlight, f *os.File, declared int64) {
 	defer fl.cancel()
 	err := archiveCopyEntry(ctx, sess, entryName, fl, f, declared)
@@ -1224,7 +1351,7 @@ func archiveRunExtract(ctx context.Context, sess *archiveSession, entryName stri
 		err = fmt.Errorf("extract %q: %w", entryName, cerr)
 	}
 	if err != nil {
-		_ = os.Remove(fl.path)
+		fl.dropFile() // after f.Close: the writer's handle is gone
 	}
 
 	sess.mu.Lock()
@@ -1320,6 +1447,7 @@ type archiveProgressReader struct {
 	fl   *archiveExtractFlight
 	size int64
 	pos  int64
+	held bool // registered with fl (acquireReader); Close releases it
 }
 
 func (p *archiveProgressReader) Read(b []byte) (int, error) {
@@ -1366,7 +1494,14 @@ func (p *archiveProgressReader) Seek(offset int64, whence int) (int64, error) {
 	return abs, nil
 }
 
-func (p *archiveProgressReader) Close() error { return p.f.Close() }
+func (p *archiveProgressReader) Close() error {
+	err := p.f.Close()
+	if p.held { // the handle is closed: a failed extraction's file may go now
+		p.held = false
+		p.fl.releaseReader()
+	}
+	return err
+}
 
 // archiveVerify is the CRC-32 verification of one stored zip entry served in
 // place. It runs once per session and entry, in the background, on its own
@@ -1422,23 +1557,24 @@ func (a archiveVerifyReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	return a.r.ReadAt(p, off)
 }
 
-// archiveRunVerify is the body of a verification goroutine: it opens its own
-// handle on the archive, hashes the extent and publishes the verdict.
+// archiveRunVerify is the body of a verification goroutine: it hashes the
+// extent and publishes the verdict.
 func archiveRunVerify(ctx context.Context, archivePath, name string, ext archive.Extent, v *archiveVerify, hook func(string, int64)) {
 	defer v.cancel()
 	v.err = archiveVerifyExtent(ctx, archivePath, name, ext, hook)
 	close(v.done)
 }
 
+// archiveVerifyExtent hashes the extent through a reader that opens the archive
+// only for each read: the verification of a large entry can run for minutes in
+// the background and must not pin the user's archive for that long.
 func archiveVerifyExtent(ctx context.Context, archivePath, name string, ext archive.Extent, hook func(string, int64)) error {
-	f, err := os.Open(archivePath)
+	r, err := archive.OpenReaderAt(archivePath)
 	if err != nil {
 		return fmt.Errorf("verify %q: %w", name, err)
 	}
-	defer func() { _ = f.Close() }()
-	var r io.ReaderAt = f
 	if hook != nil {
-		r = archiveVerifyReaderAt{r: f, base: ext.Offset, name: name, onRead: hook}
+		r = archiveVerifyReaderAt{r: r, base: ext.Offset, name: name, onRead: hook}
 	}
 	if err := ext.Verify(ctx, r); err != nil {
 		return fmt.Errorf("verify %q: %w", name, err)
@@ -1640,8 +1776,18 @@ func archiveOpenEntry(ctx context.Context, sess *archiveSession, entryName strin
 		return archiveOpenFile(fl.path)
 	}
 
+	// Register before opening: a failed extraction removes its file only once
+	// no registered reader is left (Windows cannot delete an open file).
+	if !fl.acquireReader() {
+		// The extraction already failed and dropped its file; finish is imminent.
+		if err := fl.waitDone(ctx); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: extraction file is gone", errArchiveOpenFile)
+	}
 	f, err := os.Open(fl.path)
 	if err != nil {
+		fl.releaseReader()
 		select {
 		case <-fl.done:
 			if fl.err != nil {
@@ -1661,9 +1807,10 @@ func archiveOpenEntry(ctx context.Context, sess *archiveSession, entryName strin
 	}
 	if err != nil {
 		_ = f.Close()
+		fl.releaseReader() // after the close: it may remove the failed file
 		return nil, err
 	}
-	return &archiveProgressReader{ctx: ctx, f: f, fl: fl, size: fl.size}, nil
+	return &archiveProgressReader{ctx: ctx, f: f, fl: fl, size: fl.size, held: true}, nil
 }
 
 // ── handler entry point ──────────────────────────────────────────────────────
