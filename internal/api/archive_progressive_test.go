@@ -101,9 +101,21 @@ func progTar(t *testing.T, entries ...progEntry) string {
 // tears it down with the test.
 func progCreate(t *testing.T, h http.Handler, archivePath, ext string) (string, *archiveSession) {
 	t.Helper()
+	return progCreateWith(t, h, archivePath, ext, nil)
+}
+
+// progCreateWith is progCreate with extra members in the create payload. A
+// create whose payload differs from the live session's replaces it; an
+// identical one reuses it.
+func progCreateWith(t *testing.T, h http.Handler, archivePath, ext string, extra map[string]any) (string, *archiveSession) {
+	t.Helper()
 	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", filepath.Dir(archivePath))
 	key := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
-	body, err := json.Marshal(map[string]string{"url": archivePath})
+	payload := map[string]any{"url": archivePath}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
 	}

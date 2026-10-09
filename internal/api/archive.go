@@ -20,6 +20,17 @@
 //
 // "url" and "from" are synonyms for the archive source. http/https sources are
 // downloaded to a temp file; everything else is treated as a local path.
+//
+// Re-creating an existing key with an equivalent payload (same sources,
+// fileIdx and fileMustInclude — see archiveCreateSig) reuses the live session
+// instead of building a new one: players such as ExoPlayer re-request the
+// create URL on every open/seek, and a rebuild would download the archive and
+// extract its entries all over again. The session is reused only while it is
+// healthy (no failed extraction or checksum mismatch), younger than
+// archiveSessionTTL and, for a local archive, while the file's size and mtime
+// are unchanged; a remote URL is not re-checked upstream, so a changed remote
+// archive is picked up at most one TTL later. A different payload replaces the
+// session as before.
 package api
 
 import (
@@ -64,6 +75,10 @@ type archiveSession struct {
 	lastAccess    time.Time
 	refCount      int                              // in-flight requests; >0 blocks eviction (guarded by mu)
 	retired       bool                             // key re-created while refCount>0; the last release destroys the session (guarded by mu)
+	sig           string                           // normalized create payload (archiveCreateSig); "" never matches, so such sessions are always replaced
+	source        string                           // archive source of the create payload; a local path is re-resolved when reusing
+	built         archiveFileStat                  // size and mtime of archivePath when the session was built
+	noReuse       bool                             // failed: an equivalent create must rebuild (guarded by mu)
 	extracted     map[string]string                // entry name → fully extracted temp file path (cache)
 	extractedSize map[string]int64                 // entry name → bytes of the extracted file (guarded by mu)
 	inflight      map[string]*archiveExtractFlight // entry name → in-progress extraction (guarded by mu)
@@ -91,6 +106,10 @@ var (
 	// alive until their last release(). The sweeper must not reap their temp
 	// files and the byte cap still counts them. Guarded by archiveSessionsMu.
 	archiveRetired = map[*archiveSession]struct{}{}
+	// archiveBuilds holds the in-progress builds of keyed sessions: identical
+	// creates arriving meanwhile wait for the build instead of downloading and
+	// building again. Guarded by archiveSessionsMu.
+	archiveBuilds = map[archiveBuildKey]*archiveBuildFlight{}
 )
 
 const archiveSessionTTL = time.Hour
@@ -592,31 +611,12 @@ func archiveSelectEntry(entries []archive.Entry, payload *archivePayload) (strin
 	}
 
 	// 1. Explicit index.
-	if len(payload.FileIdx) > 0 && string(payload.FileIdx) != "null" {
-		idx := -1
-		var n int
-		if json.Unmarshal(payload.FileIdx, &n) == nil {
-			idx = n
-		} else {
-			var s string
-			if json.Unmarshal(payload.FileIdx, &s) == nil {
-				idx, _ = strconv.Atoi(s)
-			}
-		}
-		if idx >= 0 && idx < len(files) {
-			return files[idx].Name, nil
-		}
+	if idx := archiveFileIdx(payload.FileIdx); idx >= 0 && idx < len(files) {
+		return files[idx].Name, nil
 	}
 
 	// 2. fileMustInclude filter.
-	if len(payload.FileMustInclude) > 0 && string(payload.FileMustInclude) != "null" {
-		var filters []string
-		var s string
-		if json.Unmarshal(payload.FileMustInclude, &filters) != nil {
-			if json.Unmarshal(payload.FileMustInclude, &s) == nil {
-				filters = []string{s}
-			}
-		}
+	if filters := archiveFilters(payload.FileMustInclude); len(filters) > 0 {
 		lower := func(t string) string { return strings.ToLower(t) }
 		for _, f := range files {
 			for _, filt := range filters {
@@ -629,6 +629,41 @@ func archiveSelectEntry(entries []archive.Entry, payload *archivePayload) (strin
 
 	// 3. Largest video file, or largest file overall as a final fallback.
 	return archiveLargestVideo(files), nil
+}
+
+// archiveFileIdx decodes payload.fileIdx: a JSON number or a numeric string (a
+// non-numeric string reads as 0, as it always has). It returns -1 when the
+// field is absent, null or of any other type.
+func archiveFileIdx(raw json.RawMessage) int {
+	if len(raw) == 0 || string(raw) == "null" {
+		return -1
+	}
+	var n int
+	if json.Unmarshal(raw, &n) == nil {
+		return n
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		idx, _ := strconv.Atoi(s)
+		return idx
+	}
+	return -1
+}
+
+// archiveFilters decodes payload.fileMustInclude: a string array or a single
+// string. It returns nil when the field is absent, null or of another type.
+func archiveFilters(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var filters []string
+	var s string
+	if json.Unmarshal(raw, &filters) != nil {
+		if json.Unmarshal(raw, &s) == nil {
+			filters = []string{s}
+		}
+	}
+	return filters
 }
 
 func archiveLargestVideo(files []archive.Entry) string {
@@ -1203,6 +1238,8 @@ func archiveRunExtract(ctx context.Context, sess *archiveSession, entryName stri
 		}
 		sess.extracted[entryName] = fl.path
 		sess.extractedSize[entryName] = fl.progress()
+	} else {
+		sess.noReuse = true // a create retried for this payload must rebuild, not replay the failure
 	}
 	sess.mu.Unlock()
 	fl.finish(err)
@@ -1510,7 +1547,12 @@ func archiveDirectExtent(sess *archiveSession, name string) archiveDirect {
 	sess.direct[name] = d
 	sess.mu.Unlock()
 	if d.v != nil {
-		go archiveRunVerify(vctx, sess.archivePath, name, d.ext, d.v, hook)
+		go func() {
+			archiveRunVerify(vctx, sess.archivePath, name, d.ext, d.v, hook)
+			if errors.Is(d.v.err, archive.ErrChecksum) {
+				sess.markFailed() // the bytes on disk do not match: a retried create must rebuild
+			}
+		}()
 	}
 	return d
 }
@@ -1549,6 +1591,7 @@ func archiveOpenInPlace(ctx context.Context, sess *archiveSession, name string, 
 	if gate != nil && gate.finished() {
 		if err := gate.err; err != nil {
 			if errors.Is(err, archive.ErrChecksum) {
+				sess.markFailed()
 				return nil, fmt.Errorf("entry %q: %w", name, err)
 			}
 			sess.archiveDisableDirect(name)
@@ -1654,6 +1697,9 @@ func (s *server) handleArchive(w http.ResponseWriter, r *http.Request, seg []str
 //   - POST → resolve archive, select entry, store session, respond {"key":…}.
 //   - GET  → same, then 307-redirect to the stream URL.
 //
+// An equivalent create for a key whose session is still usable reuses that
+// session (no download, no extraction) — see the package comment.
+//
 // @Summary  Create an archive streaming session (zip/rar/7zip/tar/tgz)
 // @Tags     Archive
 // @Accept   json
@@ -1683,103 +1729,237 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 		return
 	}
 
-	var archivePath string
-	var isTempArch bool
-
-	if sources := payload.sources(); len(sources) > 1 && strings.HasPrefix(source, "http") {
-		archivePath, err = archiveDownloadParts(sources)
-		if err != nil {
-			http.Error(w, "download failed: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		isTempArch = true
-	} else if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		archivePath, err = archiveDownload(source)
-		if err != nil {
-			http.Error(w, "download failed: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		isTempArch = true
-	} else {
-		resolved, resolveErr := archiveResolveLocalPath(source)
-		if resolveErr != nil {
-			http.Error(w, archiveLocalPathErrMsg, http.StatusBadRequest)
-			return
-		}
-		if _, statErr := os.Stat(resolved); statErr != nil {
-			http.Error(w, archiveLocalPathErrMsg, http.StatusBadRequest)
-			return
-		}
-		archivePath = resolved
-	}
-
-	// Open archive, list entries, select the target file.
-	ar, err := archive.OpenFile(archivePath, ext)
-	if err != nil {
-		if isTempArch {
-			_ = os.Remove(archivePath)
-		}
-		http.Error(w, "open archive: "+err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	entries, listErr := ar.List()
-	_ = ar.Close()
-	if listErr != nil {
-		if isTempArch {
-			_ = os.Remove(archivePath)
-		}
-		http.Error(w, "list archive: "+listErr.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-
-	selected, err := archiveSelectEntry(entries, payload)
-	if err != nil {
-		if isTempArch {
-			_ = os.Remove(archivePath)
-		}
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-
-	// Allocate session.
+	// A caller-supplied key is how players re-request the same stream (every
+	// open/seek): an equivalent payload keeps the live session — and the
+	// download and extractions it holds — instead of building a new one.
+	// Identical creates in flight share one build. Without a key every create
+	// gets a fresh random key, so there is nothing to reuse.
+	var res archiveCreateResult
 	if key == "" {
-		key = archiveNewKey()
-	}
-	tmpDir, err := os.MkdirTemp("", archiveTmpDirPrefix)
-	if err != nil {
-		if isTempArch {
-			_ = os.Remove(archivePath)
+		res = archiveBuildAndRegister(ext, "", "", nil, payload, source)
+	} else {
+		var ok bool
+		res, ok = archiveCreateOrReuse(r.Context(), ext, key, archiveCreateSig(ext, payload), payload, source)
+		if !ok {
+			return // the client went away while waiting for an identical build
 		}
-		http.Error(w, "mkdirtemp: "+err.Error(), http.StatusInternalServerError)
+	}
+	if res.status != 0 {
+		http.Error(w, res.msg, res.status)
 		return
 	}
 
-	now := time.Now()
-	var archiveBytes int64
-	if isTempArch {
-		if st, statErr := os.Stat(archivePath); statErr == nil {
-			archiveBytes = st.Size()
+	if r.Method == http.MethodPost {
+		writeJSON(w, http.StatusOK, map[string]string{"key": res.key})
+		return
+	}
+	// GET → redirect straight to the stream URL.
+	http.Redirect(w, r,
+		"/"+ext+"/stream/"+url.PathEscape(res.key)+"/"+archiveEncodePath(res.selected),
+		http.StatusTemporaryRedirect)
+}
+
+// archiveCreateResult is the outcome of a create: the session's key and
+// default entry, or the error response (status != 0) that every request which
+// shared the build answers with.
+type archiveCreateResult struct {
+	key      string
+	selected string
+	status   int
+	msg      string
+}
+
+// archiveBuildKey identifies one in-progress build: a key and the normalized
+// payload it builds for.
+type archiveBuildKey struct{ key, sig string }
+
+// archiveBuildFlight is one in-progress build of a keyed session. The request
+// that started it is the leader; identical requests wait on done and answer
+// with res.
+type archiveBuildFlight struct {
+	done chan struct{}
+	res  archiveCreateResult // set before done is closed
+}
+
+// archiveFileStat is the identity of an archive file for staleness checks.
+type archiveFileStat struct {
+	size  int64
+	mtime time.Time
+	ok    bool // false when the file could not be stat'ed: never matches
+}
+
+func archiveStatFile(path string) archiveFileStat {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return archiveFileStat{}
+	}
+	return archiveFileStat{size: fi.Size(), mtime: fi.ModTime(), ok: true}
+}
+
+// matches reports whether path still has the recorded size and mtime.
+func (a archiveFileStat) matches(path string) bool {
+	if !a.ok {
+		return false
+	}
+	cur := archiveStatFile(path)
+	return cur.ok && cur.size == a.size && cur.mtime.Equal(a.mtime)
+}
+
+// archiveCreateSig is the normalized create payload: everything the built
+// session depends on besides the archive's bytes. It is computed from the
+// decoded payload, not the raw JSON, so equivalent spellings of a request
+// (array vs object, url vs from vs urls, null or omitted options, a numeric
+// fileIdx as a number or a string, any case of fileMustInclude) share one
+// signature.
+func archiveCreateSig(ext string, p *archivePayload) string {
+	idx := archiveFileIdx(p.FileIdx)
+	if idx < 0 {
+		idx = -1 // none
+	}
+	filters := archiveFilters(p.FileMustInclude)
+	for i, f := range filters {
+		filters[i] = strings.ToLower(f) // matching is case-insensitive
+	}
+	b, err := json.Marshal(struct {
+		Ext     string
+		Sources []string
+		FileIdx int
+		Filters []string
+	}{ext, p.sources(), idx, filters})
+	if err != nil {
+		return "" // never matches: always rebuilt
+	}
+	return string(b)
+}
+
+// archiveCreateOrReuse answers a keyed create. In order: an equivalent live
+// session is reused; an identical build already in progress is waited for;
+// otherwise this request builds (and replaces whatever the key held). It
+// returns ok=false when ctx ends while waiting.
+func archiveCreateOrReuse(ctx context.Context, ext, key, sig string, payload *archivePayload, source string) (res archiveCreateResult, ok bool) {
+	if sig == "" {
+		return archiveBuildAndRegister(ext, key, sig, nil, payload, source), true
+	}
+	for {
+		sess, fl, leader := archiveReuseOrLead(key, sig)
+		switch {
+		case sess != nil:
+			// The file checks hit the disk, so they run outside every lock; the
+			// pin keeps the session from being evicted meanwhile.
+			fresh := sess.sourceUnchanged()
+			if !fresh {
+				sess.markFailed() // stale for good: the retry — and every later create — rebuilds
+			}
+			selected := sess.selectedFile
+			sess.release()
+			if fresh {
+				return archiveCreateResult{key: key, selected: selected}, true
+			}
+		case leader:
+			return archiveBuildAndRegister(ext, key, sig, fl, payload, source), true
+		default:
+			select {
+			case <-fl.done:
+				return fl.res, true
+			case <-ctx.Done():
+				return archiveCreateResult{}, false
+			}
 		}
 	}
-	sess := &archiveSession{
-		key:          key,
-		archivePath:  archivePath,
-		isTempArch:   isTempArch,
-		archiveBytes: archiveBytes,
-		ext:          ext,
-		tmpDir:       tmpDir,
-		selectedFile: selected,
-		created:      now,
-		lastAccess:   now,
-		extracted:    make(map[string]string),
-		listing:      archiveIndexEntries(entries), // reuse the listing instead of re-listing per extraction
-	}
+}
+
+// archiveReuseOrLead atomically decides what a keyed create does. It returns
+// the live session to reuse — pinned (refCount) and with lastAccess refreshed;
+// the caller must release it — or the build already in progress for the same
+// payload to wait for, or (leader) a new flight this request must complete.
+// Doing all of it under one lock means a create can never slip between a
+// finishing build and its registration and build a duplicate.
+func archiveReuseOrLead(key, sig string) (sess *archiveSession, fl *archiveBuildFlight, leader bool) {
 	archiveSessionsMu.Lock()
-	old, replaced := archiveSessions[key]
-	archiveSessions[key] = sess
+	defer archiveSessionsMu.Unlock()
+	if cur, ok := archiveSessions[key]; ok && cur.pinIfReusable(sig, time.Now()) {
+		return cur, nil, false
+	}
+	bk := archiveBuildKey{key, sig}
+	if cur, ok := archiveBuilds[bk]; ok {
+		return nil, cur, false
+	}
+	fl = &archiveBuildFlight{done: make(chan struct{})}
+	archiveBuilds[bk] = fl
+	return nil, fl, true
+}
+
+// pinIfReusable pins s (refCount++, lastAccess refreshed) when an equivalent
+// create may reuse it: same payload, not failed or retired, and within the TTL
+// since it was built (and since it was last used). Callers hold archiveSessionsMu.
+func (s *archiveSession) pinIfReusable(sig string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sig != sig || s.noReuse || s.retired ||
+		now.Sub(s.created) >= archiveSessionTTL || now.Sub(s.lastAccess) >= archiveSessionTTL {
+		return false
+	}
+	s.refCount++
+	s.lastAccess = now
+	return true
+}
+
+// markFailed records that the session must not be reused by an equivalent
+// create any more (failed extraction, checksum mismatch, changed source file).
+func (s *archiveSession) markFailed() {
+	s.mu.Lock()
+	s.noReuse = true
+	s.mu.Unlock()
+}
+
+// sourceUnchanged reports whether the archive the session was built from is
+// still what it was. A local archive must resolve to the same file (symlinks
+// and the configured root are re-checked) with unchanged size and mtime; a
+// downloaded archive must still be intact on disk. A remote URL is not asked
+// again: it is trusted for the session's TTL like any cache entry.
+func (s *archiveSession) sourceUnchanged() bool {
+	if !s.isTempArch {
+		real, err := archiveResolveLocalPath(s.source)
+		if err != nil || real != s.archivePath {
+			return false
+		}
+	}
+	return s.built.matches(s.archivePath)
+}
+
+// archiveBuildAndRegister builds a session and registers it under its key. When
+// fl is non-nil the caller leads that flight, and it is always completed — also
+// on failure or panic — so waiters are never stranded.
+func archiveBuildAndRegister(ext, key, sig string, fl *archiveBuildFlight, payload *archivePayload, source string) (res archiveCreateResult) {
+	bk := archiveBuildKey{key, sig}
+	if fl != nil {
+		res = archiveCreateResult{status: http.StatusInternalServerError, msg: "archive session build aborted"}
+		defer func() {
+			archiveSessionsMu.Lock()
+			if archiveBuilds[bk] == fl {
+				delete(archiveBuilds, bk)
+			}
+			archiveSessionsMu.Unlock()
+			fl.res = res
+			close(fl.done)
+		}()
+	}
+
+	sess, fail := archiveBuildSession(ext, key, sig, payload, source)
+	if sess == nil {
+		res = fail
+		return res
+	}
+
+	archiveSessionsMu.Lock()
+	old, replaced := archiveSessions[sess.key]
+	archiveSessions[sess.key] = sess
 	destroyOld := false
 	if replaced && old.tmpDir != "" {
 		destroyOld = archiveRetireLocked(old)
+	}
+	if fl != nil && archiveBuilds[bk] == fl {
+		delete(archiveBuilds, bk) // same critical section: no window with neither flight nor session
 	}
 	archiveSessionsMu.Unlock()
 	if destroyOld {
@@ -1791,15 +1971,104 @@ func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg
 		go archiveDestroySession(old)
 	}
 	go archiveEnforceCaps(sess)
+	res = archiveCreateResult{key: sess.key, selected: sess.selectedFile}
+	return res
+}
 
-	if r.Method == http.MethodPost {
-		writeJSON(w, http.StatusOK, map[string]string{"key": key})
-		return
+// archiveBuildSession resolves (downloads) the archive, lists it, selects the
+// default entry and returns a new, unregistered session — or the error
+// response to send. An empty key gets a fresh random one.
+func archiveBuildSession(ext, key, sig string, payload *archivePayload, source string) (*archiveSession, archiveCreateResult) {
+	failure := func(status int, msg string) (*archiveSession, archiveCreateResult) {
+		return nil, archiveCreateResult{status: status, msg: msg}
 	}
-	// GET → redirect straight to the stream URL.
-	http.Redirect(w, r,
-		"/"+ext+"/stream/"+url.PathEscape(key)+"/"+archiveEncodePath(selected),
-		http.StatusTemporaryRedirect)
+
+	var archivePath string
+	var isTempArch bool
+
+	if sources := payload.sources(); len(sources) > 1 && strings.HasPrefix(source, "http") {
+		var err error
+		archivePath, err = archiveDownloadParts(sources)
+		if err != nil {
+			return failure(http.StatusBadGateway, "download failed: "+err.Error())
+		}
+		isTempArch = true
+	} else if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		var err error
+		archivePath, err = archiveDownload(source)
+		if err != nil {
+			return failure(http.StatusBadGateway, "download failed: "+err.Error())
+		}
+		isTempArch = true
+	} else {
+		resolved, resolveErr := archiveResolveLocalPath(source)
+		if resolveErr != nil {
+			return failure(http.StatusBadRequest, archiveLocalPathErrMsg)
+		}
+		if _, statErr := os.Stat(resolved); statErr != nil {
+			return failure(http.StatusBadRequest, archiveLocalPathErrMsg)
+		}
+		archivePath = resolved
+	}
+	// Taken before the archive is read: a file changed after this point no
+	// longer matches, so a stale listing is never reused.
+	built := archiveStatFile(archivePath)
+	dropTemp := func() {
+		if isTempArch {
+			_ = os.Remove(archivePath)
+		}
+	}
+
+	// Open archive, list entries, select the target file.
+	ar, err := archive.OpenFile(archivePath, ext)
+	if err != nil {
+		dropTemp()
+		return failure(http.StatusUnprocessableEntity, "open archive: "+err.Error())
+	}
+	entries, listErr := ar.List()
+	_ = ar.Close()
+	if listErr != nil {
+		dropTemp()
+		return failure(http.StatusUnprocessableEntity, "list archive: "+listErr.Error())
+	}
+
+	selected, err := archiveSelectEntry(entries, payload)
+	if err != nil {
+		dropTemp()
+		return failure(http.StatusUnprocessableEntity, err.Error())
+	}
+
+	// Allocate session.
+	if key == "" {
+		key = archiveNewKey()
+	}
+	tmpDir, err := os.MkdirTemp("", archiveTmpDirPrefix)
+	if err != nil {
+		dropTemp()
+		return failure(http.StatusInternalServerError, "mkdirtemp: "+err.Error())
+	}
+
+	now := time.Now()
+	var archiveBytes int64
+	if isTempArch && built.ok {
+		archiveBytes = built.size
+	}
+	return &archiveSession{
+		key:          key,
+		sig:          sig,
+		source:       source,
+		built:        built,
+		archivePath:  archivePath,
+		isTempArch:   isTempArch,
+		archiveBytes: archiveBytes,
+		ext:          ext,
+		tmpDir:       tmpDir,
+		selectedFile: selected,
+		created:      now,
+		lastAccess:   now,
+		extracted:    make(map[string]string),
+		listing:      archiveIndexEntries(entries), // reuse the listing instead of re-listing per extraction
+	}, archiveCreateResult{}
 }
 
 // archiveHandleStream processes /{ext}/stream[/{key}[/{file…}]].
