@@ -27,6 +27,12 @@ Not affiliated with or endorsed by Stremio.
 - **Reverse proxy** (`/proxy`), **DLNA casting** (`/casting`, SSDP discovery +
   UPnP AVTransport control), **local-files addon** (`/local-addon`, IMDB-resolved),
   **YouTube** (`/yt`, via `yt-dlp`), and **`/get-https`** (Stremio cert provisioning).
+- **MediaFlow / EasyProxy compatible** - `/proxy/stream`, `/proxy/hls/manifest.m3u8`,
+  `/proxy/mpd/manifest.m3u8`, `/proxy/ip`, `/generate_url`, plus a MediaFlow-style
+  `/extractor/video[.m3u8|.mp4]?host=…&d=<page>&redirect_stream=true|false` resolver
+  for `VixCloud` (other hosts return `400`). Addons with a MediaFlow/EasyProxy
+  setting can use this server as their proxy URL with `STREMIO_PROXY_PASSWORD` as
+  the proxy password.
 - **Archive streaming** - direct playback of media inside ZIP / RAR / 7z / TAR /
   TGZ containers (`/zip`, `/rar`, `/7zip`, `/tar`, `/tgz`), plus **Usenet/NZB**
   (`/nzb`, NNTP + yEnc) and **FTP/FTPS** (`/ftp`) streaming - all pure-Go.
@@ -139,7 +145,7 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_HTTP_LOG` | _(off)_ | `1` emits a structured access log line per request (`method`, `uri`, `status`, `duration_ms`, `bytes`, `remote`). Standard boolean parsing: `0`/`false`/`no`/`off` (case-insensitive) disable it, any other non-empty value enables it — unlike most other on/off knobs here this used to be "any non-empty value enables", so `STREMIO_HTTP_LOG=0` now disables logging instead of enabling it. |
 | `STREMIO_LOG_LEVEL` | `info` | log verbosity: `debug` / `info` / `warn` / `error` |
 | `STREMIO_LOG_FORMAT` | `text` | log output format: `text` (compact `time LEVEL component: msg key=value`) or `json` |
-| `STREMIO_PROXY_PASSWORD` | _(unset)_ | `api_password` required on `/proxy/*` requests |
+| `STREMIO_PROXY_PASSWORD` | _(unset)_ | `api_password` required on `/proxy/*` and `/extractor/*` requests |
 | `STREMIO_PROXY_SECRET` | _(auto)_ | signing key for signed proxy URLs (auto-generated under `APP_PATH`) |
 | `STREMIO_PROXY_IP_ACL` | _(unset)_ | comma-separated CIDR allowlist for proxy clients |
 | `STREMIO_PROXY_PREBUFFER` | `3` | upcoming segments to prefetch (`0` = off) |
