@@ -11,8 +11,10 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path"
@@ -54,6 +56,59 @@ type Reader interface {
 type Extent struct {
 	Offset int64 // byte offset of the entry data within the archive file
 	Size   int64 // length of the entry data in bytes
+	// CRC32 is the IEEE CRC-32 the archive records for the entry's Size bytes
+	// (zip). It is meaningful only when HasCRC is set; tar records none.
+	CRC32  uint32
+	HasCRC bool
+}
+
+// ErrChecksum is returned by Extent.Verify when the entry's bytes do not match
+// the CRC-32 the archive records for them. It is zip.ErrChecksum, i.e. the same
+// error the extraction path reports for a corrupt entry.
+var ErrChecksum = zip.ErrChecksum
+
+// verifyBufSize is the read size of Extent.Verify; the context is re-checked
+// once per buffer.
+const verifyBufSize = 256 << 10
+
+// Verify hashes the extent's bytes through r (normally the archive file) and
+// compares them with the recorded CRC-32. It returns nil when the archive
+// records no checksum (HasCRC false), ErrChecksum on a mismatch,
+// io.ErrUnexpectedEOF when r holds fewer than Size bytes at Offset, and
+// ctx.Err() when cancelled. It is what makes serving a stored entry in place as
+// safe as extracting it: zip's own reader performs the same check at EOF.
+func (e Extent) Verify(ctx context.Context, r io.ReaderAt) error {
+	if !e.HasCRC {
+		return nil
+	}
+	h := crc32.NewIEEE()
+	buf := make([]byte, verifyBufSize)
+	var off int64
+	for off < e.Size {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n := int64(len(buf))
+		if rem := e.Size - off; rem < n {
+			n = rem
+		}
+		nr, err := r.ReadAt(buf[:n], e.Offset+off)
+		_, _ = h.Write(buf[:nr])
+		off += int64(nr)
+		if int64(nr) < n { // ReadAt reports a short read with a non-nil error
+			if err == nil || errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return err
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+	}
+	if h.Sum32() != e.CRC32 {
+		return ErrChecksum
+	}
+	return nil
 }
 
 // Locator is optionally implemented by Readers (zip, plain tar) that can
@@ -171,7 +226,13 @@ func (r *zipReader) Open(name string) (io.ReadCloser, error) {
 // (0x40) general-purpose bits; the stdlib cannot decrypt either.
 const zipFlagsEncrypted = 0x1 | 0x40
 
+// zipFlagDataDescriptor is the general-purpose bit announcing a trailing data
+// descriptor (CRC-32 and sizes written after the data).
+const zipFlagDataDescriptor = 0x8
+
 // Locate reports the in-file extent of a stored (method 0), unencrypted entry.
+// The extent carries the recorded CRC-32 so callers serving it in place can
+// verify it (Extent.Verify), as f.Open does at EOF.
 // Deflated entries have no addressable plaintext and return false.
 func (r *zipReader) Locate(name string) (Extent, bool) {
 	f, ok := r.index[name]
@@ -186,7 +247,10 @@ func (r *zipReader) Locate(name string) (Extent, bool) {
 	if err != nil || off < 0 || off > r.size || size > r.size-off {
 		return Extent{}, false
 	}
-	return Extent{Offset: off, Size: size}, true
+	// Mirror what zip.File.Open verifies at EOF: always with a data
+	// descriptor, otherwise only when the header records a non-zero CRC-32.
+	hasCRC := f.CRC32 != 0 || f.Flags&zipFlagDataDescriptor != 0
+	return Extent{Offset: off, Size: size, CRC32: f.CRC32, HasCRC: hasCRC}, true
 }
 
 func (r *zipReader) Close() error { return r.f.Close() }
