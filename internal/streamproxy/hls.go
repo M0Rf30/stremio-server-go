@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -85,12 +86,14 @@ func hlsServe(h *Handler, w http.ResponseWriter, r *http.Request) {
 // server. Processing is line-by-line; all non-URI content is preserved verbatim.
 //
 // Routing rules:
-//   - Bare URI lines (not starting with '#') are proxied through /proxy/stream,
-//     except when following an #EXT-X-STREAM-INF tag or when the URL contains
-//     ".m3u8", in which case /proxy/hls/manifest.m3u8 is used.
-//   - #EXT-X-KEY, #EXT-X-SESSION-KEY, #EXT-X-MAP, #EXT-X-PART and
-//     #EXT-X-PRELOAD-HINT URI="..." attributes are always routed to
-//     /proxy/stream; all other attributes (METHOD, IV, BYTERANGE, …) are kept.
+//   - Bare URI lines (not starting with '#') are proxied through
+//     /proxy/stream/segment.<ext> (see hlsSegmentEndpoint), except when
+//     following an #EXT-X-STREAM-INF tag or when the URL contains ".m3u8",
+//     in which case /proxy/hls/manifest.m3u8 is used.
+//   - #EXT-X-MAP, #EXT-X-PART and #EXT-X-PRELOAD-HINT URI="..." attributes
+//     are media segments and also use /proxy/stream/segment.<ext>;
+//     #EXT-X-KEY and #EXT-X-SESSION-KEY use plain /proxy/stream. All other
+//     attributes (METHOD, IV, BYTERANGE, …) are kept.
 //   - #EXT-X-RENDITION-REPORT URI="..." is routed to /proxy/hls/manifest.m3u8.
 //   - #EXT-X-MEDIA and #EXT-X-I-FRAME-STREAM-INF URI="..." attributes always
 //     name a media playlist (RFC 8216 §4.3.4.1, §4.3.4.3) and are routed to
@@ -105,6 +108,13 @@ func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) str
 
 	out := make([]string, 0, len(lines))
 	nextIsVariant := false // true after #EXT-X-STREAM-INF until next URI line
+	// Extension-less segments get a label matching their likely container:
+	// a playlist with #EXT-X-MAP carries fMP4 segments, otherwise MPEG-TS.
+	// ffmpeg rejects segments whose label mismatches the detected format.
+	segDefault := "ts"
+	if strings.Contains(playlist, "#EXT-X-MAP") {
+		segDefault = "mp4"
+	}
 
 	for _, line := range lines {
 		// Tolerate CRLF playlists (and stray whitespace): classify and resolve
@@ -132,7 +142,7 @@ func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) str
 					abs = baseURL.ResolveReference(rv).String()
 				}
 			}
-			ep := "/proxy/stream"
+			ep := hlsSegmentEndpoint(abs, segDefault)
 			// F8: avoid strings.ToLower; check both cases of ".m3u8".
 			if nextIsVariant || strings.Contains(abs, ".m3u8") || strings.Contains(abs, ".M3U8") {
 				ep = "/proxy/hls/manifest.m3u8"
@@ -151,10 +161,21 @@ func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) str
 			nextIsVariant = true
 			out = append(out, line)
 
-		case "#EXT-X-KEY", "#EXT-X-SESSION-KEY", "#EXT-X-MAP", "#EXT-X-PART", "#EXT-X-PRELOAD-HINT":
-			// Encryption key, initialization segment, LL-HLS part or preload
-			// hint: media/key resources, always /proxy/stream.
+		case "#EXT-X-KEY", "#EXT-X-SESSION-KEY":
+			// Encryption keys are not extension-checked by players.
 			out = append(out, hlsRewriteURIAttr(line, baseURL, ext, opts, h, "/proxy/stream"))
+
+		case "#EXT-X-MAP":
+			// Initialization segment (fMP4): give it a media extension.
+			out = append(out, hlsRewriteURIAttrFunc(line, baseURL, ext, opts, h, func(abs string) string {
+				return hlsSegmentEndpoint(abs, "mp4")
+			}))
+
+		case "#EXT-X-PART", "#EXT-X-PRELOAD-HINT":
+			// LL-HLS part or preload hint: media segments.
+			out = append(out, hlsRewriteURIAttrFunc(line, baseURL, ext, opts, h, func(abs string) string {
+				return hlsSegmentEndpoint(abs, segDefault)
+			}))
 
 		case "#EXT-X-RENDITION-REPORT":
 			// LL-HLS rendition report: always a media playlist.
@@ -183,6 +204,21 @@ func hlsRewrite(h *Handler, r *http.Request, opts *Options, playlist string) str
 // URIs with a non-http(s) scheme (data:, skd:, urn:, ...) and empty URIs are
 // left untouched.
 func hlsRewriteURIAttr(line string, baseURL *url.URL, ext string, opts *Options, h *Handler, fixedEndpoint string) string {
+	return hlsRewriteURIAttrFunc(line, baseURL, ext, opts, h, func(abs string) string {
+		if fixedEndpoint != "" {
+			return fixedEndpoint
+		}
+		// F8: avoid strings.ToLower; check both cases of ".m3u8".
+		if strings.Contains(abs, ".m3u8") || strings.Contains(abs, ".M3U8") {
+			return "/proxy/hls/manifest.m3u8"
+		}
+		return "/proxy/stream"
+	})
+}
+
+// hlsRewriteURIAttrFunc is hlsRewriteURIAttr with the endpoint chosen by
+// endpointFor from the resolved absolute URI.
+func hlsRewriteURIAttrFunc(line string, baseURL *url.URL, ext string, opts *Options, h *Handler, endpointFor func(abs string) string) string {
 	loc := hlsURIAttrRe.FindStringSubmatchIndex(line)
 	if loc == nil {
 		return line
@@ -202,17 +238,35 @@ func hlsRewriteURIAttr(line string, baseURL *url.URL, ext string, opts *Options,
 			abs = baseURL.ResolveReference(rv).String()
 		}
 	}
-	ep := fixedEndpoint
-	if ep == "" {
-		// F8: avoid strings.ToLower; check both cases of ".m3u8".
-		if strings.Contains(abs, ".m3u8") || strings.Contains(abs, ".M3U8") {
-			ep = "/proxy/hls/manifest.m3u8"
-		} else {
-			ep = "/proxy/stream"
+	proxied := h.buildProxyURL(ext, endpointFor(abs), abs, opts)
+	return line[:loc[2]] + proxied + line[loc[3]:]
+}
+
+// hlsSegmentExts are the segment extensions ffmpeg's HLS demuxer accepts by
+// default (allowed_segment_extensions; enforced since ffmpeg 7.1 via
+// extension_picky). Proxied segment URLs must end in one of them or
+// ffmpeg-based players (mpv, Stremio desktop) refuse to load the segment.
+var hlsSegmentExts = map[string]bool{
+	"3gp": true, "3gpp": true, "aac": true, "ac3": true, "avi": true, "ec3": true,
+	"fmp4": true, "m2ts": true, "m4a": true, "m4s": true, "m4v": true, "mkv": true,
+	"mov": true, "mp3": true, "mp4": true, "mpeg": true, "mpegts": true, "ogg": true,
+	"ts": true, "vob": true, "wav": true,
+	// Subtitle renditions: ffmpeg also rejects a segment whose detected
+	// format does not match its extension, so WebVTT must stay .vtt.
+	"vtt": true, "webvtt": true,
+}
+
+// hlsSegmentEndpoint returns /proxy/stream/segment.<ext> for a media segment:
+// the upstream path's extension when it is an accepted segment extension,
+// otherwise def. The trailing path element is cosmetic; /proxy/stream/*
+// serves the same handler as /proxy/stream.
+func hlsSegmentEndpoint(abs, def string) string {
+	if u, err := url.Parse(abs); err == nil {
+		if e := strings.ToLower(strings.TrimPrefix(path.Ext(u.Path), ".")); hlsSegmentExts[e] {
+			return "/proxy/stream/segment." + e
 		}
 	}
-	proxied := h.buildProxyURL(ext, ep, abs, opts)
-	return line[:loc[2]] + proxied + line[loc[3]:]
+	return "/proxy/stream/segment." + def
 }
 
 // hlsNonHTTPScheme reports whether u carries an explicit scheme other than

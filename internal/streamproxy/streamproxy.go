@@ -234,7 +234,7 @@ func validEndpoint(ep string) bool {
 	switch {
 	case ep == "/proxy/stream", ep == "/proxy/ip":
 		return true
-	case strings.HasPrefix(ep, "/proxy/hls/"), strings.HasPrefix(ep, "/proxy/mpd/"):
+	case strings.HasPrefix(ep, "/proxy/hls/"), strings.HasPrefix(ep, "/proxy/mpd/"), strings.HasPrefix(ep, "/proxy/stream/"):
 		return !strings.ContainsAny(ep, "?#\\ ")
 	}
 	return false

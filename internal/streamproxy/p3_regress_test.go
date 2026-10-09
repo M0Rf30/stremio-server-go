@@ -259,9 +259,14 @@ func TestHlsRewriteLLHLSAndSessionTags(t *testing.T) {
 		tag, _, _ := strings.Cut(l, ":")
 		byTag[tag] = l
 	}
-	for _, tag := range []string{"#EXT-X-SESSION-KEY", "#EXT-X-MAP", "#EXT-X-PART", "#EXT-X-PRELOAD-HINT"} {
-		if !strings.Contains(byTag[tag], `URI="https://ext.example/proxy/stream?d=`) {
-			t.Errorf("%s not proxied via stream: %s", tag, byTag[tag])
+	for tag, want := range map[string]string{
+		"#EXT-X-SESSION-KEY":  `URI="https://ext.example/proxy/stream?d=`,
+		"#EXT-X-MAP":          `URI="https://ext.example/proxy/stream/segment.mp4?d=`,
+		"#EXT-X-PART":         `URI="https://ext.example/proxy/stream/segment.mp4?d=`,
+		"#EXT-X-PRELOAD-HINT": `URI="https://ext.example/proxy/stream/segment.mp4?d=`,
+	} {
+		if !strings.Contains(byTag[tag], want) {
+			t.Errorf("%s not proxied via %s: %s", tag, want, byTag[tag])
 		}
 	}
 	for _, tag := range []string{"#EXT-X-RENDITION-REPORT", "#EXT-X-MEDIA", "#EXT-X-I-FRAME-STREAM-INF"} {
@@ -305,7 +310,7 @@ func TestHlsRewriteLeavesNonHTTPURIs(t *testing.T) {
 			t.Errorf("line %d changed: %q", i, lines[i])
 		}
 	}
-	if !strings.HasPrefix(lines[5], "https://ext.example/proxy/stream?d=") {
+	if !strings.HasPrefix(lines[5], "https://ext.example/proxy/stream/segment.ts?d=") {
 		t.Errorf("segment not proxied: %q", lines[5])
 	}
 
