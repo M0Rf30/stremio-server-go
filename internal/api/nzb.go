@@ -23,10 +23,15 @@
 //	                         wait for the whole file)
 //
 // Sessions expire after 1 hour of inactivity; extracted temp files are removed
-// by a background janitor started lazily on first create. Re-creating an
-// existing key replaces its session; a replaced session that a response is
-// still streaming from lives on until that response ends, so players that
-// re-request the create URL on every open/seek never cut off a playing stream.
+// by a background janitor started lazily on first create. Players re-request
+// the create URL on every open/seek, so re-creating an existing key with an
+// equivalent payload (same NZB URL and first server, see nzbCreateSig) reuses
+// the live session and the file it has assembled so far — as long as no
+// assembly of it failed and it is younger than nzbSessionTTL (the NZB is not
+// fetched again to compare content, so a changed NZB behind the same URL is
+// picked up at most one TTL later). A different payload replaces the session;
+// a replaced session that a response is still streaming from lives on until
+// that response ends, so a playing stream is never cut off.
 package api
 
 import (
@@ -92,6 +97,14 @@ type nzbSession struct {
 	lastAccess time.Time
 	refCount   int // in-flight requests; >0 blocks eviction (guarded by nzbSessionsMu)
 
+	// sig is the normalized create payload this session was built from (see
+	// nzbCreateSig); an equivalent re-create reuses the session. "" never
+	// matches, so sessions built any other way are always replaced.
+	sig string
+	// noReuse marks a session an equivalent create must not reuse — its
+	// assembly failed — so the retry rebuilds (guarded by nzbSessionsMu).
+	noReuse bool
+
 	// closeFile closes an assembly's temp file; nil means (*os.File).Close.
 	// It is a test seam for asserting close-before-delete ordering; tests
 	// set it under nzbSessionsMu before the session's first request.
@@ -111,6 +124,11 @@ var (
 	// no longer reachable through nzbSessions, so the last request to finish
 	// discards them (nzbRelease) instead of eviction or replacement.
 	nzbOrphans = map[*nzbSession]struct{}{}
+
+	// nzbBuilds holds the in-progress builds of sessions that carry a caller
+	// key (guarded by nzbSessionsMu): identical creates arriving meanwhile wait
+	// for the build instead of fetching the NZB and building again.
+	nzbBuilds = map[nzbBuildKey]*nzbBuildFlight{}
 )
 
 func nzbStartJanitor() {
@@ -127,6 +145,11 @@ func nzbStartJanitor() {
 		}()
 	})
 }
+
+// nzbSessionTTL is how long an idle session lives before the janitor evicts
+// it, and how long after its build it may still be reused by an equivalent
+// create request (see nzbReuseOrLead).
+const nzbSessionTTL = time.Hour
 
 // nzbTmpDirPrefix is the temp-dir prefix of NZB session dirs; only dirs with
 // exactly this prefix are ever swept.
@@ -189,7 +212,7 @@ func nzbEvictIdle() {
 		if sess.refCount > 0 {
 			continue
 		}
-		if time.Since(sess.lastAccess) > time.Hour {
+		if time.Since(sess.lastAccess) > nzbSessionTTL {
 			evict = append(evict, sess)
 			delete(nzbSessions, key)
 		}
@@ -368,32 +391,9 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// Fetch the NZB file from the provided URL. validateFetchHost is an
-	// early 403; archiveFetchGet (archive.go, same package) performs the
-	// actual fetch through archiveFetchClient, whose dialer re-validates
-	// the resolved IP at connect time and whose redirect policy
-	// re-validates every hop — api.go's getClient/httpGet must not be used
-	// here since this route fetches a caller-supplied URL unauthenticated.
-	if err := validateFetchHost(nzbURL); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
-		return
-	}
-	nzbData, err := archiveFetchGet(nzbURL, nzbMaxDownloadBytes)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
-		return
-	}
-
-	// Parse the NZB XML.
-	files, err := nzb.Parse(nzbData)
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "nzb: " + err.Error()})
-		return
-	}
-
 	// Build server config from the first server entry. Control guards the
 	// NNTP TCP/TLS dial itself: the client-supplied host/port in servers[]
-	// previously bypassed netguard entirely (SEC-2), unlike nzbURL above.
+	// previously bypassed netguard entirely (SEC-2), unlike nzbURL below.
 	srv := servers[0]
 	cfg := nzb.ServerConfig{
 		Host:        srv.Host,
@@ -412,32 +412,168 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 		}
 	}
 
-	// Create an isolated temp directory for assembled file cache.
-	tmpDir, err := os.MkdirTemp("", nzbTmpDirPrefix)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+	// A caller-supplied key is how players re-request the same stream (every
+	// open/seek): an equivalent payload keeps the live session — and the file
+	// it has assembled so far — instead of fetching the NZB and downloading
+	// every segment again. Identical creates in flight share one build.
+	var res nzbCreateResult
+	if key == "" {
+		res = nzbBuildAndRegister(key, "", nil, nzbURL, cfg)
+	} else {
+		var ok bool
+		res, ok = nzbCreateOrReuse(r.Context(), key, nzbCreateSig(nzbURL, cfg), nzbURL, cfg)
+		if !ok {
+			return // the client went away while waiting for an identical build
+		}
+	}
+	if res.status != 0 {
+		writeJSON(w, res.status, map[string]any{"error": res.msg})
 		return
 	}
 
-	// Assign a random key when none is provided by the caller.
-	if key == "" {
-		var b [16]byte
-		if _, err := rand.Read(b[:]); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			_ = os.RemoveAll(tmpDir)
-			return
+	if r.Method == http.MethodPost {
+		writeJSON(w, http.StatusOK, map[string]any{"key": res.key})
+		return
+	}
+	// GET → redirect straight to the stream URL; nzbResolveFile picks the file.
+	http.Redirect(w, r, "/nzb/stream/"+url.PathEscape(res.key), http.StatusTemporaryRedirect)
+}
+
+// nzbCreateResult is the outcome of a create: the session's key, or the error
+// response (status != 0) every request that shared the build answers with.
+type nzbCreateResult struct {
+	key    string
+	status int
+	msg    string
+}
+
+// nzbBuildKey identifies one in-progress build: a key and the normalized
+// payload it builds for.
+type nzbBuildKey struct{ key, sig string }
+
+// nzbBuildFlight is one in-progress build of a keyed session. The request that
+// started it is the leader; identical requests wait on done and answer with res.
+type nzbBuildFlight struct {
+	done chan struct{}
+	res  nzbCreateResult // set before done is closed
+}
+
+// nzbCreateSig is the normalized create payload: what the built session
+// depends on. Equivalent spellings of the same request (nzbUrl vs nzbUrls[0],
+// URL vs object servers, an omitted port vs its default, …) share one
+// signature, because it is computed from the parsed values, not the raw JSON.
+// Only the first server is used by a session, so only it counts. The NZB is
+// identified by its URL: it is not fetched again to compare content.
+func nzbCreateSig(nzbURL string, cfg nzb.ServerConfig) string {
+	b, err := json.Marshal([]any{nzbURL, cfg.Host, cfg.Port, cfg.User, cfg.Pass, cfg.SSL, cfg.Connections})
+	if err != nil {
+		return "" // never matches: always rebuilt
+	}
+	return string(b)
+}
+
+// nzbCreateOrReuse answers a keyed create. In order: an equivalent live
+// session is reused; an identical build already in progress is waited for;
+// otherwise this request builds (and replaces whatever the key held). It
+// returns ok=false when ctx ends while waiting.
+func nzbCreateOrReuse(ctx context.Context, key, sig, nzbURL string, cfg nzb.ServerConfig) (res nzbCreateResult, ok bool) {
+	if sig == "" {
+		return nzbBuildAndRegister(key, sig, nil, nzbURL, cfg), true
+	}
+	for {
+		sess, fl, leader := nzbReuseOrLead(key, sig)
+		switch {
+		case sess != nil:
+			healthy := sess.healthy()
+			nzbSessionsMu.Lock()
+			if !healthy {
+				sess.noReuse = true // the retry — and every later create — rebuilds
+			}
+			nzbSessionsMu.Unlock()
+			nzbRelease(sess)
+			if healthy {
+				return nzbCreateResult{key: key}, true
+			}
+		case leader:
+			return nzbBuildAndRegister(key, sig, fl, nzbURL, cfg), true
+		default:
+			select {
+			case <-fl.done:
+				return fl.res, true
+			case <-ctx.Done():
+				return nzbCreateResult{}, false
+			}
 		}
-		key = fmt.Sprintf("%x", b)
+	}
+}
+
+// nzbReuseOrLead atomically decides what a keyed create does. It returns the
+// live session to reuse — pinned (refCount) and with lastAccess refreshed; the
+// caller must nzbRelease it — or the build already in progress for the same
+// payload to wait for, or (leader) a new flight this request must complete.
+// Doing all of it under one lock means a create can never slip between a
+// finishing build and its registration and build a duplicate.
+func nzbReuseOrLead(key, sig string) (sess *nzbSession, fl *nzbBuildFlight, leader bool) {
+	nzbSessionsMu.Lock()
+	defer nzbSessionsMu.Unlock()
+	now := time.Now()
+	if cur, ok := nzbSessions[key]; ok && cur.sig == sig && !cur.noReuse &&
+		now.Sub(cur.created) < nzbSessionTTL && now.Sub(cur.lastAccess) < nzbSessionTTL {
+		cur.refCount++
+		cur.lastAccess = now
+		return cur, nil, false
+	}
+	bk := nzbBuildKey{key, sig}
+	if cur, ok := nzbBuilds[bk]; ok {
+		return nil, cur, false
+	}
+	fl = &nzbBuildFlight{done: make(chan struct{})}
+	nzbBuilds[bk] = fl
+	return nil, fl, true
+}
+
+// healthy reports whether no assembly of the session has failed. A session
+// with a failed (or cancelled) assembly is not reused: a retry must rebuild.
+func (sess *nzbSession) healthy() bool {
+	sess.mu.Lock()
+	states := make([]*nzbFileState, 0, len(sess.fileStates))
+	for _, fs := range sess.fileStates {
+		states = append(states, fs)
+	}
+	sess.mu.Unlock()
+	for _, fs := range states {
+		fs.mu.Lock()
+		asm := fs.asm
+		fs.mu.Unlock()
+		if asm != nil && asm.Err() != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// nzbBuildAndRegister builds a session and registers it under its key. When
+// fl is non-nil the caller leads that flight, and it is always completed —
+// also on failure or panic — so waiters are never stranded.
+func nzbBuildAndRegister(key, sig string, fl *nzbBuildFlight, nzbURL string, cfg nzb.ServerConfig) (res nzbCreateResult) {
+	bk := nzbBuildKey{key, sig}
+	if fl != nil {
+		res = nzbCreateResult{status: http.StatusInternalServerError, msg: "nzb session build aborted"}
+		defer func() {
+			nzbSessionsMu.Lock()
+			if nzbBuilds[bk] == fl {
+				delete(nzbBuilds, bk)
+			}
+			nzbSessionsMu.Unlock()
+			fl.res = res
+			close(fl.done)
+		}()
 	}
 
-	sess := &nzbSession{
-		key:        key,
-		cfg:        cfg,
-		files:      files,
-		tmpDir:     tmpDir,
-		created:    time.Now(),
-		lastAccess: time.Now(),
-		fileStates: map[string]*nzbFileState{},
+	sess, fail := nzbBuildSession(key, sig, nzbURL, cfg)
+	if sess == nil {
+		res = fail
+		return res
 	}
 
 	nzbSessionsMu.Lock()
@@ -446,21 +582,71 @@ func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 	// (nzbRetire/nzbRelease): discarding it now would cancel the assembly
 	// mid-stream and truncate the playing file.
 	var discard *nzbSession
-	if old, ok := nzbSessions[key]; ok {
+	if old, ok := nzbSessions[sess.key]; ok {
 		discard = nzbRetire(old)
 	}
-	nzbSessions[key] = sess
+	nzbSessions[sess.key] = sess
+	if fl != nil && nzbBuilds[bk] == fl {
+		delete(nzbBuilds, bk) // same critical section: no window with neither flight nor session
+	}
 	nzbSessionsMu.Unlock()
 	if discard != nil {
 		go discard.discard()
 	}
+	res = nzbCreateResult{key: sess.key}
+	return res
+}
 
-	if r.Method == http.MethodPost {
-		writeJSON(w, http.StatusOK, map[string]any{"key": key})
-		return
+// nzbBuildSession fetches and parses the NZB and returns a new, unregistered
+// session, or the error response to send.
+func nzbBuildSession(key, sig, nzbURL string, cfg nzb.ServerConfig) (*nzbSession, nzbCreateResult) {
+	// Fetch the NZB file from the provided URL. validateFetchHost is an
+	// early 403; archiveFetchGet (archive.go, same package) performs the
+	// actual fetch through archiveFetchClient, whose dialer re-validates
+	// the resolved IP at connect time and whose redirect policy
+	// re-validates every hop — api.go's getClient/httpGet must not be used
+	// here since this route fetches a caller-supplied URL unauthenticated.
+	if err := validateFetchHost(nzbURL); err != nil {
+		return nil, nzbCreateResult{status: http.StatusBadGateway, msg: err.Error()}
 	}
-	// GET → redirect straight to the stream URL; nzbResolveFile picks the file.
-	http.Redirect(w, r, "/nzb/stream/"+url.PathEscape(key), http.StatusTemporaryRedirect)
+	nzbData, err := archiveFetchGet(nzbURL, nzbMaxDownloadBytes)
+	if err != nil {
+		return nil, nzbCreateResult{status: http.StatusBadGateway, msg: err.Error()}
+	}
+
+	// Parse the NZB XML.
+	files, err := nzb.Parse(nzbData)
+	if err != nil {
+		return nil, nzbCreateResult{status: http.StatusUnprocessableEntity, msg: "nzb: " + err.Error()}
+	}
+
+	// Create an isolated temp directory for assembled file cache.
+	tmpDir, err := os.MkdirTemp("", nzbTmpDirPrefix)
+	if err != nil {
+		return nil, nzbCreateResult{status: http.StatusInternalServerError, msg: err.Error()}
+	}
+
+	// Assign a random key when none is provided by the caller.
+	if key == "" {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			_ = os.RemoveAll(tmpDir)
+			return nil, nzbCreateResult{status: http.StatusInternalServerError, msg: err.Error()}
+		}
+		key = fmt.Sprintf("%x", b)
+	}
+
+	now := time.Now()
+	return &nzbSession{
+		key:        key,
+		sig:        sig,
+		cfg:        cfg,
+		files:      files,
+		tmpDir:     tmpDir,
+		created:    now,
+		lastAccess: now,
+		fileStates: map[string]*nzbFileState{},
+	}, nzbCreateResult{}
 }
 
 // parseNzbServers accepts either the canonical stremio-core form — a JSON array

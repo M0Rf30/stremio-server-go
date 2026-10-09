@@ -54,8 +54,9 @@ func TestArchiveCreate_ReplacingKeyDoesNotKillLiveStream(t *testing.T) {
 		return old.refCount > 0 && fl != nil && fl.progress() >= 256<<10
 	})
 
-	// The same key is created again (new Range/seek round trip).
-	_, fresh := progCreate(t, h, p, "zip")
+	// The same key is created again with another payload (new Range/seek round
+	// trip; an identical payload would reuse the session, see archive_reuse_test.go).
+	_, fresh := progCreateWith(t, h, p, "zip", map[string]any{"fileMustInclude": "movie"})
 	if fresh == old {
 		t.Fatal("create did not allocate a new session")
 	}
@@ -98,7 +99,7 @@ func TestArchiveCreate_ReplacingIdleKeyDestroysOldSession(t *testing.T) {
 	if rec := progGet(h, http.MethodGet, "zip", key, "movie.mkv", ""); rec.Code != http.StatusOK {
 		t.Fatalf("warm-up stream: status %d", rec.Code)
 	}
-	_, fresh := progCreate(t, h, p, "zip")
+	_, fresh := progCreateWith(t, h, p, "zip", map[string]any{"fileMustInclude": "movie"})
 	if fresh == old {
 		t.Fatal("create did not allocate a new session")
 	}

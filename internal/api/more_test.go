@@ -338,7 +338,9 @@ func TestHandlerArchiveCreate_KeyCollisionRemovesOldTempArchive(t *testing.T) {
 		t.Fatalf("expected old archive to exist before overwrite: %v", err)
 	}
 
-	req2 := httptest.NewRequest(http.MethodPost, "/zip/create/"+key, strings.NewReader(body))
+	// A different payload replaces the session (an identical one would reuse it).
+	body2 := fmt.Sprintf(`{"url":"%s/test.zip","fileIdx":0}`, zipSrv.URL)
+	req2 := httptest.NewRequest(http.MethodPost, "/zip/create/"+key, strings.NewReader(body2))
 	req2.Header.Set("Content-Type", "application/json")
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)

@@ -471,9 +471,16 @@ func TestArchiveCreate_RecreateStormKeepsEveryStreamComplete(t *testing.T) {
 			archiveDestroySession(cur)
 		}
 	})
-	body, err := json.Marshal(map[string]string{"url": p})
-	if err != nil {
-		t.Fatal(err)
+	// Alternate two payloads that select the same entry: an identical create
+	// reuses the live session, so every create must differ from the one before
+	// it to keep replacing (and retiring) sessions.
+	var bodies [2][]byte
+	for i, pl := range []map[string]string{{"url": p}, {"url": p, "fileMustInclude": "movie"}} {
+		b, err := json.Marshal(pl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies[i] = b
 	}
 
 	var (
@@ -496,7 +503,7 @@ func TestArchiveCreate_RecreateStormKeepsEveryStreamComplete(t *testing.T) {
 		}()
 	}
 	for i := range 25 {
-		req := httptest.NewRequest(http.MethodPost, "/zip/create/"+key, bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/zip/create/"+key, bytes.NewReader(bodies[(i+1)%2])) // [0] built the live session
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {

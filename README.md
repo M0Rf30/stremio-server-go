@@ -36,6 +36,13 @@ Not affiliated with or endorsed by Stremio.
 - **Archive streaming** - direct playback of media inside ZIP / RAR / 7z / TAR /
   TGZ containers (`/zip`, `/rar`, `/7zip`, `/tar`, `/tgz`), plus **Usenet/NZB**
   (`/nzb`, NNTP + yEnc) and **FTP/FTPS** (`/ftp`) streaming - all pure-Go.
+  Playback starts before the whole file is ready: stored (uncompressed) ZIP/TAR
+  entries are served in place, other entries and NZB files stream while they
+  are extracted/assembled (NZB over parallel NNTP connections). Repeating an
+  identical `…/create/{key}` request (players re-request it on every seek)
+  reuses the live session for up to an hour instead of rebuilding it; local
+  archives are re-checked by size and modification time, remote URLs are not
+  re-fetched within that hour.
 - **Disk-bounded cache** - LRU eviction honouring the `cacheSize` setting: `0` is a true "no caching" mode (every torrent with zero open readers is purged once its idle grace window elapses; a negative/unlimited value never evicts on size), plus idle-torrent removal after inactivity (`STREMIO_TORRENT_IDLE_TIMEOUT`).
 - Self-signed HTTPS on `:12470` for HTTPS web UIs (e.g. WebKitGTK shells).
 - **Metrics** - `GET /metrics` exposes Prometheus-format gauges (goroutines, heap, active torrents, HLS sessions, proxy cache) with permissive CORS headers (`Access-Control-Allow-Origin: *`); **do not expose to untrusted networks** — bind to loopback only.
