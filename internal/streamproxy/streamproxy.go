@@ -583,45 +583,93 @@ func ExternalBase(r *http.Request) string {
 }
 
 // buildProxyURL constructs a proxy URL for the given destination.
-// Format: <extBase><endpoint>?d=<base64url(dest)>[&h_/r_ headers][&api_password].
+// Format: <extBase><endpoint>?d=<base64url(dest)>[&h_/r_ headers][&api_password|&token][&proxy].
+// Callers building many URLs for the same request (playlist rewrites) should
+// use newProxyURLBuilder once and call build per URL.
 func (h *Handler) buildProxyURL(extBase, endpoint, dest string, opts *Options) string {
-	// Use strings.Builder to avoid O(N) reallocation ladder when appending
-	// header parameters in the loop below (F3).
+	return h.newProxyURLBuilder(opts).build(extBase, endpoint, dest)
+}
+
+// proxyURLBuilder holds the per-request parts of a proxy URL — escaped
+// header overrides, credential and upstream proxy — that are identical for
+// every URL of one rewritten playlist, so they are escaped once instead of
+// once per segment.
+type proxyURLBuilder struct {
+	h       *Handler
+	opts    *Options
+	headers string // "&h_…=…&r_…=…", already escaped
+	cred    string // "&api_password=…" (password mode)
+	tokens  bool   // mint a per-URL sub-token instead (token mode)
+	tail    string // "&proxy=…"
+}
+
+func (h *Handler) newProxyURLBuilder(opts *Options) *proxyURLBuilder {
+	pb := &proxyURLBuilder{h: h, opts: opts}
+	if opts == nil {
+		return pb
+	}
 	var b strings.Builder
-	b.Grow(256)
+	for k, vs := range opts.ReqHeaders {
+		for _, v := range vs {
+			b.WriteString("&h_")
+			b.WriteString(url.QueryEscape(k))
+			b.WriteByte('=')
+			b.WriteString(url.QueryEscape(v))
+		}
+	}
+	for k, vs := range opts.RespHeaders {
+		for _, v := range vs {
+			b.WriteString("&r_")
+			b.WriteString(url.QueryEscape(k))
+			b.WriteByte('=')
+			b.WriteString(url.QueryEscape(v))
+		}
+	}
+	pb.headers = b.String()
+	if opts.APIPassword != "" {
+		pb.cred = "&api_password=" + url.QueryEscape(opts.APIPassword)
+	} else {
+		// Same preconditions as subToken: only token-authorised requests on a
+		// signing-enabled handler can mint sub-tokens; skip the per-URL work
+		// otherwise.
+		pb.tokens = opts.subTokenExp != 0 && len(h.cfg.Secret) > 0
+	}
+	if opts.Proxy != "" {
+		pb.tail = "&proxy=" + url.QueryEscape(opts.Proxy)
+	}
+	return pb
+}
+
+// build returns the proxy URL for one destination with a single allocation
+// (plus the sub-token in token mode).
+func (pb *proxyURLBuilder) build(extBase, endpoint, dest string) string {
+	enc := base64.RawURLEncoding
+	var tok string
+	if pb.tokens {
+		if t := pb.h.subToken(pb.opts, endpoint, map[string]string{"d": enc.EncodeToString([]byte(dest))}); t != "" {
+			tok = "&token=" + url.QueryEscape(t)
+		}
+	}
+	var b strings.Builder
+	b.Grow(len(extBase) + len(endpoint) + len("?d=") + enc.EncodedLen(len(dest)) +
+		len(pb.headers) + len(pb.cred) + len(tok) + len(pb.tail))
 	b.WriteString(extBase)
 	b.WriteString(endpoint)
 	b.WriteString("?d=")
-	b.WriteString(base64.RawURLEncoding.EncodeToString([]byte(dest)))
-	if opts != nil {
-		for k, vs := range opts.ReqHeaders {
-			for _, v := range vs {
-				b.WriteString("&h_")
-				b.WriteString(url.QueryEscape(k))
-				b.WriteByte('=')
-				b.WriteString(url.QueryEscape(v))
-			}
-		}
-		for k, vs := range opts.RespHeaders {
-			for _, v := range vs {
-				b.WriteString("&r_")
-				b.WriteString(url.QueryEscape(k))
-				b.WriteByte('=')
-				b.WriteString(url.QueryEscape(v))
-			}
-		}
-		if opts.APIPassword != "" {
-			b.WriteString("&api_password=")
-			b.WriteString(url.QueryEscape(opts.APIPassword))
-		} else if tok := h.subToken(opts, endpoint, map[string]string{"d": base64.RawURLEncoding.EncodeToString([]byte(dest))}); tok != "" {
-			b.WriteString("&token=")
-			b.WriteString(url.QueryEscape(tok))
-		}
-		if opts.Proxy != "" {
-			b.WriteString("&proxy=")
-			b.WriteString(url.QueryEscape(opts.Proxy))
-		}
+	// Encode in 30-byte chunks (a multiple of 3, so no padding between
+	// chunks): string→[]byte conversions of ≤32 bytes stay on the stack, so
+	// this adds no allocation regardless of the destination's length.
+	var buf [40]byte
+	for i := 0; i < len(dest); i += 30 {
+		j := min(i+30, len(dest))
+		n := enc.EncodedLen(j - i)
+		enc.Encode(buf[:n], []byte(dest[i:j]))
+		b.Write(buf[:n])
 	}
+	b.WriteString(pb.headers)
+	b.WriteString(pb.cred)
+	b.WriteString(tok)
+	b.WriteString(pb.tail)
 	return b.String()
 }
 
