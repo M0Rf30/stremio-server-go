@@ -849,6 +849,7 @@ func scanLocalFiles() []localMeta {
 	}
 
 	var items []localMeta
+	seen := make(map[string]struct{}) // localHex values present in this scan
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
@@ -863,6 +864,7 @@ func scanLocalFiles() []localMeta {
 		}
 		stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		hex := localID(abs)
+		seen[hex] = struct{}{}
 		parsed := parseFilenameToMeta(stem)
 		if parsed.ctype == "series" {
 			if dirName := bareSeriesDirName(path, stem, parsed.name); dirName != "" {
@@ -916,7 +918,44 @@ func scanLocalFiles() []localMeta {
 		})
 		return nil
 	})
+	pruneLocalCaches(seen, len(items))
 	return items
+}
+
+// localCacheSlack is how many stale (no longer on disk) entries the IMDb and
+// tt→path caches may hold above the live library size before a scan prunes
+// them. It keeps the common case (stable library) free of any pruning work.
+const localCacheSlack = 1024
+
+// pruneLocalCaches drops IMDb/tt-path cache entries for files that no longer
+// exist, so a library with churning files cannot grow imdbByLocal/ttToPath
+// without bound. It never prunes after an empty scan (an unmounted or
+// temporarily unreadable library must not discard resolved ids) and only once
+// the caches exceed the live size by localCacheSlack.
+func pruneLocalCaches(seenHex map[string]struct{}, live int) {
+	if live == 0 {
+		return
+	}
+	imdbCacheMu.Lock()
+	if len(imdbByLocal) > live+localCacheSlack {
+		for k := range imdbByLocal {
+			if _, ok := seenHex[k]; !ok {
+				delete(imdbByLocal, k)
+			}
+		}
+	}
+	imdbCacheMu.Unlock()
+
+	// ttToPath values are absolute paths; localID(path) is the imdbByLocal key.
+	ttPathMu.Lock()
+	if len(ttToPath) > live+localCacheSlack {
+		for tt, p := range ttToPath {
+			if _, ok := seenHex[localID(p)]; !ok {
+				delete(ttToPath, tt)
+			}
+		}
+	}
+	ttPathMu.Unlock()
 }
 
 // localID returns a short SHA-256 hex of the absolute path, used as the

@@ -1077,25 +1077,16 @@ func resolveIndex(seg string, files []types.FileInfo, mustInc []*regexp.Regexp, 
 	return eng.GuessFileIdx()
 }
 
+// compileMustInclude compiles the request's fileMustInclude values (f= query /
+// POST body), reusing compiled patterns from a bounded LRU so repeat requests
+// do not pay regexp.Compile each time.
 func compileMustInclude(vals []string) []*regexp.Regexp {
 	var out []*regexp.Regexp
 	for _, v := range vals {
 		if v == "" {
 			continue
 		}
-		if len(v) > 1 && v[0] == '/' {
-			if i := strings.LastIndex(v, "/"); i > 0 {
-				body, flags := v[1:i], v[i+1:]
-				if strings.Contains(flags, "i") {
-					body = "(?i)" + body
-				}
-				if re, err := regexp.Compile(body); err == nil {
-					out = append(out, re)
-					continue
-				}
-			}
-		}
-		if re, err := regexp.Compile(regexp.QuoteMeta(v)); err == nil {
+		if re := cachedMustInclude(v); re != nil {
 			out = append(out, re)
 		}
 	}
@@ -2111,9 +2102,46 @@ var streamBufPool = sync.Pool{
 // buffer was never used and torrent readers were read 32 KB at a time.
 type writerOnly struct{ io.Writer }
 
+// streamWriteIdleTimeout bounds how long a single response write may block on
+// a client that has stopped reading (socket send buffer full). The deadline is
+// re-armed before every write, so a healthy stream of any total duration is
+// never cut — only a client that makes no progress for this long is dropped,
+// releasing its goroutine, torrent reader and pooled buffer. It is generous
+// because players legitimately stop reading for a long while when paused;
+// they simply re-request with a Range header on resume. 0 disables.
+var streamWriteIdleTimeout = 5 * time.Minute
+
+// deadlineWriter re-arms the connection's write deadline before each Write.
+// rc is held by value so the wrapper costs a single allocation per stream.
+type deadlineWriter struct {
+	w       http.ResponseWriter
+	rc      http.ResponseController
+	timeout time.Duration
+	off     bool // deadlines unsupported by w: pass writes straight through
+}
+
+func (d *deadlineWriter) Write(p []byte) (int, error) {
+	if !d.off {
+		if err := d.rc.SetWriteDeadline(time.Now().Add(d.timeout)); err != nil {
+			// Not supported by this writer (e.g. httptest recorder): stop trying.
+			d.off = true
+		}
+	}
+	return d.w.Write(p)
+}
+
 // copyStream copies src to w through buf (a streamBufPool buffer), in
-// buf-sized reads.
+// buf-sized reads. When w is an http.ResponseWriter the per-write idle
+// deadline (streamWriteIdleTimeout) is applied and cleared on return.
 func copyStream(w io.Writer, src io.Reader, buf []byte) {
+	if rw, ok := w.(http.ResponseWriter); ok && streamWriteIdleTimeout > 0 {
+		dw := &deadlineWriter{w: rw, rc: *http.NewResponseController(rw), timeout: streamWriteIdleTimeout}
+		_, _ = io.CopyBuffer(dw, src, buf)
+		if !dw.off {
+			_ = dw.rc.SetWriteDeadline(time.Time{})
+		}
+		return
+	}
 	_, _ = io.CopyBuffer(writerOnly{w}, src, buf)
 }
 

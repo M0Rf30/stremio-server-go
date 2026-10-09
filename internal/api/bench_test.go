@@ -62,3 +62,15 @@ func BenchmarkStreamRange(b *testing.B) {
 func BenchmarkStreamFull(b *testing.B) {
 	benchServe(b, benchHandler(testEngine()), "GET", "/"+testIH+"/0", nil)
 }
+
+func BenchmarkCompileMustInclude(b *testing.B) {
+	vals := []string{"/S01E0[1-3].*\\.mkv$/i", "movie.mkv"}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = compileMustInclude(vals)
+	}
+}
+
+func BenchmarkStreamMustInclude(b *testing.B) {
+	benchServe(b, benchHandler(testEngine()), "GET", "/"+testIH+"/0?f=%2Fb%5C.mp4%2Fi", nil)
+}
