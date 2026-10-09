@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -201,7 +202,7 @@ func TestRegistryLocalReload(t *testing.T) {
 	if err := os.WriteFile(path, []byte(playlistDefs), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reg.lastCheck = time.Time{}
+	reg.lastCheck.Store(0)
 	if _, ok := reg.lookup("EXAMPLE"); !ok {
 		t.Fatal("definition not loaded")
 	}
@@ -210,14 +211,61 @@ func TestRegistryLocalReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = os.Chtimes(path, time.Now().Add(time.Minute), time.Now().Add(time.Minute))
-	reg.lastCheck = time.Time{}
+	reg.lastCheck.Store(0)
 	if _, ok := reg.lookup("example"); !ok {
 		t.Fatal("previous set dropped after invalid edit")
 	}
 	_ = os.Remove(path)
-	reg.lastCheck = time.Time{}
+	reg.lastCheck.Store(0)
 	if _, ok := reg.lookup("example"); ok {
 		t.Fatal("definition kept after file removal")
+	}
+}
+
+// TestRegistryConcurrentReload: readers run lock-free while the local file is
+// rewritten and reloaded; under -race this exercises the snapshot handoff.
+func TestRegistryConcurrentReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "extractors.json")
+	write := func(match string) {
+		doc := `{"version":1,"extractors":{"e":{"match":"` + match + `","steps":[{"fetch":"{input}"}],"result":{"url":"{input}","endpoint":"stream"}}}}`
+		if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	write("/a/")
+	reg := newDefRegistry(Config{AppPath: dir})
+	defer reg.close()
+	if _, _, ok := reg.match("https://h/a/1"); !ok {
+		t.Fatal("initial definitions not loaded eagerly")
+	}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 8 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_, _, _ = reg.match("https://h/a/1")
+					_, _ = reg.lookup("e")
+				}
+			}
+		})
+	}
+	for i := range 20 {
+		write([]string{"/a/", "/b/"}[i%2])
+		_ = os.Chtimes(path, time.Now().Add(time.Duration(i+1)*time.Second), time.Now().Add(time.Duration(i+1)*time.Second))
+		reg.lastCheck.Store(0)
+		_, _, _ = reg.match("x")
+	}
+	close(stop)
+	wg.Wait()
+	// Last write was "/b/" (i=19).
+	reg.lastCheck.Store(0)
+	if _, _, ok := reg.match("https://h/b/1"); !ok {
+		t.Error("final reload not visible")
 	}
 }
 
