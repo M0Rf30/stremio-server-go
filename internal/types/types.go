@@ -22,8 +22,12 @@ type Config struct {
 	AppPath         string // application/cache root, e.g. ~/.stremio-server
 	CacheRoot       string // torrent piece cache root (defaults to AppPath)
 	MemoryCacheSize int64  // opt-in in-RAM piece cache budget in bytes; 0 = disabled (write pieces to disk)
-	ListenPort      int    // BitTorrent peer listen port (0 = random)
-	WebUI           string // redirect target for "GET /" (e.g. https://web.stremio.com/)
+	// StorageMmap memory-maps torrent files in the disk piece cache instead of
+	// classic pread/pwrite (TORRENT_STORAGE_DEFAULT_FILE_IO=mmap). Off by
+	// default: mapped pages count as process RSS for the whole streamed file.
+	StorageMmap bool
+	ListenPort  int    // BitTorrent peer listen port (0 = random)
+	WebUI       string // redirect target for "GET /" (e.g. https://web.stremio.com/)
 	// PublicURL is this server's externally reachable base URL behind a
 	// reverse proxy (STREMIO_PUBLIC_URL), e.g. https://stremio.example.com.
 	// When set it is used verbatim for the GET / landing redirect and the
