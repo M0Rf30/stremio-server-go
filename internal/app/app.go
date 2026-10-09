@@ -79,7 +79,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	defer cancel()
 	logging.Setup(logw)
 	if earlyenv.Applied {
-		logging.For("engine").Info("32-bit build: using classic file I/O for torrent storage (mmap cannot map files of 4 GiB or more)")
+		logging.For("engine").Info("torrent storage uses classic file I/O (set TORRENT_STORAGE_DEFAULT_FILE_IO=mmap to memory-map instead)")
 	}
 
 	lookup := cfg.Lookup
