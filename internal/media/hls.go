@@ -1608,6 +1608,7 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	// input error, so inspect the output before caching it (see segcheck.go).
 	// The optional retry writes to its own tmp file so the first attempt's
 	// output survives a failed or timed-out retry.
+	began := time.Now()
 	want := segExpectation(kind, hasVideo, videoEnd, hasAudio, start, dur)
 	retryTmp := segFile + ".retry.tmp.ts"
 	out, reason, err := transcodeChecked(dctx, filename, start, preRolls, [2]string{tmp, retryTmp}, encodeOnce,
@@ -1618,7 +1619,7 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 		if hwCanceled {
 			return "", err
 		}
-		return "", fmt.Errorf("hls: transcode %s: %w", filename, err)
+		return "", fmt.Errorf("hls: transcode %s: %w", filename, classifySegmentError(ctx, dctx, globalRelay, inputURL, began, err))
 	}
 	if reason == "" && m.closing.Load() {
 		// The input may have been cut off under ffmpeg, which can
@@ -1638,6 +1639,29 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 		s.evictSegments(m.segmentCacheBytes(s), filename, now)
 	}
 	return p, err
+}
+
+// classifySegmentError marks a failed segment transcode whose cause lies
+// with the source, so the HTTP layer can tell it from a missing segment:
+// types.ErrHLSSourceTimeout if the relay saw the origin time out or the
+// transcode ran past its overall deadline (dctx), types.ErrHLSSourceFailed
+// if the relay saw any other origin failure for inputURL since began.
+// Anything else, including a caller that went away (ctx), is returned
+// unchanged.
+func classifySegmentError(ctx, dctx context.Context, rl *mediaRelay, inputURL string, began time.Time, err error) error {
+	if ctx.Err() != nil {
+		return err
+	}
+	if f, ok := rl.failureSince(inputURL, began); ok {
+		if f.timeout {
+			return fmt.Errorf("%w: %s: %w", types.ErrHLSSourceTimeout, f.reason, err)
+		}
+		return fmt.Errorf("%w: %s: %w", types.ErrHLSSourceFailed, f.reason, err)
+	}
+	if errors.Is(dctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w: transcode deadline exceeded: %w", types.ErrHLSSourceTimeout, err)
+	}
+	return err
 }
 
 // segmentJob carries the per-segment inputs of buildSegmentArgs, resolved

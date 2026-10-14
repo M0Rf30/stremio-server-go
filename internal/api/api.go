@@ -1763,6 +1763,9 @@ func (s *server) handleHLSProbe(w http.ResponseWriter, r *http.Request) {
 // @Param    bufSize    query  string  false  "per-session video bufsize, default = 2x bitrate (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)"
 // @Success  200  {string}  string  "m3u8 / MPEG-TS / WebVTT"
 // @Failure  400  {string}  string  "invalid per-session override"
+// @Failure  404  {string}  string  "unknown session or segment"
+// @Failure  502  {string}  string  "the source failed while the segment was transcoded (reason in the body)"
+// @Failure  504  {string}  string  "the source or the transcode timed out (reason in the body)"
 // @Router   /hlsv2/{id}/{file} [get]
 func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string) {
 	if r.Method == http.MethodDelete {
@@ -1803,7 +1806,16 @@ func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string)
 	}
 	path, ct, err := s.prober.HLSFile(r.Context(), id, file)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		// A source failure is distinguishable from a missing segment, so a
+		// client can back off or retry instead of treating it as the end.
+		code := http.StatusNotFound
+		switch {
+		case errors.Is(err, types.ErrHLSSourceTimeout):
+			code = http.StatusGatewayTimeout
+		case errors.Is(err, types.ErrHLSSourceFailed):
+			code = http.StatusBadGateway
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	setActiveContentGuards(w.Header())
