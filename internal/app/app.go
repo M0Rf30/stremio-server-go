@@ -538,6 +538,12 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	case runErr = <-fatalCh:
 	}
 	logging.For("http").Info("shutting down")
+	// Tell the HLS manager first: draining the servers (and stopping the
+	// engines) can cut off the streams this process feeds a running ffmpeg,
+	// whose output must then not be cached.
+	if b, ok := prober.(interface{ BeginShutdown() }); ok {
+		b.BeginShutdown()
+	}
 
 	var shutWg sync.WaitGroup
 	shutOne := func(s *http.Server, name string) {
