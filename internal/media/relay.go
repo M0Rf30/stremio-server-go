@@ -410,12 +410,21 @@ func looksLikePlaylist(resp *http.Response, upstream string) bool {
 
 // servePlaylist reads resp's body (capped at relayMaxPlaylistBytes), rewrites
 // every referenced URI (segment or nested playlist) to a fresh relay token
-// resolved against upstream, and serves the rewritten playlist.
+// resolved against the playlist's own URL, and serves the rewritten playlist.
+// That is the final URL after any redirects (resp.Request.URL), as RFC 8216
+// section 4.1 requires and as ffmpeg itself resolves; upstream, the URL the
+// relay was asked for, is only the fallback.
 func (r *mediaRelay) servePlaylist(w http.ResponseWriter, resp *http.Response, upstream string) {
-	base, err := url.Parse(upstream)
-	if err != nil {
-		http.Error(w, "bad upstream url", http.StatusBadGateway)
-		return
+	var base *url.URL
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
+	} else {
+		u, err := url.Parse(upstream)
+		if err != nil {
+			http.Error(w, "bad upstream url", http.StatusBadGateway)
+			return
+		}
+		base = u
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, relayMaxPlaylistBytes+1))
 	if err != nil {
