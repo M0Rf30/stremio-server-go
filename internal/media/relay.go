@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"container/list"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -75,6 +76,18 @@ type relayEntry struct {
 	token     string
 	url       string
 	expiresAt time.Time
+	// fail is the latest upstream failure seen while serving this token
+	// (zero if none); see recordFailure and failureSince.
+	fail relayFailure
+}
+
+// relayFailure describes an upstream failure the relay saw while serving a
+// token, so a transcode that then fails can say why (see failureSince).
+// reason never contains the upstream URL, which may carry credentials.
+type relayFailure struct {
+	at      time.Time
+	reason  string
+	timeout bool
 }
 
 // mediaRelay is a loopback-only HTTP proxy that sits between ffmpeg/ffprobe
@@ -298,13 +311,63 @@ func (r *mediaRelay) handle(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "unknown or expired relay token", http.StatusNotFound)
 		return
 	}
-	r.proxy(w, req, upstream)
+	r.proxy(w, req, token, upstream)
+}
+
+// recordFailure notes an upstream failure for token, unless the downstream
+// request (ffmpeg) was itself cancelled, in which case the failure is ours,
+// not the source's.
+func (r *mediaRelay) recordFailure(req *http.Request, token, reason string, timeout bool) {
+	if req.Context().Err() != nil {
+		return
+	}
+	r.storeFailure(token, reason, timeout)
+}
+
+// storeFailure records an upstream failure for token unconditionally.
+func (r *mediaRelay) storeFailure(token, reason string, timeout bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if el, ok := r.tokens[token]; ok {
+		el.Value.(*relayEntry).fail = relayFailure{at: time.Now(), reason: reason, timeout: timeout}
+	}
+}
+
+// failureSince returns the latest upstream failure recorded at or after
+// since for the relay URL relayURL (as returned by register), if any. Only
+// the token itself is consulted: a failure on a nested playlist's segment
+// token is not attributed to the top-level URL. Tokens are shared per
+// upstream URL, so a failure seen by a concurrent segment of the same
+// source counts too: the source was failing either way.
+func (r *mediaRelay) failureSince(relayURL string, since time.Time) (relayFailure, bool) {
+	u, err := url.Parse(relayURL)
+	if err != nil || !strings.HasPrefix(u.Path, "/r/") {
+		return relayFailure{}, false
+	}
+	token := strings.TrimPrefix(u.Path, "/r/")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	el, ok := r.tokens[token]
+	if !ok {
+		return relayFailure{}, false
+	}
+	f := el.Value.(*relayEntry).fail
+	if f.reason == "" || f.at.Before(since) {
+		return relayFailure{}, false
+	}
+	return f, true
+}
+
+// isTimeout reports whether err is a network or context timeout.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
 }
 
 // proxy fetches upstream through r.client (forwarding Range and the
 // method), rewriting nested URIs if the response looks like an HLS
 // playlist, and otherwise streaming status/headers/body straight through.
-func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, upstream string) {
+func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upstream string) {
 	outReq, err := http.NewRequestWithContext(req.Context(), req.Method, upstream, nil)
 	if err != nil {
 		http.Error(w, "bad upstream url", http.StatusBadGateway)
@@ -315,10 +378,21 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, upstream st
 	}
 	resp, err := r.client.Do(outReq)
 	if err != nil {
+		if isTimeout(err) {
+			r.recordFailure(req, token, "upstream timed out", true)
+		} else {
+			r.recordFailure(req, token, "upstream fetch failed", false)
+		}
 		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// 416 is a healthy answer to a read past the end (ffmpeg probing the
+	// tail), not a source failure.
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		r.recordFailure(req, token, "upstream returned "+resp.Status,
+			resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode == http.StatusRequestTimeout)
+	}
 
 	if req.Method == http.MethodGet {
 		// Sniff the body prefix: ffmpeg detects HLS/DASH by content, not by
@@ -349,6 +423,12 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, upstream st
 		rd := &errTrackingReader{r: resp.Body}
 		_, _ = io.Copy(w, rd)
 		if rd.err != nil && !errors.Is(rd.err, io.EOF) {
+			// Not recordFailure: ffmpeg often drops its request as soon
+			// as the body breaks, so its context is no reliable sign that
+			// the break was ours; only a cancelled upstream read is.
+			if !errors.Is(rd.err, context.Canceled) {
+				r.storeFailure(token, "upstream body ended early", isTimeout(rd.err))
+			}
 			// The upstream body broke mid-stream (reset, timeout, short
 			// read vs Content-Length). Abort the downstream connection so
 			// ffmpeg sees a failed transfer rather than a cleanly

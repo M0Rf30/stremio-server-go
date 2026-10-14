@@ -173,6 +173,7 @@ type fakeProber struct {
 
 	startHLSErr error
 	lastHLSOpts types.HLSSessionOptions
+	hlsFileErr  error // returned by HLSFile when set
 }
 
 func (p *fakeProber) Probe(_ string) (any, error)                          { return map[string]any{}, nil }
@@ -185,7 +186,7 @@ func (p *fakeProber) StartHLS(_, _ string, opts types.HLSSessionOptions) (string
 	return "", p.startHLSErr
 }
 func (p *fakeProber) HLSFile(_ context.Context, _, _ string) (string, string, error) {
-	return "", "", nil
+	return "", "", p.hlsFileErr
 }
 func (p *fakeProber) DeleteHLS(id string) error {
 	p.deleted = append(p.deleted, id)

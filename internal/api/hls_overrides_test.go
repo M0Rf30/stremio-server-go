@@ -96,3 +96,30 @@ func TestHandlerHLS_OverridesOnlyOnMaster(t *testing.T) {
 		t.Errorf("segment request reached StartHLS with %+v", p.lastHLSOpts)
 	}
 }
+
+// A segment that failed because of its source is answered 502/504 with the
+// reason, so a client can tell it from a missing segment (still 404).
+func TestHandlerHLS_SegmentErrorStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"source failed → 502", fmt.Errorf("hls: transcode seg3.ts: %w: upstream returned 429 Too Many Requests: exit status 1", types.ErrHLSSourceFailed), http.StatusBadGateway},
+		{"source timed out → 504", fmt.Errorf("hls: transcode seg3.ts: %w: upstream timed out: exit status 1", types.ErrHLSSourceTimeout), http.StatusGatewayTimeout},
+		{"unknown session stays 404", fmt.Errorf("hls: %w %q", types.ErrHLSSessionNotFound, "s1"), http.StatusNotFound},
+		{"any other error stays 404", errors.New("hls: transcode seg3.ts: exit status 1"), http.StatusNotFound},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := &fakeProber{hlsFileErr: c.err}
+			rec := serve(t, newHandlerWithProber(t, p), http.MethodGet, "/hlsv2/s1/seg3.ts", nil)
+			if rec.Code != c.code {
+				t.Errorf("status = %d; want %d", rec.Code, c.code)
+			}
+			if !strings.Contains(rec.Body.String(), c.err.Error()) {
+				t.Errorf("body %q does not carry the error message %q", rec.Body.String(), c.err.Error())
+			}
+		})
+	}
+}

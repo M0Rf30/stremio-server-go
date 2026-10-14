@@ -390,4 +390,13 @@ var (
 	// ErrHLSInvalidSessionID reports an HLS session id that is empty or could
 	// escape the HLS working directory (path traversal).
 	ErrHLSInvalidSessionID = errors.New("invalid session id")
+	// ErrHLSSourceFailed reports that a segment could not be produced
+	// because its source failed while it was being transcoded (the origin
+	// answered with an error status such as 429, the fetch failed, or the
+	// body broke off). The HTTP layer answers 502.
+	ErrHLSSourceFailed = errors.New("source failed")
+	// ErrHLSSourceTimeout reports that a segment could not be produced in
+	// time: the origin timed out, or the transcode ran past its deadline.
+	// The HTTP layer answers 504.
+	ErrHLSSourceTimeout = errors.New("source timed out")
 )
