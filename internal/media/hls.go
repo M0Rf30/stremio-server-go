@@ -209,6 +209,12 @@ type hlsManager struct {
 	// write and a reaper flush that read an older lastAccess can't land
 	// after it.
 	reaperWG sync.WaitGroup
+	// closing is set by BeginShutdown (and CloseHLS) once the process has
+	// started shutting down. The streams this process serves to ffmpeg (a
+	// torrent file through its own HTTP server) may then go away under it, so transcodeSegment stops starting new
+	// attempts (the libx264 fallback, the longer-pre-roll retry) and stops
+	// caching what it produces (see transcodeSegment).
+	closing atomic.Bool
 	// persist is true only when HLSConfig.Persist was requested AND the
 	// stable persist directory was usable (see newHLSBase); base is then
 	// <WorkDir>/stremio-hls-persist, sessions write session.json, and
@@ -1323,10 +1329,11 @@ func (m *hlsManager) extractSubtitle(ctx context.Context, s *hlsSession, k int) 
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("hls: subtitle extract %s: %w", filename, err)
 	}
-	// ffmpeg exits 0 after "Stream ends prematurely" (the input was cut
-	// mid-demux) and leaves a partial track behind. Never promote that to
-	// the permanent sub<k>.vtt cache: a later request must re-extract.
-	if stderr.containsFold("ends prematurely") {
+	// ffmpeg exits 0 after "Stream ends prematurely" or the Matroska
+	// demuxer's "File ended prematurely" (the input was cut mid-demux) and leaves a partial track
+	// behind. Never promote that to the permanent sub<k>.vtt cache: a later
+	// request must re-extract.
+	if stderr.containsFold("ends prematurely") || stderr.containsFold("ended prematurely") {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("hls: subtitle extract %s: input truncated: %s", filename, strings.TrimSpace(stderr.String()))
 	}
@@ -1578,9 +1585,23 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 				hwCanceled = true
 				return "", ctx.Err()
 			}
+			if m.closing.Load() {
+				return "", err // shutting down: don't start a software re-encode
+			}
 			return run(sw, preRoll, out) // transparent software fallback
 		}
 		return run(sw, preRoll, out)
+	}
+	// Once shutdown has begun, the only attempt allowed is the first: the
+	// longer-pre-roll retry would re-read a source that is going away (a
+	// refused retry counts as a failed one, so the first output is served).
+	attempts := 0
+	encodeOnce := func(preRoll float64, out string) (string, error) {
+		attempts++
+		if attempts > 1 && m.closing.Load() {
+			return "", errShuttingDown
+		}
+		return encode(preRoll, out)
 	}
 	// ffmpeg can exit 0 with a segment missing its video or cut short by an
 	// input error, so inspect the output before caching it (see segcheck.go).
@@ -1588,7 +1609,7 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	// output survives a failed or timed-out retry.
 	want := segExpectation(kind, hasVideo, videoEnd, hasAudio, start, dur)
 	retryTmp := segFile + ".retry.tmp.ts"
-	out, reason, err := transcodeChecked(dctx, filename, start, preRolls, [2]string{tmp, retryTmp}, encode,
+	out, reason, err := transcodeChecked(dctx, filename, start, preRolls, [2]string{tmp, retryTmp}, encodeOnce,
 		func(path string) (segVerdict, error) { return inspectSegment(path, want) })
 	if err != nil {
 		_ = os.Remove(tmp)
@@ -1597,6 +1618,12 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 			return "", err
 		}
 		return "", fmt.Errorf("hls: transcode %s: %w", filename, err)
+	}
+	if reason == "" && m.closing.Load() {
+		// The input may have been cut off under ffmpeg, which can
+		// still exit 0 with a short segment: serve it, don't cache it (with
+		// persistence on, a cached segment would outlive this process).
+		reason = "shutdown in progress"
 	}
 	p, err := s.installSegment(filename, out, reason)
 	if err == nil && reason == "" {
@@ -1871,6 +1898,7 @@ func videoEncodeArgs(codec string, highBitDepth bool, outW, outH int, scaled boo
 // in-memory sessions, but first flushes each session's lastAccess to its
 // session.json and then leaves everything on disk for the next process.
 func (m *hlsManager) CloseHLS() {
+	m.closing.Store(true)
 	// Signal the reaper to stop; guard against double-close with a non-blocking
 	// drain: if stopCh is already closed the receive arm fires immediately.
 	select {
@@ -1897,6 +1925,16 @@ func (m *hlsManager) CloseHLS() {
 	// RemoveAll outside the lock: disk I/O must not stall concurrent requests.
 	_ = os.RemoveAll(m.base)
 }
+
+// BeginShutdown marks the manager as shutting down, before the HTTP servers
+// (which serve ffmpeg its input for torrent sources) are drained: segment
+// transcodes still in flight finish and are served, but none is cached and
+// none starts another ffmpeg attempt (see closing). Safe to call more than
+// once; CloseHLS implies it.
+func (m *hlsManager) BeginShutdown() { m.closing.Store(true) }
+
+// errShuttingDown refuses a further ffmpeg attempt once BeginShutdown ran.
+var errShuttingDown = errors.New("hls: shutting down")
 
 // ── DeleteHLS ─────────────────────────────────────────────────────────────────
 
@@ -2159,6 +2197,11 @@ func (p *prober) DeleteHLS(id string) error { return p.hls.DeleteHLS(id) }
 // directories (kept on disk when HLSConfig.Persist is active).  Not part of
 // types.MediaProber; call directly on shutdown.
 func (p *prober) CloseHLS() { p.hls.CloseHLS() }
+
+// BeginShutdown tells the HLS manager that shutdown has begun (see
+// hlsManager.BeginShutdown). Not part of types.MediaProber; call directly
+// before draining the HTTP servers.
+func (p *prober) BeginShutdown() { p.hls.BeginShutdown() }
 
 // Sessions returns the number of currently active HLS transcode sessions.
 func (m *hlsManager) Sessions() int {

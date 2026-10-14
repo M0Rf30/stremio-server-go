@@ -128,14 +128,14 @@ func TestCountTSPackets(t *testing.T) {
 		want    tsCounts
 		wantErr bool
 	}{
-		{name: "video and audio", data: segTS(5, 12, 3), want: tsCounts{video: 5, audio: 3, videoPTS: sec(12), hasVideoPTS: true}},
+		{name: "video and audio", data: segTS(5, 12, 3), want: tsCounts{video: 5, audio: 3, videoPTS: sec(12), videoSpan: 4 * ptsHz / 24, hasVideoPTS: true}},
 		{name: "audio only output", data: segTS(0, 0, 4), want: tsCounts{audio: 4}},
 		{name: "earliest PTS despite B-frame order", data: buildTS(patPacket(), pmtPacket(h264Stream),
 			pesStart(testVideoPID, false, sec(56.2)), pesStart(testVideoPID, false, sec(56.04)), pesStart(testVideoPID, false, sec(56.12))),
-			want: tsCounts{video: 3, videoPTS: sec(56.04), hasVideoPTS: true}},
+			want: tsCounts{video: 3, videoPTS: sec(56.04), videoSpan: sec(56.2) - sec(56.04), hasVideoPTS: true}},
 		{name: "earliest PTS across 33-bit wrap", data: buildTS(patPacket(), pmtPacket(h264Stream),
 			pesStart(testVideoPID, false, 100), pesStart(testVideoPID, false, ptsWrap-50)),
-			want: tsCounts{video: 2, videoPTS: ptsWrap - 50, hasVideoPTS: true}},
+			want: tsCounts{video: 2, videoPTS: ptsWrap - 50, videoSpan: 150, hasVideoPTS: true}},
 		{name: "video PES without PTS", data: buildTS(patPacket(), pmtPacket(h264Stream), pesStart(testVideoPID, false, -1)),
 			want: tsCounts{video: 1}},
 		{name: "PMT without video stream", data: buildTS(patPacket(), pmtPacket(aacStream),
@@ -146,9 +146,9 @@ func TestCountTSPackets(t *testing.T) {
 			tsPacket(testVideoPID, true, false, nil), pesStart(testVideoPID, true, 0)), want: tsCounts{video: 1, hasVideoPTS: true}},
 		{name: "PES before PMT still classified", data: buildTS(patPacket(),
 			pesStart(testVideoPID, false, sec(1)), pmtPacket(h264Stream), pesStart(testVideoPID, false, sec(2))),
-			want: tsCounts{video: 2, videoPTS: sec(1), hasVideoPTS: true}},
+			want: tsCounts{video: 2, videoPTS: sec(1), videoSpan: sec(1), hasVideoPTS: true}},
 		{name: "trailing partial packet ignored", data: append(segTS(2, 0, 1), 0x47, 0x41, 0x00),
-			want: tsCounts{video: 2, audio: 1, hasVideoPTS: true}},
+			want: tsCounts{video: 2, audio: 1, videoSpan: ptsHz / 24, hasVideoPTS: true}},
 		{name: "empty file", data: nil, wantErr: true},
 		{name: "no PMT", data: buildTS(patPacket(), pesStart(testVideoPID, false, 0)), wantErr: true},
 		{name: "lost sync", data: append(segTS(1, 0, 1), make([]byte, tsPacketSize)...), wantErr: true},
@@ -230,7 +230,15 @@ func TestJudgeSegment(t *testing.T) {
 		wantMissing bool
 	}{
 		{name: "healthy segment", data: segTS(96, 56.04, 10), want: av, wantOK: true},
-		{name: "VFR sparse: few frames, early first PTS", data: segTS(4, 56.0, 10), want: av, wantOK: true},
+		{name: "VFR sparse: few frames spread over the segment", data: buildTS(patPacket(), pmtPacket(h264Stream, aacStream),
+			pesStart(testVideoPID, false, 56*ptsHz), pesStart(testVideoPID, false, 57.5*ptsHz), pesStart(testVideoPID, false, 59*ptsHz),
+			pesStart(testAudioPID, false, -1)), want: av, wantOK: true},
+		{name: "video ends early (input cut short, audio padded)", data: segTS(24, 56.0, 10), want: av},
+		{name: "video ends just inside the limit", data: segTS(25, 57.0, 10), want: av, wantOK: true},
+		{name: "video ends early but at the end of the source's video", data: segTS(24, 56.0, 10),
+			want: segExpect{start: 56, dur: 4, videoEnd: 57, video: true, audio: true}, wantOK: true},
+		{name: "video ends before the end of the source's video", data: segTS(12, 56.0, 10),
+			want: segExpect{start: 56, dur: 4, videoEnd: 59, video: true, audio: true}},
 		{name: "first frame just inside the late limit", data: segTS(40, 57.9, 10), want: av, wantOK: true},
 		{name: "no video where none is expected (past video end)", data: segTS(0, 0, 10),
 			want: segExpect{start: 64, dur: 4, audio: true}, wantOK: true},
@@ -441,6 +449,7 @@ func TestStderrWatch(t *testing.T) {
 		{"premature EOF", []string{"[http @ 0x1] Stream ends prematurely at 300000, should be 10224380\n"}, "Stream ends prematurely"},
 		{"demux error", []string{"[in#0/mpegts @ 0x1] Error during demuxing: Input/output error\n"}, "Error during demuxing"},
 		{"marker split across writes", []string{"noise noise [in#0 @ 0x1] Error during de", "muxing: I/O error\n"}, "Error during demuxing"},
+		{"premature EOF, ffmpeg 9", []string{"[http @ 0x1] File ended prematurely at pos. 300000 (10224380)\n"}, "File ended prematurely"},
 		{"marker split byte by byte", strings.Split("x Stream ends prematurely y", ""), "Stream ends prematurely"},
 		{"first marker wins", []string{"Stream ends prematurely\n", "Error during demuxing\n"}, "Stream ends prematurely"},
 	}
@@ -601,5 +610,50 @@ func TestProbeMediaVideoFields(t *testing.T) {
 				t.Errorf("seekIndexed = %v, want %v", res.seekIndexed, tc.wantIndex)
 			}
 		})
+	}
+}
+
+// TestTranscodeSegmentNotCachedAfterShutdown checks that once BeginShutdown
+// ran, a segment that ffmpeg produced cleanly is still served but is not
+// installed as seg<n>.ts: the relay feeding ffmpeg is being drained, so the
+// output may be short in ways the scan cannot see.
+func TestTranscodeSegmentNotCachedAfterShutdown(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH-shim ffmpeg stub is a /bin/sh script")
+	}
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "fixture.ts")
+	if err := os.WriteFile(fixture, segTS(0, 0, 4), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nfor a; do out=$a; done\ncp \"" + fixture + "\" \"$out\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "ffmpeg"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := newTestHLSManager(t)
+	m.selfBase = "http://127.0.0.1:11470"
+	s := injectSession(t, m, "shut")
+	s.mediaURL = m.selfBase + "/x/0"
+
+	p, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0)
+	if err != nil {
+		t.Fatalf("transcode before shutdown: %v", err)
+	}
+	if p != filepath.Join(s.dir, "seg0.ts") {
+		t.Errorf("before shutdown: served %q, want the cached seg0.ts", p)
+	}
+
+	m.BeginShutdown()
+	p, err = m.transcodeSegment(context.Background(), s, 1, segMuxed, 0)
+	if err != nil {
+		t.Fatalf("transcode during shutdown: %v", err)
+	}
+	if p == filepath.Join(s.dir, "seg1.ts") || dirExists(filepath.Join(s.dir, "seg1.ts")) {
+		t.Errorf("during shutdown: segment was cached (served %q)", p)
+	}
+	if !dirExists(p) {
+		t.Errorf("during shutdown: served path %q does not exist", p)
 	}
 }

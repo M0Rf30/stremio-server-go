@@ -42,6 +42,7 @@ var errBadSegment = errors.New("unusable segment output")
 // segExpect describes what one transcoded segment should contain.
 type segExpect struct {
 	start, dur float64 // segment position on the media timeline, seconds
+	videoEnd   float64 // where the source's video ends, seconds (<= 0 if unknown)
 	video      bool    // video frames expected (source has real video that has not ended yet)
 	audio      bool    // audio expected
 }
@@ -53,7 +54,7 @@ type segExpect struct {
 // unknown), so the tail of a file whose video is shorter than its audio is
 // not expected to carry video.
 func segExpectation(kind segKind, hasVideo bool, videoEnd float64, hasAudio bool, start, dur float64) segExpect {
-	e := segExpect{start: start, dur: dur}
+	e := segExpect{start: start, dur: dur, videoEnd: videoEnd}
 	e.video = hasVideo && kind != segAudioOnly && (videoEnd <= 0 || start+videoEndSlack < videoEnd)
 	e.audio = kind == segAudioOnly || (kind == segMuxed && hasAudio)
 	return e
@@ -103,6 +104,21 @@ func judgeSegment(got tsCounts, want segExpect) segVerdict {
 			late := float64(ptsDiff(got.videoPTS, startTicks)) / ptsHz
 			if late > lateVideo(want.dur) {
 				return segVerdict{reason: fmt.Sprintf("video starts %.2fs into the segment", late), videoMissing: true}
+			}
+			// The audio track is padded (apad) to the full segment length,
+			// so a segment whose input stopped short is still full length on
+			// the container level: check that the video itself reaches the
+			// segment end (or the end of the source's video, if sooner).
+			// With the video end unknown, the tail of a file whose video is
+			// shorter than its audio is flagged too: served, not cached.
+			end := want.start + want.dur
+			if want.videoEnd > 0 && want.videoEnd < end {
+				end = want.videoEnd
+			}
+			lastTicks := (got.videoPTS + got.videoSpan) % ptsWrap
+			short := float64(ptsDiff(int64(math.Round(end*ptsHz)), lastTicks)) / ptsHz
+			if short > lateVideo(want.dur) {
+				return segVerdict{reason: fmt.Sprintf("video ends %.2fs before the segment end", short)}
 			}
 		}
 	}
@@ -253,12 +269,14 @@ func transcodeChecked(ctx context.Context, name string, start float64, pre preRo
 
 // ── ffmpeg stderr ─────────────────────────────────────────────────────────────
 
-// inputErrMarkers are ffmpeg (7.x/8.x) log lines that mean the input stopped
-// short: the HTTP protocol's premature-EOF message and the demuxer's I/O
-// failure. ffmpeg still exits 0 after them. A false positive only costs a
+// inputErrMarkers are ffmpeg log lines that mean the input stopped short:
+// the HTTP protocol's premature-EOF message, the Matroska demuxer's
+// truncation message ("File ended prematurely at pos. N", ffmpeg 9) and the
+// demuxer's I/O failure. ffmpeg still exits 0 after them. A false positive only costs a
 // re-transcode, since it merely keeps the segment out of the cache.
 var inputErrMarkers = []string{
 	"Stream ends prematurely",
+	"File ended prematurely",
 	"Error during demuxing",
 }
 
@@ -317,6 +335,7 @@ func ptsDiff(a, b int64) int64 {
 type tsCounts struct {
 	video, audio int   // PES packets per stream class (one per frame for ffmpeg's video)
 	videoPTS     int64 // earliest video PTS (90 kHz), valid if hasVideoPTS
+	videoSpan    int64 // latest minus earliest video PTS (90 kHz ticks)
 	hasVideoPTS  bool
 }
 
@@ -328,6 +347,7 @@ func countTSPackets(r io.Reader) (tsCounts, error) {
 	type pidStats struct {
 		starts         int
 		firstPTS, minD int64 // earliest PTS = firstPTS + minD (wrap-safe)
+		maxD           int64 // latest PTS = firstPTS + maxD
 		hasPTS         bool
 	}
 	var (
@@ -380,8 +400,10 @@ func countTSPackets(r io.Reader) (tsCounts, error) {
 			if pts, ok := pesPTS(payload); ok {
 				if !st.hasPTS {
 					st.firstPTS, st.hasPTS = pts, true
-				} else if d := ptsDiff(pts, st.firstPTS); d < st.minD {
-					st.minD = d
+				} else {
+					d := ptsDiff(pts, st.firstPTS)
+					st.minD = min(st.minD, d)
+					st.maxD = max(st.maxD, d)
 				}
 			}
 		}
@@ -396,6 +418,7 @@ func countTSPackets(r io.Reader) (tsCounts, error) {
 			c.video += st.starts
 			if st.hasPTS && !c.hasVideoPTS { // ffmpeg writes a single video stream
 				c.videoPTS = (st.firstPTS + st.minD + ptsWrap) % ptsWrap
+				c.videoSpan = st.maxD - st.minD
 				c.hasVideoPTS = true
 			}
 		case 'a':
