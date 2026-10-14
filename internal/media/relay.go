@@ -11,9 +11,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -422,11 +424,26 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 		// have its nested URIs rewritten through the relay.
 		br := bufio.NewReaderSize(resp.Body, relaySniffBytes)
 		head, _ := br.Peek(relaySniffBytes)
+		var body io.Reader = br
+		dash := false
+		if looksLikeXML(head) {
+			// An MPD root can sit behind an XML declaration, comments or a
+			// DOCTYPE longer than relaySniffBytes, and ffmpeg reads far
+			// more than that before deciding. Only XML-looking bodies get
+			// the larger reader and the deeper look. Media segments,
+			// playlists and WebVTT don't start with '<' or whitespace; a
+			// byte range from mid-file may, and xmlBodyMayBeDASH lets
+			// binary (with a NUL and no "<MPD") through.
+			xr := bufio.NewReaderSize(br, relayXMLSniffBytes)
+			xhead, _ := xr.Peek(relayXMLSniffBytes)
+			dash = xmlBodyMayBeDASH(xhead)
+			body = xr
+		}
 		resp.Body = struct {
 			io.Reader
 			io.Closer
-		}{br, resp.Body}
-		if looksLikeDASH(upstream, head) {
+		}{body, resp.Body}
+		if dash || looksLikeDASH(resp, upstream, head) {
 			// DASH manifests reference media via BaseURL/SegmentTemplate,
 			// which we do not rewrite; relaying one would let ffmpeg fetch
 			// nested absolute URLs unguarded. Refuse rather than leak.
@@ -479,6 +496,191 @@ func (e *errTrackingReader) Read(p []byte) (int, error) {
 // a playlist/manifest regardless of its declared type.
 const relaySniffBytes = 512
 
+// relayXMLSniffBytes bounds the deeper look at a body that starts like XML
+// (see looksLikeXML and xmlRootIsMPDOrUnknown).
+const relayXMLSniffBytes = 16 << 10
+
+// xmlRootIsMPDOrUnknown walks the XML prolog in head (declaration, comments,
+// processing instructions, DOCTYPE) to the root element. It reports true,
+// meaning "treat as DASH", when the root is MPD in any case (ffmpeg's dashdec
+// matches it case-insensitively) or when no root element is found within
+// head, a DOCTYPE carries an internal subset or the declared encoding is
+// not one whose markup bytes are plain ASCII, because ffmpeg probes far
+// beyond relayXMLSniffBytes and a manifest the relay can't rule out must be
+// refused rather than streamed. Any other root (TTML, HTML, an error page)
+// reports false.
+func xmlRootIsMPDOrUnknown(head []byte) bool {
+	head = bytes.TrimPrefix(head, []byte("\xef\xbb\xbf"))
+	if !xmlDeclEncodingInspectable(head) {
+		return true
+	}
+	d := xml.NewDecoder(bytes.NewReader(head))
+	d.Strict = false
+	// Only markup matters here. In an ASCII-compatible single-byte
+	// encoding it is the same bytes as in ASCII, so read those as-is.
+	// Anything else (UTF-7, say, where libxml2 decodes "+ADw-" to '<')
+	// would make the walk see a different document than libxml2 does:
+	// fail, and so fail closed. xmlDeclEncodingInspectable has already
+	// vetted the declaration; this catches what it and encoding/xml
+	// might read differently.
+	d.CharsetReader = func(charset string, r io.Reader) (io.Reader, error) {
+		if asciiCompatibleCharset(charset) {
+			return r, nil
+		}
+		return nil, fmt.Errorf("charset %q not inspected", charset)
+	}
+	for {
+		tok, err := d.RawToken()
+		if err != nil {
+			return true
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			return strings.EqualFold(t.Name.Local, "MPD")
+		case xml.Directive:
+			// A DOCTYPE internal subset can hold markup that encoding/xml
+			// and libxml2 split differently; don't trust the walk past it.
+			if bytes.ContainsRune(t, '[') {
+				return true
+			}
+		}
+	}
+}
+
+// looksLikeXML reports whether head starts with '<' after an optional UTF-8
+// BOM and leading whitespace, or holds nothing but those: libxml2 accepts
+// any amount of whitespace before the root when there is no XML
+// declaration, and dash_probe finds "<MPD" wherever it sits, so a
+// whitespace-only head is undecided and gets the deeper look. An empty head
+// (an empty body) is not XML.
+//
+// UTF-16/32 bodies need no look: dash_probe matches with av_stristr, which
+// stops at the first NUL byte, and every UTF-16/32 '<' has one beside it, so
+// ffmpeg can't detect such a manifest by content (its dash demuxer declares
+// no extension or MIME type either).
+func looksLikeXML(head []byte) bool {
+	if len(head) == 0 {
+		return false
+	}
+	head = bytes.TrimPrefix(head, []byte("\xef\xbb\xbf"))
+	head = bytes.TrimLeft(head, " \t\r\n")
+	return len(head) == 0 || head[0] == '<'
+}
+
+// xmlBodyMayBeDASH decides, for a body that looks like XML (see
+// looksLikeXML), whether ffmpeg could open it as a DASH manifest. It fails
+// closed: true when "<MPD" appears anywhere in head in any case (ffmpeg's
+// dash_probe matches the raw bytes with av_stristr, so this also catches
+// markup that encoding/xml and libxml2 would split differently), or when
+// xmlRootIsMPDOrUnknown can't rule it out. The one exemption is a head
+// with a NUL byte and no "<MPD": av_stristr stops at the first NUL, so
+// dash_probe can't see past it, whatever the encoding. That keeps binary
+// media, such as a 206 slice that happens to start with '<', out of the
+// prolog walk.
+func xmlBodyMayBeDASH(head []byte) bool {
+	if containsMPDTag(head) {
+		return true
+	}
+	if bytes.IndexByte(head, 0) >= 0 {
+		return false
+	}
+	return xmlRootIsMPDOrUnknown(head)
+}
+
+// xmlDeclEncodingInspectable reports whether the prolog walk can read head
+// as the bytes libxml2 will decode: head has no XML declaration, or one
+// that parses and declares no encoding, UTF-8 or an ASCII-compatible
+// single-byte encoding (asciiCompatibleCharset). It parses the declaration
+// itself because encoding/xml only finds an encoding written with nothing
+// around the '=', while libxml2 allows XML whitespace there; with
+// encoding = "UTF-7" the walk would read "+ADw-" as text where libxml2
+// decodes '<'. A declaration it can't parse, or any pseudo-attribute other
+// than version, encoding and standalone, reports false.
+func xmlDeclEncodingInspectable(head []byte) bool {
+	const ws = " \t\r\n"
+	head = bytes.TrimLeft(head, ws)
+	if len(head) < 6 || !bytes.EqualFold(head[:5], []byte("<?xml")) {
+		return true
+	}
+	if !isXMLSpace(head[5]) && head[5] != '?' {
+		return true // another PI, such as <?xml-stylesheet ...?>
+	}
+	if !bytes.Equal(head[:5], []byte("<?xml")) {
+		return false
+	}
+	end := bytes.Index(head, []byte("?>"))
+	if end < 0 {
+		return false
+	}
+	decl := head[5:end]
+	for {
+		decl = bytes.TrimLeft(decl, ws)
+		if len(decl) == 0 {
+			return true
+		}
+		n := 0
+		for n < len(decl) && isXMLDeclNameByte(decl[n]) {
+			n++
+		}
+		name := string(decl[:n])
+		rest := bytes.TrimLeft(decl[n:], ws)
+		if n == 0 || len(rest) == 0 || rest[0] != '=' {
+			return false
+		}
+		rest = bytes.TrimLeft(rest[1:], ws)
+		if len(rest) == 0 || (rest[0] != '"' && rest[0] != '\'') {
+			return false
+		}
+		closing := bytes.IndexByte(rest[1:], rest[0])
+		if closing < 0 {
+			return false
+		}
+		value := string(rest[1 : 1+closing])
+		switch name {
+		case "version", "standalone":
+		case "encoding":
+			if !asciiCompatibleCharset(value) {
+				return false
+			}
+		default:
+			return false
+		}
+		decl = rest[2+closing:]
+	}
+}
+
+func isXMLSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+func isXMLDeclNameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		c == '_' || c == '-' || c == '.' || c == ':'
+}
+
+// asciiCompatibleCharset reports whether an XML declaration's encoding is
+// UTF-8 or one whose bytes 0x00-0x7F are ASCII and that has no multi-byte
+// forms: US-ASCII, ISO-8859-1 to -16 and windows-1250 to -1258, in any
+// case.
+func asciiCompatibleCharset(charset string) bool {
+	switch cs := strings.ToLower(charset); {
+	case cs == "utf-8", cs == "utf8", cs == "us-ascii", cs == "ascii", cs == "latin1":
+		return true
+	case strings.HasPrefix(cs, "iso-8859-"):
+		n, err := strconv.Atoi(cs[len("iso-8859-"):])
+		return err == nil && n >= 1 && n <= 16 && n != 12
+	case strings.HasPrefix(cs, "windows-125"):
+		n, err := strconv.Atoi(cs[len("windows-125"):])
+		return err == nil && n >= 0 && n <= 8 && len(cs) == len("windows-125")+1
+	}
+	return false
+}
+
+// containsMPDTag reports whether b contains "<MPD" in any case.
+func containsMPDTag(b []byte) bool {
+	return bytes.Contains(bytes.ToUpper(b), []byte("<MPD"))
+}
+
 // hasPlaylistMagic reports whether head starts with "#EXTM3U", allowing an
 // optional UTF-8 BOM and leading whitespace.
 func hasPlaylistMagic(head []byte) bool {
@@ -487,13 +689,21 @@ func hasPlaylistMagic(head []byte) bool {
 	return bytes.HasPrefix(head, []byte("#EXTM3U"))
 }
 
-// looksLikeDASH reports whether the upstream path ends in .mpd or the body
-// prefix contains an MPD root element.
-func looksLikeDASH(upstream string, head []byte) bool {
+// looksLikeDASH reports whether the response is a DASH manifest: the
+// requested or the final (post-redirect) path ends in .mpd, the Content-Type
+// is application/dash+xml, or the body prefix contains an MPD element in any
+// case (ffmpeg's dash_probe uses a case-insensitive match).
+func looksLikeDASH(resp *http.Response, upstream string, head []byte) bool {
 	if u, err := url.Parse(upstream); err == nil && strings.HasSuffix(strings.ToLower(u.Path), ".mpd") {
 		return true
 	}
-	return bytes.Contains(head, []byte("<MPD"))
+	if resp.Request != nil && resp.Request.URL != nil && strings.HasSuffix(strings.ToLower(resp.Request.URL.Path), ".mpd") {
+		return true
+	}
+	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil && mt == "application/dash+xml" {
+		return true
+	}
+	return bytes.Contains(bytes.ToUpper(head), []byte("<MPD"))
 }
 
 // looksLikePlaylist reports whether resp is (very likely) an HLS playlist,

@@ -257,6 +257,9 @@ func TestMediaRelayPlaylistSizeCap(t *testing.T) {
 		for i := range buf {
 			buf[i] = '\n'
 		}
+		// A real playlist start: a body of nothing but whitespace is
+		// refused as undecided XML before the size cap is reached.
+		copy(buf, "#EXTM3U\n")
 		_, _ = w.Write(buf)
 	}))
 	defer upstream.Close()
