@@ -829,22 +829,28 @@ func h264Level(width, height int) string {
 // downscale actually applied to this stream — it returns the legacy fixed
 // values verbatim (see legacyBandwidth/legacyCodecsVideo) instead of the
 // generally-derived ones, so unconfigured output never changes regardless of
-// actual source resolution. Otherwise BANDWIDTH = maxrateBps/2 (preserving
-// the original 8M-cap -> 4,000,000-BANDWIDTH ratio as the general rule, not
-// just the default case) and CODECS is the resolution-derived level.
+// actual source resolution. Otherwise BANDWIDTH is the variant's peak, as
+// RFC 8216 section 4.3.4.2 defines it: the video maxrate (the VBV cap passed
+// to every encoder; h264_vaapi in CQP mode may not honour it) plus the AAC
+// audio bitrate (audioBps, bits/second; 0 when it can't be parsed),
+// saturating at MaxInt64, and CODECS is the resolution-derived level. An
+// unset or unparsable maxrate falls back to legacyBandwidth.
 //
 // A per-session quality override (sc.overridden) always counts as
 // "configured", so it takes the derived path even when its values happen to
 // equal the defaults.
-func deriveBandwidthCodecs(sc sessionConfig, outW, outH int, downscaled bool) (bandwidth int64, codecsVideo string) {
+func deriveBandwidthCodecs(sc sessionConfig, audioBps int64, outW, outH int, downscaled bool) (bandwidth int64, codecsVideo string) {
 	if sc.isDefaultMaxrate() && !sc.overridden && !downscaled {
 		return legacyBandwidth, legacyCodecsVideo
 	}
-	bandwidth = sc.maxrateBps / 2
-	if bandwidth <= 0 {
-		bandwidth = legacyBandwidth
+	if sc.maxrateBps <= 0 {
+		return legacyBandwidth, h264Level(outW, outH)
 	}
-	return bandwidth, h264Level(outW, outH)
+	audioBps = max(audioBps, 0)
+	if sc.maxrateBps > math.MaxInt64-audioBps {
+		return math.MaxInt64, h264Level(outW, outH)
+	}
+	return sc.maxrateBps + audioBps, h264Level(outW, outH)
 }
 
 // buildVideoFilter assembles the -vf filter chain for one encoder backend,

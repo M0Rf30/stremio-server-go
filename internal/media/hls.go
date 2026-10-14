@@ -843,7 +843,8 @@ func (m *hlsManager) StartHLSContext(ctx context.Context, id, mediaURL string, o
 	s.mu.RUnlock()
 
 	outW, outH, scaled := computeScaledDims(srcWidth, srcHeight, tc.maxWidth, tc.maxHeight)
-	bandwidth, codecsVideo := deriveBandwidthCodecs(tc, outW, outH, scaled)
+	audioBps, _ := parseFFmpegBitrate(m.cfg.AudioBitrate)
+	bandwidth, codecsVideo := deriveBandwidthCodecs(tc, audioBps, outW, outH, scaled)
 
 	return buildMasterPlaylist(masterPlaylistInputs{
 		multiAudio:      multiAudio,
