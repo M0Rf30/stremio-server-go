@@ -276,3 +276,75 @@ func TestMediaRelayPlaylistSizeCap(t *testing.T) {
 		t.Errorf("status = %d, want 502 for an oversized playlist", resp.StatusCode)
 	}
 }
+
+// TestMediaRelayResolvesRelativeAfterRedirect: a playlist reached through a
+// redirect resolves its relative entries (segments and URI="..." attributes)
+// against its own, post-redirect URL, not the URL the relay was asked for.
+func TestMediaRelayResolvesRelativeAfterRedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/watch/start", func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, "/cdn/hls/index.m3u8", http.StatusFound)
+	})
+	mux.HandleFunc("/cdn/hls/index.m3u8", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		_, _ = io.WriteString(w, "#EXTM3U\n"+
+			"#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n"+
+			"#EXT-X-TARGETDURATION:4\n"+
+			"#EXTINF:4.0,\n"+
+			"seg0.ts\n"+
+			"#EXT-X-ENDLIST\n")
+	})
+	mux.HandleFunc("/cdn/hls/seg0.ts", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "segment-bytes")
+	})
+	mux.HandleFunc("/cdn/hls/key.bin", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "key-bytes")
+	})
+	upstream := httptest.NewServer(mux)
+	defer upstream.Close()
+
+	r := newMediaRelay(false)
+	relayURL, err := r.register(upstream.URL + "/watch/start")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	resp, err := http.Get(relayURL) //nolint:gosec // our own loopback relay
+	if err != nil {
+		t.Fatalf("GET playlist: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("playlist status = %d, want 200", resp.StatusCode)
+	}
+
+	var segURL, keyURL string
+	for _, line := range strings.Split(string(body), "\n") {
+		switch {
+		case strings.HasPrefix(line, "#EXT-X-KEY"):
+			if i := strings.Index(line, `URI="`); i >= 0 {
+				rest := line[i+len(`URI="`):]
+				keyURL = rest[:strings.IndexByte(rest, '"')]
+			}
+		case strings.HasPrefix(line, "http://127.0.0.1:"):
+			segURL = line
+		}
+	}
+	for name, c := range map[string]struct{ url, want string }{
+		"segment": {segURL, "segment-bytes"},
+		"key":     {keyURL, "key-bytes"},
+	} {
+		if c.url == "" {
+			t.Fatalf("%s not rewritten to a relay URL:\n%s", name, body)
+		}
+		got, err := http.Get(c.url) //nolint:gosec // our own loopback relay
+		if err != nil {
+			t.Fatalf("GET %s: %v", name, err)
+		}
+		b, _ := io.ReadAll(got.Body)
+		_ = got.Body.Close()
+		if got.StatusCode != http.StatusOK || string(b) != c.want {
+			t.Errorf("%s: status %d body %q, want 200 %q", name, got.StatusCode, b, c.want)
+		}
+	}
+}
