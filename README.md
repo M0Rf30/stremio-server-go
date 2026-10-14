@@ -199,8 +199,8 @@ URLs) is documented in [docs/PROXY.md](docs/PROXY.md).
 
 The HLS master playlist's `BANDWIDTH` and video `CODECS` (H.264 profile-level)
 are derived from the effective bitrate cap and output resolution — the
-`STREMIO_TRANSCODE_MAXRATE`/`transcodeMaxBitRate` bits/second value halved for
-`BANDWIDTH`, and the output width×height mapped to the matching H.264 level
+variant's peak for `BANDWIDTH` (the `STREMIO_TRANSCODE_MAXRATE`/`transcodeMaxBitRate`
+bits/second value plus `STREMIO_TRANSCODE_AUDIO_BITRATE`), and the output width×height mapped to the matching H.264 level
 (≤1280×720 → Level 3.1, ≤1920×1080 → Level 4.1, ≤2560×1440 → Level 5.0, else
 Level 5.1). An unconfigured server (no bitrate/resolution knob touched) keeps
 advertising the historical fixed `BANDWIDTH=4000000`/`avc1.640029` regardless

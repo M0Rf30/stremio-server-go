@@ -315,13 +315,13 @@ func TestDeriveBandwidthCodecsOverrideCountsAsConfigured(t *testing.T) {
 	// session, so the derived path applies and CODECS follows the real 720p
 	// output instead of the fixed legacy Level 4.1 string.
 	sc := sessionConfig{maxrateBps: legacyMaxrateBps, overridden: true}
-	bw, codecs := deriveBandwidthCodecs(sc, 1280, 720, false)
-	if bw != 4_000_000 || codecs != "avc1.64001f" {
-		t.Errorf("deriveBandwidthCodecs(overridden) = (%d,%q), want (4000000,\"avc1.64001f\")", bw, codecs)
+	bw, codecs := deriveBandwidthCodecs(sc, testAudioBps, 1280, 720, false)
+	if bw != 8_192_000 || codecs != "avc1.64001f" {
+		t.Errorf("deriveBandwidthCodecs(overridden) = (%d,%q), want (8192000,\"avc1.64001f\")", bw, codecs)
 	}
 	// Same config without the override flag keeps the legacy strings.
 	sc.overridden = false
-	bw, codecs = deriveBandwidthCodecs(sc, 1280, 720, false)
+	bw, codecs = deriveBandwidthCodecs(sc, testAudioBps, 1280, 720, false)
 	if bw != legacyBandwidth || codecs != legacyCodecsVideo {
 		t.Errorf("deriveBandwidthCodecs(not overridden) = (%d,%q), want legacy", bw, codecs)
 	}
@@ -395,8 +395,8 @@ func TestStartHLSAppliesOverridesOnCreation(t *testing.T) {
 		t.Errorf("libx264 -vf = %q", vf)
 	}
 
-	// BANDWIDTH = maxrate/2, CODECS = Level 3.1 for 852x480.
-	want := `#EXT-X-STREAM-INF:BANDWIDTH=500000,CODECS="avc1.64001f,mp4a.40.2"`
+	// BANDWIDTH = the peak (1M maxrate + 192k audio), CODECS = Level 3.1 for 852x480.
+	want := `#EXT-X-STREAM-INF:BANDWIDTH=1192000,CODECS="avc1.64001f,mp4a.40.2"`
 	if !strings.Contains(master, want) {
 		t.Errorf("master missing %q:\n%s", want, master)
 	}
@@ -406,12 +406,12 @@ func TestStartHLSOverrideBeatsSettingsInMaster(t *testing.T) {
 	ss := stubSettings{"transcodeMaxBitRate": float64(3_000_000), "transcodeMaxWidth": float64(1280)}
 	m := newOverrideTestManager(t, true, DefaultHLSConfig(), ss)
 
-	// No override: /settings drive it (1280 wide → 1280x720, 3M → 1.5M).
+	// No override: /settings drive it (1280 wide → 1280x720, 3M + 192k audio).
 	master, err := m.StartHLS("settings", overrideMediaURL, types.HLSSessionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `BANDWIDTH=1500000,CODECS="avc1.64001f,`; !strings.Contains(master, want) {
+	if want := `BANDWIDTH=3192000,CODECS="avc1.64001f,`; !strings.Contains(master, want) {
 		t.Errorf("settings-only master missing %q:\n%s", want, master)
 	}
 
@@ -420,8 +420,8 @@ func TestStartHLSOverrideBeatsSettingsInMaster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 2560 cap on a 1920 source never upscales → 1920x1080, Level 4.1; 12M → 6M.
-	if want := `BANDWIDTH=6000000,CODECS="avc1.640029,`; !strings.Contains(master, want) {
+	// 2560 cap on a 1920 source never upscales → 1920x1080, Level 4.1; 12M + 192k audio.
+	if want := `BANDWIDTH=12192000,CODECS="avc1.640029,`; !strings.Contains(master, want) {
 		t.Errorf("override master missing %q:\n%s", want, master)
 	}
 }

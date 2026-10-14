@@ -11,6 +11,7 @@ package media
 
 import (
 	"context"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -204,13 +205,16 @@ func TestH264Level(t *testing.T) {
 func TestDeriveBandwidthCodecsDefaultCompat(t *testing.T) {
 	sc := sessionConfig{maxrateBps: legacyMaxrateBps}
 	for _, res := range [][2]int{{0, 0}, {640, 360}, {1280, 720}, {3840, 2160}} {
-		bw, codecs := deriveBandwidthCodecs(sc, res[0], res[1], false)
+		bw, codecs := deriveBandwidthCodecs(sc, testAudioBps, res[0], res[1], false)
 		if bw != legacyBandwidth || codecs != legacyCodecsVideo {
 			t.Errorf("deriveBandwidthCodecs(default, %dx%d, downscaled=false) = (%d,%q), want (%d,%q)",
 				res[0], res[1], bw, codecs, legacyBandwidth, legacyCodecsVideo)
 		}
 	}
 }
+
+// testAudioBps is defaultAudioBitrate ("192k") in bits/second.
+const testAudioBps int64 = 192_000
 
 func TestDeriveBandwidthCodecsDerivedForNonDefaultConfig(t *testing.T) {
 	cases := []struct {
@@ -226,7 +230,7 @@ func TestDeriveBandwidthCodecsDerivedForNonDefaultConfig(t *testing.T) {
 			sc:   sessionConfig{maxrateBps: 16_000_000},
 			outW: 1920, outH: 1080,
 			downscaled: false,
-			wantBW:     8_000_000, // maxrateBps/2, same ratio as the legacy default
+			wantBW:     16_192_000, // peak: maxrate + audio
 			wantCodecs: "avc1.640029",
 		},
 		{
@@ -234,7 +238,7 @@ func TestDeriveBandwidthCodecsDerivedForNonDefaultConfig(t *testing.T) {
 			sc:   sessionConfig{maxrateBps: legacyMaxrateBps},
 			outW: 1280, outH: 720,
 			downscaled: true,
-			wantBW:     4_000_000, // maxrateBps/2 == legacy value here, but via the derived path
+			wantBW:     8_192_000, // derived path: the peak, not the legacy 4000000
 			wantCodecs: "avc1.64001f",
 		},
 		{
@@ -242,17 +246,38 @@ func TestDeriveBandwidthCodecsDerivedForNonDefaultConfig(t *testing.T) {
 			sc:   sessionConfig{maxrateBps: 5_000_000},
 			outW: 2560, outH: 1440,
 			downscaled: true,
-			wantBW:     2_500_000,
+			wantBW:     5_192_000,
 			wantCodecs: "avc1.640032",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			bw, codecs := deriveBandwidthCodecs(c.sc, c.outW, c.outH, c.downscaled)
+			bw, codecs := deriveBandwidthCodecs(c.sc, testAudioBps, c.outW, c.outH, c.downscaled)
 			if bw != c.wantBW || codecs != c.wantCodecs {
 				t.Errorf("deriveBandwidthCodecs(...) = (%d,%q), want (%d,%q)", bw, codecs, c.wantBW, c.wantCodecs)
 			}
 		})
+	}
+}
+
+// TestDeriveBandwidthCodecsPeakEdges: the derived path never halves or drops
+// the video cap, an unparsable audio bitrate counts as 0, and an unknown
+// maxrate keeps the legacy BANDWIDTH value.
+func TestDeriveBandwidthCodecsPeakEdges(t *testing.T) {
+	sc := sessionConfig{maxrateBps: 6_000_000}
+	if bw, _ := deriveBandwidthCodecs(sc, 0, 1920, 1080, false); bw != 6_000_000 {
+		t.Errorf("no audio bitrate: BANDWIDTH = %d, want 6000000", bw)
+	}
+	if bw, _ := deriveBandwidthCodecs(sc, -1, 1920, 1080, false); bw != 6_000_000 {
+		t.Errorf("negative audio bitrate: BANDWIDTH = %d, want 6000000", bw)
+	}
+	sc = sessionConfig{maxrateBps: math.MaxInt64}
+	if bw, _ := deriveBandwidthCodecs(sc, testAudioBps, 1920, 1080, false); bw != math.MaxInt64 {
+		t.Errorf("huge maxrate: BANDWIDTH = %d, want saturated %d", bw, int64(math.MaxInt64))
+	}
+	sc = sessionConfig{overridden: true}
+	if bw, codecs := deriveBandwidthCodecs(sc, testAudioBps, 1280, 720, false); bw != legacyBandwidth || codecs != "avc1.64001f" {
+		t.Errorf("unknown maxrate = (%d,%q), want (%d,\"avc1.64001f\")", bw, codecs, legacyBandwidth)
 	}
 }
 
@@ -464,7 +489,7 @@ func TestBuildMasterPlaylistGoldenDefaults(t *testing.T) {
 	// derivation existed (bandwidth=4000000, avc1.640029 Level 4.1),
 	// regardless of caller-supplied streams.
 	sc := sessionConfig{maxrateBps: legacyMaxrateBps}
-	bw, codecs := deriveBandwidthCodecs(sc, 0, 0, false)
+	bw, codecs := deriveBandwidthCodecs(sc, testAudioBps, 0, 0, false)
 
 	t.Run("single audio, no subs", func(t *testing.T) {
 		got := buildMasterPlaylist(masterPlaylistInputs{bandwidth: bw, codecsVideo: codecs})
@@ -511,12 +536,12 @@ func TestBuildMasterPlaylistDerivedForNonDefaultConfig(t *testing.T) {
 	// advertise a truthful, derived BANDWIDTH/CODECS instead of the legacy
 	// fixed values.
 	sc := sessionConfig{maxrateBps: 2_000_000}
-	bw, codecs := deriveBandwidthCodecs(sc, 1280, 720, true)
-	if bw != 1_000_000 || codecs != "avc1.64001f" {
+	bw, codecs := deriveBandwidthCodecs(sc, testAudioBps, 1280, 720, true)
+	if bw != 2_192_000 || codecs != "avc1.64001f" {
 		t.Fatalf("derivation itself wrong: bw=%d codecs=%q", bw, codecs)
 	}
 	got := buildMasterPlaylist(masterPlaylistInputs{bandwidth: bw, codecsVideo: codecs})
-	want := "#EXTM3U\n#EXT-X-VERSION:4\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.64001f,mp4a.40.2\"\nplaylist.m3u8\n"
+	want := "#EXTM3U\n#EXT-X-VERSION:4\n#EXT-X-STREAM-INF:BANDWIDTH=2192000,CODECS=\"avc1.64001f,mp4a.40.2\"\nplaylist.m3u8\n"
 	if got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
