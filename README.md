@@ -134,6 +134,7 @@ Then point any Stremio client's **streaming server URL** at
 | `STREMIO_HLS_MAX_SESSIONS` | `64` | hard cap on simultaneously registered HLS transcode sessions. |
 | `STREMIO_HLS_WORK_DIR` | _(OS temp dir)_ | root directory for HLS segment working directories (`stremio-hls-*` created under it). Unset uses the OS default temp dir, matching prior behaviour. Set to move segment I/O onto a specific fast or large disk. |
 | `STREMIO_HLS_PERSIST` | _(off)_ | `1`/`true` keeps HLS sessions and their transcoded segments across restarts. Requires `STREMIO_HLS_WORK_DIR` and, to be useful, a much longer `STREMIO_HLS_SESSION_TTL`. See [Persistent HLS sessions](#persistent-hls-sessions). |
+| `STREMIO_HLS_PRIVATE_ALLOW` | _(unset)_ | comma-separated IPs, CIDRs and hostnames (e.g. `192.168.1.10,10.0.0.0/24,nas.lan`) that a media URL may point at: `/hlsv2` `mediaURL`, `/probe` and `/tracks`, including their redirects and nested playlists. Checked before the session starts and again on the IP actually dialed (DNS-rebinding-safe). Unset, every private, loopback and link-local host is refused. Separate from `STREMIO_PROXY_PRIVATE_ALLOW`: these routes have no password, so anything listed here is reachable by every client that can reach the server. Subtitle and `/opensubHash` fetches never use it, and cloud-metadata can never be allowlisted. |
 | `STREMIO_HLS_VAAPI_DEVICE` | `/dev/dri/renderD128` | VAAPI render-node device path used for hardware transcoding. Override on multi-GPU hosts (e.g. `/dev/dri/renderD129`). |
 | `STREMIO_HLS_SEGMENT_TIMEOUT` | `120` | seconds (or a duration string) allowed for one `ffmpeg` segment transcode before it's killed. |
 | `STREMIO_HLS_SUBTITLE_TIMEOUT` | `120` | seconds (or a duration string) allowed for one `ffmpeg` subtitle-track extraction before it's killed. |
@@ -676,6 +677,13 @@ For `/proxy` and `/extractor`, private destinations are blocked unless
 an exposed, password-protected server reach a specific LAN host (a NAS, a local
 embed page), list it in `STREMIO_PROXY_PRIVATE_ALLOW` instead of opening all
 private ranges.
+
+Media URLs (`/hlsv2` `mediaURL`, `/probe`, `/tracks`) always refuse private
+destinations; those routes can't be password-gated, so there is no allow-all
+switch. To transcode from a specific LAN host, list it in
+`STREMIO_HLS_PRIVATE_ALLOW`. Entries match by IP on any port, so list the
+media host itself, never loopback, which would also expose this server's own
+API.
 
 ## License
 

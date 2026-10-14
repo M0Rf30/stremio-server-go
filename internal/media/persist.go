@@ -484,9 +484,10 @@ func readSessionFile(dir string) (persistedSession, error) {
 // access: startup must not block on (or be fooled by) DNS. It requires an
 // http(s) URL with a host, and rejects private/loopback/metadata IP literals
 // unless the URL points at this server's own origin (the same carve-out as
-// validateRemoteURL). Hostnames are left to the relay's dial-time guard,
-// which every later ffmpeg fetch of a non-self URL goes through (SEC-4).
-func validatePersistedURL(raw, selfBase string) error {
+// validateRemoteURL), except those on allow (HLSConfig.PrivateAllow).
+// Hostnames are left to the relay's dial-time guard, which every later
+// ffmpeg fetch of a non-self URL goes through (SEC-4).
+func validatePersistedURL(raw, selfBase string, allow *netguard.Allow) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -503,7 +504,7 @@ func validatePersistedURL(raw, selfBase string) error {
 		}
 	}
 	if ip := net.ParseIP(u.Hostname()); ip != nil {
-		if err := netguard.ValidateIP(ip, true); err != nil {
+		if err := netguard.ValidateIPAllow(ip, true, allow); err != nil {
 			return err
 		}
 	}
@@ -585,7 +586,7 @@ func (m *hlsManager) loadPersisted() {
 			discard("discarding persisted HLS session: invalid duration", "duration", rec.Probe.Duration)
 			continue
 		}
-		if err := validatePersistedURL(rec.MediaURL, m.selfBase); err != nil {
+		if err := validatePersistedURL(rec.MediaURL, m.selfBase, m.cfg.PrivateAllow); err != nil {
 			discard("discarding persisted HLS session: media URL rejected", "err", err)
 			continue
 		}
