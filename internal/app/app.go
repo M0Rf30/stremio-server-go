@@ -737,6 +737,10 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		// Per-session transcoded-segment disk cap: 0 = derived from bitrate,
 		// negative = unlimited (STREMIO_HLS_SEGMENT_CACHE_BYTES).
 		SegmentCacheBytes: envInt64(lookup, "STREMIO_HLS_SEGMENT_CACHE_BYTES", d.SegmentCacheBytes),
+
+		// Private hosts a media URL may point at (STREMIO_HLS_PRIVATE_ALLOW);
+		// unset allows none.
+		PrivateAllow: envPrivateAllow(lookup, "STREMIO_HLS_PRIVATE_ALLOW"),
 	}
 }
 

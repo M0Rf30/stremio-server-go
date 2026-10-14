@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 	"github.com/M0Rf30/stremio-server-go/internal/types"
 )
 
@@ -108,6 +109,15 @@ type HLSConfig struct {
 	// input seek. normalize clamps values above MaxSeekPreroll and truncates
 	// the rest to whole milliseconds.
 	SeekPreroll time.Duration
+
+	// --- network ---
+	// PrivateAllow lists the private hosts (IPs, CIDRs, hostnames) a media
+	// URL may point at: /probe, /tracks and /hlsv2 mediaURL, checked before
+	// the session starts and again by the relay on every address it dials
+	// (STREMIO_HLS_PRIVATE_ALLOW). nil, the default, allows none. Subtitle
+	// and /opensubHash fetches never use it. Cloud-metadata is always
+	// refused.
+	PrivateAllow *netguard.Allow
 }
 
 // SeekPrerollNone is the HLSConfig.SeekPreroll value meaning "no pre-roll"

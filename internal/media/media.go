@@ -122,6 +122,9 @@ type prober struct {
 	// used to prefix scheme-less stream URLs passed to Probe.
 	baseURLLocal string
 	hls          *hlsManager
+	// privateAllow is HLSConfig.PrivateAllow: the private hosts Probe and
+	// Tracks accept (see validateMediaURL).
+	privateAllow *netguard.Allow
 	// Probe and Tracks result caches keyed by resolved URL; short-TTL prevents
 	// repeated ffprobe spawns for the same URL across consecutive player requests.
 	probeMu     sync.Mutex
@@ -144,12 +147,16 @@ func New(baseURLLocal string, cfg HLSConfig, settings SettingsSource) types.Medi
 	p := &prober{
 		baseURLLocal: base,
 		hls:          newHLS(base, cfg, settings),
+		privateAllow: cfg.PrivateAllow,
 		probeCache:   make(map[string]probeResultEntry), // must be non-nil before first write
 		tracksCache:  make(map[string]tracksCacheEntry), // must be non-nil before first write
 	}
 	// Probe/Tracks/OpenSubHash/subtitles and the HLS initial probe share one
 	// concurrency budget.
 	p.hls.shared = &p.guard
+	// The relay is process-wide; the most recent New's list applies, which
+	// is the running server's (internal/app builds one prober per Run).
+	globalRelay.setPrivateAllow(cfg.PrivateAllow)
 	return p
 }
 
@@ -166,7 +173,7 @@ func (p *prober) Probe(streamURL string) (interface{}, error) {
 // waiting without killing a probe other callers share.
 func (p *prober) ProbeContext(ctx context.Context, streamURL string) (interface{}, error) {
 	if strings.Contains(streamURL, "://") {
-		if err := validateRemoteURL(streamURL, p.baseURLLocal); err != nil {
+		if err := validateMediaURL(streamURL, p.baseURLLocal, p.privateAllow); err != nil {
 			return nil, err
 		}
 	} else {
@@ -288,7 +295,7 @@ func (p *prober) Tracks(rawURL string) (interface{}, error) {
 func (p *prober) TracksContext(ctx context.Context, rawURL string) (interface{}, error) {
 	streamURL := rawURL
 	if strings.Contains(streamURL, "://") {
-		if err := validateRemoteURL(streamURL, p.baseURLLocal); err != nil {
+		if err := validateMediaURL(streamURL, p.baseURLLocal, p.privateAllow); err != nil {
 			return nil, err
 		}
 	} else {
@@ -490,6 +497,14 @@ func computeOpenSubHash(size int64, head, tail []byte) uint64 {
 // localize() is applied first so the self-signed https://…:12470 form maps
 // onto the same origin. Pass "" to disallow self-references entirely.
 func validateRemoteURL(raw, selfBase string) error {
+	return validateMediaURL(raw, selfBase, nil)
+}
+
+// validateMediaURL is validateRemoteURL for a media URL that ffmpeg/ffprobe
+// will read through the relay (Probe, Tracks, StartHLS): addresses on allow
+// (HLSConfig.PrivateAllow) pass even though they are private, matching the
+// relay's own dial-time check. A nil allow is exactly validateRemoteURL.
+func validateMediaURL(raw, selfBase string, allow *netguard.Allow) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid URL %q: %w", raw, err)
@@ -511,7 +526,7 @@ func validateRemoteURL(raw, selfBase string) error {
 		}
 	}
 	for _, ip := range ips {
-		if err := netguard.ValidateIP(ip, true); err != nil {
+		if err := netguard.ValidateIPAllow(ip, true, allow); err != nil {
 			return fmt.Errorf("URL %q: %w", raw, err)
 		}
 	}

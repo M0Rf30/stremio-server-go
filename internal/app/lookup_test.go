@@ -9,6 +9,7 @@ package app
 // envBitrate, and the hlsConfig() env -> media.HLSConfig builder.
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -93,6 +94,20 @@ func TestHLSConfigDefaultsWhenNothingSet(t *testing.T) {
 	want := media.DefaultHLSConfig()
 	if got != want {
 		t.Errorf("hlsConfig(empty env) = %+v, want DefaultHLSConfig() %+v", got, want)
+	}
+}
+
+func TestHLSConfigPrivateAllow(t *testing.T) {
+	if got := hlsConfig(MapLookup(map[string]string{})).PrivateAllow; got != nil {
+		t.Errorf("PrivateAllow with STREMIO_HLS_PRIVATE_ALLOW unset = %v, want nil", got)
+	}
+	// STREMIO_PROXY_PRIVATE_ALLOW is /proxy's list and must not leak into media.
+	if got := hlsConfig(MapLookup(map[string]string{"STREMIO_PROXY_PRIVATE_ALLOW": "192.168.1.10"})).PrivateAllow; got != nil {
+		t.Errorf("PrivateAllow from STREMIO_PROXY_PRIVATE_ALLOW = %v, want nil", got)
+	}
+	got := hlsConfig(MapLookup(map[string]string{"STREMIO_HLS_PRIVATE_ALLOW": "192.168.1.0/24, bad_host!"})).PrivateAllow
+	if got == nil || !got.Contains(net.ParseIP("192.168.1.10")) || got.Contains(net.ParseIP("10.0.0.1")) {
+		t.Errorf("PrivateAllow from STREMIO_HLS_PRIVATE_ALLOW = %v, want 192.168.1.0/24 only", got)
 	}
 }
 

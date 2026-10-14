@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/M0Rf30/stremio-server-go/internal/netguard"
@@ -111,6 +113,13 @@ type relayFailure struct {
 type mediaRelay struct {
 	client *http.Client
 
+	// privateAllow holds the private destinations (STREMIO_HLS_PRIVATE_ALLOW,
+	// HLSConfig.PrivateAllow) that stay reachable while blockPrivate is set;
+	// nil (the default) allows none. The dialer reads it on every connect, so the IP actually dialed
+	// for the initial URL, every redirect and every nested playlist or
+	// segment is checked against it. Cloud-metadata is never allowed.
+	privateAllow atomic.Pointer[netguard.Allow]
+
 	startOnce sync.Once
 	startErr  error
 	ln        net.Listener
@@ -134,46 +143,59 @@ type mediaRelay struct {
 var globalRelay = newMediaRelay(true)
 
 // newMediaRelay constructs a relay whose outbound fetches are guarded by
-// netguard.DialControl(blockPrivate). Tests that need to point the relay at
-// an httptest.Server (necessarily loopback) construct their own instance
-// with blockPrivate=false instead of mutating globalRelay.
+// netguard.DialControlAllow(blockPrivate, privateAllow). Tests that need to
+// point the relay at an httptest.Server (necessarily loopback) construct
+// their own instance with blockPrivate=false instead of mutating globalRelay.
 func newMediaRelay(blockPrivate bool) *mediaRelay {
-	return &mediaRelay{
+	r := &mediaRelay{
 		tokens: make(map[string]*list.Element),
 		byURL:  make(map[string]string),
 		order:  list.New(),
-		client: &http.Client{
-			// No overall Timeout: http.Client.Timeout also bounds reading
-			// the response body, which would cut every media stream relayed
-			// through io.Copy after 30 s. Only the time to first response
-			// byte is bounded; the body lives as long as the caller (ffmpeg)
-			// keeps the request context open.
-			Transport: &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout: 10 * time.Second,
-					Control: netguard.DialControl(blockPrivate),
-				}).DialContext,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: 30 * time.Second,
-				// ffmpeg fetches many segments from the same few hosts;
-				// keep a handful of idle connections per host (the
-				// net/http default of 2 forces re-dials under the
-				// parallel segment prefetch) but drop them when unused.
-				MaxIdleConns:        64,
-				MaxIdleConnsPerHost: 8,
-				IdleConnTimeout:     90 * time.Second,
-			},
-			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
-				if len(via) >= relayMaxRedirects {
-					return fmt.Errorf("media relay: stopped after %d redirects", relayMaxRedirects)
-				}
-				// No separate host check here: the dialer's Control hook
-				// re-validates the resolved IP of every redirect target at
-				// connect time, exactly as it does for the initial request.
-				return nil
-			},
+	}
+	r.client = &http.Client{
+		// No overall Timeout: http.Client.Timeout also bounds reading
+		// the response body, which would cut every media stream relayed
+		// through io.Copy after 30 s. Only the time to first response
+		// byte is bounded; the body lives as long as the caller (ffmpeg)
+		// keeps the request context open.
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: 10 * time.Second,
+				Control: func(network, address string, c syscall.RawConn) error {
+					return netguard.DialControlAllow(blockPrivate, r.privateAllow.Load())(network, address, c)
+				},
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			// ffmpeg fetches many segments from the same few hosts;
+			// keep a handful of idle connections per host (the
+			// net/http default of 2 forces re-dials under the
+			// parallel segment prefetch) but drop them when unused.
+			MaxIdleConns:        64,
+			MaxIdleConnsPerHost: 8,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			if len(via) >= relayMaxRedirects {
+				return fmt.Errorf("media relay: stopped after %d redirects", relayMaxRedirects)
+			}
+			// No separate host check here: the dialer's Control hook
+			// re-validates the resolved IP of every redirect target at
+			// connect time, exactly as it does for the initial request.
+			return nil
 		},
 	}
+	return r
+}
+
+// setPrivateAllow sets the private destinations the relay may reach
+// (HLSConfig.PrivateAllow; media.New applies it to globalRelay). nil
+// restores the default: every private, loopback and link-local address
+// blocked. Idle connections are dropped so a host removed from the list is
+// re-checked on its next fetch.
+func (r *mediaRelay) setPrivateAllow(a *netguard.Allow) {
+	r.privateAllow.Store(a)
+	r.client.CloseIdleConnections()
 }
 
 // start lazily binds the loopback listener and HTTP server, the first time

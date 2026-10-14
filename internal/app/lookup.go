@@ -23,6 +23,7 @@ import (
 
 	"github.com/M0Rf30/stremio-server-go/internal/logging"
 	"github.com/M0Rf30/stremio-server-go/internal/media"
+	"github.com/M0Rf30/stremio-server-go/internal/netguard"
 )
 
 // Lookup resolves a configuration key, mirroring os.LookupEnv's (value, ok)
@@ -147,6 +148,24 @@ func seekPreroll(lookup Lookup, def time.Duration) time.Duration {
 		return media.MaxSeekPreroll
 	}
 	return d
+}
+
+// envPrivateAllow parses a private-host allowlist env var (comma-separated
+// IPs, CIDRs and hostnames; see netguard.ParseAllow). Unset or empty → nil,
+// which allows nothing. Invalid entries are skipped with a warning.
+func envPrivateAllow(lookup Lookup, key string) *netguard.Allow {
+	v, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	a, bad := netguard.ParseAllow(v)
+	if len(bad) > 0 {
+		logging.For("config").Warn("ignoring invalid private-allow entries", "key", key, "entries", strings.Join(bad, ","))
+	}
+	if a != nil {
+		logging.For("config").Info("private destinations allowlisted", "key", key, "allow", a.String())
+	}
+	return a
 }
 
 // ffmpegBitrateRe matches the bitrate syntax ffmpeg's -b:v/-maxrate/-bufsize
