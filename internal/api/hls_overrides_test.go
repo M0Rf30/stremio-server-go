@@ -106,7 +106,7 @@ func TestHandlerHLS_SegmentErrorStatus(t *testing.T) {
 		code int
 	}{
 		{"source failed → 502", fmt.Errorf("hls: transcode seg3.ts: %w: upstream returned 429 Too Many Requests: exit status 1", types.ErrHLSSourceFailed), http.StatusBadGateway},
-		{"source timed out → 504", fmt.Errorf("hls: transcode seg3.ts: %w: upstream timed out: exit status 1", types.ErrHLSSourceTimeout), http.StatusGatewayTimeout},
+		{"segment timed out → 504", fmt.Errorf("hls: transcode seg3.ts: %w: upstream timed out: exit status 1", types.ErrHLSSegmentTimeout), http.StatusGatewayTimeout},
 		{"unknown session stays 404", fmt.Errorf("hls: %w %q", types.ErrHLSSessionNotFound, "s1"), http.StatusNotFound},
 		{"any other error stays 404", errors.New("hls: transcode seg3.ts: exit status 1"), http.StatusNotFound},
 	}

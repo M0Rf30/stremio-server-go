@@ -677,6 +677,37 @@ paths:
       summary: Report available hardware acceleration devices
       tags:
       - System
+  /extractor/video:
+    get:
+      parameters:
+      - description: extractor name from extractors.json
+        in: query
+        name: host
+        required: true
+        type: string
+      - description: page URL (plain or base64)
+        in: query
+        name: d
+        required: true
+        type: string
+      - description: 302 to the proxy URL instead of JSON
+        in: query
+        name: redirect_stream
+        type: boolean
+      responses:
+        "200":
+          description: OK
+        "302":
+          description: Found
+        "400":
+          description: Bad Request
+        "401":
+          description: Unauthorized
+        "502":
+          description: Bad Gateway
+      summary: Resolve a hoster page into a proxied stream (MediaFlow-compatible)
+      tags:
+      - Proxy
   /ftp/{filename}:
     get:
       parameters:
@@ -853,6 +884,20 @@ paths:
             type: string
         "400":
           description: invalid per-session override
+          schema:
+            type: string
+        "404":
+          description: unknown session or segment
+          schema:
+            type: string
+        "502":
+          description: the source failed while the segment was transcoded (reason
+            in the body)
+          schema:
+            type: string
+        "504":
+          description: 'the segment timed out: its origin timed out or it ran past
+            its time limit (reason in the body)'
           schema:
             type: string
       summary: Serve HLS playlist or segment

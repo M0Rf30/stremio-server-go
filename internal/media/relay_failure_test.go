@@ -113,8 +113,8 @@ func TestClassifySegmentError(t *testing.T) {
 	if got := classifySegmentError(live, live, r, relayURL, began, base); !unclassified(got, base) {
 		t.Errorf("no failure: got %v, want the error unchanged", got)
 	}
-	if got := classifySegmentError(live, expired, r, relayURL, began, base); !errors.Is(got, types.ErrHLSSourceTimeout) || !errors.Is(got, base) {
-		t.Errorf("deadline exceeded: got %v, want ErrHLSSourceTimeout wrapping the cause", got)
+	if got := classifySegmentError(live, expired, r, relayURL, began, base); !errors.Is(got, types.ErrHLSSegmentTimeout) || !errors.Is(got, base) {
+		t.Errorf("deadline exceeded: got %v, want ErrHLSSegmentTimeout wrapping the cause", got)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, relayURL, nil)
@@ -128,13 +128,16 @@ func TestClassifySegmentError(t *testing.T) {
 		t.Errorf("caller gone: got %v, want the error unchanged", got)
 	}
 	r.recordFailure(req, token, "upstream timed out", true)
-	if got := classifySegmentError(live, live, r, relayURL, began, base); !errors.Is(got, types.ErrHLSSourceTimeout) {
-		t.Errorf("origin timeout: got %v, want ErrHLSSourceTimeout", got)
+	if got := classifySegmentError(live, live, r, relayURL, began, base); !errors.Is(got, types.ErrHLSSegmentTimeout) {
+		t.Errorf("origin timeout: got %v, want ErrHLSSegmentTimeout", got)
 	}
 
-	canceledReq := httptest.NewRequest(http.MethodGet, relayURL, nil).WithContext(gone)
+	// Register on the relay the failure is recorded on, and build the request
+	// from that relay's token, so the check below can only pass by the
+	// cancellation guard.
 	r2 := newMediaRelay(false)
 	relay2, _ := r2.register("http://93.184.216.34/b.mkv")
+	canceledReq := httptest.NewRequest(http.MethodGet, relay2, nil).WithContext(gone)
 	r2.recordFailure(canceledReq, strings.TrimPrefix(canceledReq.URL.Path, "/r/"), "upstream fetch failed", false)
 	if _, ok := r2.failureSince(relay2, began); ok {
 		t.Error("a failure seen after ffmpeg cancelled its own request was recorded")
@@ -143,5 +146,5 @@ func TestClassifySegmentError(t *testing.T) {
 
 // unclassified reports whether got is base without a source-failure mark.
 func unclassified(got, base error) bool {
-	return errors.Is(got, base) && !errors.Is(got, types.ErrHLSSourceFailed) && !errors.Is(got, types.ErrHLSSourceTimeout)
+	return errors.Is(got, base) && !errors.Is(got, types.ErrHLSSourceFailed) && !errors.Is(got, types.ErrHLSSegmentTimeout)
 }

@@ -1765,7 +1765,7 @@ func (s *server) handleHLSProbe(w http.ResponseWriter, r *http.Request) {
 // @Failure  400  {string}  string  "invalid per-session override"
 // @Failure  404  {string}  string  "unknown session or segment"
 // @Failure  502  {string}  string  "the source failed while the segment was transcoded (reason in the body)"
-// @Failure  504  {string}  string  "the source or the transcode timed out (reason in the body)"
+// @Failure  504  {string}  string  "the segment timed out: its origin timed out or it ran past its time limit (reason in the body)"
 // @Router   /hlsv2/{id}/{file} [get]
 func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string) {
 	if r.Method == http.MethodDelete {
@@ -1810,7 +1810,7 @@ func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string)
 		// client can back off or retry instead of treating it as the end.
 		code := http.StatusNotFound
 		switch {
-		case errors.Is(err, types.ErrHLSSourceTimeout):
+		case errors.Is(err, types.ErrHLSSegmentTimeout):
 			code = http.StatusGatewayTimeout
 		case errors.Is(err, types.ErrHLSSourceFailed):
 			code = http.StatusBadGateway
