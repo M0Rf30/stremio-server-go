@@ -295,6 +295,53 @@
                 }
             }
         },
+        "/extractor/video": {
+            "get": {
+                "tags": [
+                    "Proxy"
+                ],
+                "summary": "Resolve a hoster page into a proxied stream (MediaFlow-compatible)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "extractor name from extractors.json",
+                        "name": "host",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "page URL (plain or base64)",
+                        "name": "d",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "302 to the proxy URL instead of JSON",
+                        "name": "redirect_stream",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "302": {
+                        "description": "Found"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "401": {
+                        "description": "Unauthorized"
+                    },
+                    "502": {
+                        "description": "Bad Gateway"
+                    }
+                }
+            }
+        },
         "/ftp/{filename}": {
             "get": {
                 "tags": [
@@ -582,6 +629,24 @@
                     },
                     "400": {
                         "description": "invalid per-session override",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "unknown session or segment",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "502": {
+                        "description": "the source failed while the segment was transcoded (reason in the body)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "504": {
+                        "description": "the segment timed out: its origin timed out or it ran past its time limit (reason in the body)",
                         "schema": {
                             "type": "string"
                         }

@@ -395,8 +395,8 @@ var (
 	// answered with an error status such as 429, the fetch failed, or the
 	// body broke off). The HTTP layer answers 502.
 	ErrHLSSourceFailed = errors.New("source failed")
-	// ErrHLSSourceTimeout reports that a segment could not be produced in
-	// time: the origin timed out, or the transcode ran past its deadline.
-	// The HTTP layer answers 504.
-	ErrHLSSourceTimeout = errors.New("source timed out")
+	// ErrHLSSegmentTimeout reports that a segment could not be produced in
+	// time: its origin timed out, or the transcode ran past its overall
+	// deadline (slow encodes count too). The HTTP layer answers 504.
+	ErrHLSSegmentTimeout = errors.New("segment timed out")
 )

@@ -265,6 +265,16 @@ session, `400` invalid id (the same ids `master.m3u8` rejects). Like every
 route it is subject to the `STREMIO_ALLOWED_ORIGINS` Origin allowlist.
 Re-creating the same id is refused until a deferred removal has finished.
 
+`GET /hlsv2/{id}/{file}` answers `404` for an unknown session, a segment that
+is missing or past the end, and any other transcode failure. When the source
+fails while a segment is transcoded, the segment is answered `502` (for
+example, the origin answered `429`), or `504` when the origin timed out or the
+segment ran past its time limit (`STREMIO_HLS_SEGMENT_TIMEOUT`, doubled when a
+hardware attempt precedes the software fallback). The reason is in the body.
+Before answering, the server makes its own transcode attempts: a software
+fallback after a failed hardware attempt, and at most one retry with a longer
+input seek. A client should back off before it requests the segment again.
+
 HDR→SDR tone mapping (`STREMIO_TRANSCODE_TONEMAP`) applies only to sources
 whose first video stream reports a PQ (`smpte2084`) or HLG (`arib-std-b67`)
 transfer; SDR sources (including 10-bit SDR) are transcoded exactly as before.

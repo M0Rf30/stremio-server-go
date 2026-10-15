@@ -1643,7 +1643,7 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 
 // classifySegmentError marks a failed segment transcode whose cause lies
 // with the source, so the HTTP layer can tell it from a missing segment:
-// types.ErrHLSSourceTimeout if the relay saw the origin time out or the
+// types.ErrHLSSegmentTimeout if the relay saw the origin time out or the
 // transcode ran past its overall deadline (dctx), types.ErrHLSSourceFailed
 // if the relay saw any other origin failure for inputURL since began.
 // Anything else, including a caller that went away (ctx), is returned
@@ -1654,12 +1654,12 @@ func classifySegmentError(ctx, dctx context.Context, rl *mediaRelay, inputURL st
 	}
 	if f, ok := rl.failureSince(inputURL, began); ok {
 		if f.timeout {
-			return fmt.Errorf("%w: %s: %w", types.ErrHLSSourceTimeout, f.reason, err)
+			return fmt.Errorf("%w: %s: %w", types.ErrHLSSegmentTimeout, f.reason, err)
 		}
 		return fmt.Errorf("%w: %s: %w", types.ErrHLSSourceFailed, f.reason, err)
 	}
 	if errors.Is(dctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("%w: transcode deadline exceeded: %w", types.ErrHLSSourceTimeout, err)
+		return fmt.Errorf("%w: transcode deadline exceeded: %w", types.ErrHLSSegmentTimeout, err)
 	}
 	return err
 }
