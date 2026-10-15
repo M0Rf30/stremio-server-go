@@ -1330,9 +1330,9 @@ func (m *hlsManager) extractSubtitle(ctx context.Context, s *hlsSession, k int) 
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("hls: subtitle extract %s: %w", filename, err)
 	}
-	// ffmpeg exits 0 after "Stream ends prematurely" or the Matroska
-	// demuxer's "File ended prematurely" (the input was cut mid-demux) and leaves a partial track
-	// behind. Never promote that to the permanent sub<k>.vtt cache: a later
+	// ffmpeg exits 0 after "Stream ends prematurely" or the Matroska demuxer's
+	// "File ended prematurely" (the input was cut mid-demux) and leaves a
+	// partial track behind. Never promote that to the permanent sub<k>.vtt cache: a later
 	// request must re-extract.
 	if stderr.containsFold("ends prematurely") || stderr.containsFold("ended prematurely") {
 		_ = os.Remove(tmp)
@@ -1440,11 +1440,20 @@ func (m *hlsManager) currentConcurrency() int {
 //   - Output: -output_ts_offset -muxdelay 0 -t dur -mpegts_copyts 1
 //     (-t as output option terminates apad in audio-only segments)
 //
-// The output is inspected before it is cached (see segcheck.go): a segment
-// with missing or late video, missing audio, or an input read error logged
-// by ffmpeg is still served but not cached, so the next request transcodes
-// it again. MPEG-TS input with missing/late video is first retried once
-// with a longer input-seek pre-roll.
+// The output is inspected before it is cached (see segcheck.go). A segment
+// that is still served, but not cached, so the next request transcodes it
+// again, has one of these reasons:
+//   - "no video frames" or "video starts …": video missing or starting late;
+//   - "video ends …": video stops early while the padded audio runs on;
+//   - "no audio PES": audio missing where it is expected;
+//   - "ffmpeg input error: …": ffmpeg logged an input read error (see
+//     inputErrMarkers);
+//   - "shutdown in progress": BeginShutdown ran before the segment finished.
+//
+// MPEG-TS input with missing/late video is first retried once with a longer
+// input-seek pre-roll. After BeginShutdown, no software fallback is started
+// for a failed hardware attempt (the error is returned, nothing is cached),
+// and no retry is started (the first output is served, uncached).
 //
 // High-bit-depth safety: we never add -hwaccel decode flags (SW decode is always
 // used, which is safe across all input formats).  For VAAPI the filter chain
