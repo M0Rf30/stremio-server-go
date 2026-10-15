@@ -449,7 +449,7 @@ func TestStderrWatch(t *testing.T) {
 		{"premature EOF", []string{"[http @ 0x1] Stream ends prematurely at 300000, should be 10224380\n"}, "Stream ends prematurely"},
 		{"demux error", []string{"[in#0/mpegts @ 0x1] Error during demuxing: Input/output error\n"}, "Error during demuxing"},
 		{"marker split across writes", []string{"noise noise [in#0 @ 0x1] Error during de", "muxing: I/O error\n"}, "Error during demuxing"},
-		{"premature EOF, ffmpeg 9", []string{"[http @ 0x1] File ended prematurely at pos. 300000 (10224380)\n"}, "File ended prematurely"},
+		{"Matroska premature EOF (matroskadec)", []string{"[matroska,webm @ 0x1] File ended prematurely at pos. 300000 (10224380)\n"}, "File ended prematurely"},
 		{"marker split byte by byte", strings.Split("x Stream ends prematurely y", ""), "Stream ends prematurely"},
 		{"first marker wins", []string{"Stream ends prematurely\n", "Error during demuxing\n"}, "Stream ends prematurely"},
 	}
@@ -656,4 +656,172 @@ func TestTranscodeSegmentNotCachedAfterShutdown(t *testing.T) {
 	if !dirExists(p) {
 		t.Errorf("during shutdown: served path %q does not exist", p)
 	}
+}
+
+// shutdownStub is a PATH-shim ffmpeg: every call appends its argv to calls,
+// a call whose argv names h264_vaapi fails, and any other call copies
+// fixture to its output (the last argument) and then sleeps for delay.
+func shutdownStub(calls, fixture, delay string) string {
+	return "#!/bin/sh\necho \"$@\" >> \"" + calls + "\"\n" +
+		"case \"$*\" in *h264_vaapi*) exit 1;; esac\n" +
+		"for a; do out=$a; done\n" +
+		"cp \"" + fixture + "\" \"$out\"\n" +
+		"sleep " + delay + "\n"
+}
+
+// TestTranscodeSegmentShutdownRefusesFallback checks that after BeginShutdown
+// a failed hardware attempt is not followed by a libx264 re-encode: the error
+// is returned and nothing is cached. The control case shows that the same
+// failure does fall back when the server is not shutting down.
+func TestTranscodeSegmentShutdownRefusesFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH-shim ffmpeg stub is a /bin/sh script")
+	}
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "fixture.ts")
+	if err := os.WriteFile(fixture, segTS(0, 0, 0), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "calls.log")
+	if err := os.WriteFile(filepath.Join(dir, "ffmpeg"), []byte(shutdownStub(calls, fixture, "0")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	newSession := func(t *testing.T) (*hlsManager, *hlsSession) {
+		t.Helper()
+		_ = os.Remove(calls)
+		m := newTestHLSManager(t)
+		m.selfBase = "http://127.0.0.1:11470"
+		m.enc = hwEncoder{codec: "h264_vaapi", isHW: true}
+		s := injectSession(t, m, "fallback")
+		s.mediaURL = m.selfBase + "/x/0"
+		s.tc = sessionConfig{hwEnabled: true}
+		return m, s
+	}
+	callLog := func(t *testing.T) string {
+		t.Helper()
+		b, err := os.ReadFile(calls)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	t.Run("control: a failed hardware attempt falls back to libx264", func(t *testing.T) {
+		m, s := newSession(t)
+		if _, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0); err != nil {
+			t.Fatalf("transcode: %v", err)
+		}
+		if !strings.Contains(callLog(t), "libx264") {
+			t.Errorf("no software fallback ran; calls:\n%s", callLog(t))
+		}
+		if !dirExists(filepath.Join(s.dir, "seg0.ts")) {
+			t.Error("fallback output was not cached")
+		}
+	})
+
+	t.Run("after BeginShutdown: no libx264 re-encode, error returned, nothing cached", func(t *testing.T) {
+		m, s := newSession(t)
+		m.BeginShutdown()
+		if _, err := m.transcodeSegment(context.Background(), s, 1, segMuxed, 0); err == nil {
+			t.Fatal("transcode succeeded after a failed hardware attempt during shutdown")
+		}
+		if strings.Contains(callLog(t), "libx264") {
+			t.Errorf("software re-encode started during shutdown; calls:\n%s", callLog(t))
+		}
+		if dirExists(filepath.Join(s.dir, "seg1.ts")) {
+			t.Error("segment cached during shutdown")
+		}
+	})
+}
+
+// TestTranscodeSegmentShutdownRefusesRetry checks that a shutdown which begins
+// while the first attempt is still running refuses the longer-pre-roll retry:
+// the first output is served, uncached, and ffmpeg runs only once. The
+// control case runs the same segment without shutdown, so the retry path is
+// known to be live.
+func TestTranscodeSegmentShutdownRefusesRetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH-shim ffmpeg stub is a /bin/sh script")
+	}
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "fixture.ts")
+	if err := os.WriteFile(fixture, segTS(0, 0, 4), 0o600); err != nil { // audio, no video: late-video verdict
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "calls.log")
+	if err := os.WriteFile(filepath.Join(dir, "ffmpeg"), []byte(shutdownStub(calls, fixture, "2")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	newSession := func(t *testing.T, id string) (*hlsManager, *hlsSession) {
+		t.Helper()
+		_ = os.Remove(calls)
+		m := newTestHLSManager(t)
+		m.selfBase = "http://127.0.0.1:11470"
+		s := injectSession(t, m, id)
+		s.mediaURL = m.selfBase + "/x/0"
+		s.isTS = true // MPEG-TS input: the retry plan applies
+		s.hasVideo = true
+		return m, s
+	}
+	callCount := func(t *testing.T) int {
+		t.Helper()
+		b, err := os.ReadFile(calls)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(b), "\n")
+	}
+
+	t.Run("control: without shutdown the retry runs", func(t *testing.T) {
+		m, s := newSession(t, "retry-control")
+		if _, err := m.transcodeSegment(context.Background(), s, 3, segMuxed, 0); err != nil {
+			t.Fatalf("transcode: %v", err)
+		}
+		if n := callCount(t); n != 2 {
+			t.Errorf("ffmpeg ran %d times, want 2 (first attempt and the longer-pre-roll retry)", n)
+		}
+	})
+
+	t.Run("shutdown during the first attempt refuses the retry", func(t *testing.T) {
+		m, s := newSession(t, "retry")
+		type result struct {
+			p   string
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			p, err := m.transcodeSegment(context.Background(), s, 3, segMuxed, 0) // start 12s > the 10s pre-roll
+			done <- result{p, err}
+		}()
+
+		// Begin shutdown once the first attempt has written its output, while
+		// ffmpeg is still running (the stub sleeps after the copy).
+		tmp := filepath.Join(s.dir, "seg3.ts.tmp.ts")
+		deadline := time.Now().Add(15 * time.Second)
+		for !dirExists(tmp) {
+			if time.Now().After(deadline) {
+				t.Fatal("first attempt never wrote its output")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		m.BeginShutdown()
+
+		r := <-done
+		if r.err != nil {
+			t.Fatalf("transcode: %v", r.err)
+		}
+		if !dirExists(r.p) {
+			t.Errorf("served path %q does not exist", r.p)
+		}
+		if dirExists(filepath.Join(s.dir, "seg3.ts")) {
+			t.Error("segment cached although its first output had no video")
+		}
+		if n := callCount(t); n != 1 {
+			t.Errorf("ffmpeg ran %d times, want 1 (the retry must be refused)", n)
+		}
+	})
 }

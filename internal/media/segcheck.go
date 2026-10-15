@@ -271,8 +271,9 @@ func transcodeChecked(ctx context.Context, name string, start float64, pre preRo
 
 // inputErrMarkers are ffmpeg log lines that mean the input stopped short:
 // the HTTP protocol's premature-EOF message, the Matroska demuxer's
-// truncation message ("File ended prematurely at pos. N", ffmpeg 9) and the
-// demuxer's I/O failure. ffmpeg still exits 0 after them. A false positive only costs a
+// truncation message ("File ended prematurely at pos. N", logged by
+// matroskadec, the Matroska/WebM demuxer) and the demuxer's
+// I/O failure. ffmpeg still exits 0 after them. A false positive only costs a
 // re-transcode, since it merely keeps the segment out of the cache.
 var inputErrMarkers = []string{
 	"Stream ends prematurely",
