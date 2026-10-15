@@ -34,23 +34,27 @@ func TestMediaRelayRecordsUpstreamFailure(t *testing.T) {
 		name        string
 		handler     http.HandlerFunc
 		wantReason  string // "" = no failure recorded
+		wantAlt     string // another acceptable reason ("" = none): see the body case
 		wantTimeout bool
 	}{
-		{"healthy", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "data") }, "", false},
+		{"healthy", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "data") }, "", "", false},
 		{"rate limited", func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "slow down", http.StatusTooManyRequests)
-		}, "upstream returned 429 Too Many Requests", false},
+		}, "upstream returned 429 Too Many Requests", "", false},
 		{"read past the end (416) is not a failure", func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "range", http.StatusRequestedRangeNotSatisfiable)
-		}, "", false},
+		}, "", "", false},
 		{"gateway timeout", func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "late", http.StatusGatewayTimeout)
-		}, "upstream returned 504 Gateway Timeout", true},
+		}, "upstream returned 504 Gateway Timeout", "", true},
 		{"body breaks off", func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = io.WriteString(w, strings.Repeat("x", 1024))
 			w.(http.Flusher).Flush()
 			panic(http.ErrAbortHandler)
-		}, "upstream body ended early", false},
+			// A client that has not yet read the headers when the abort arrives
+			// records a failed fetch instead (seen on Windows); both are source
+			// failures.
+		}, "upstream body ended early", "upstream fetch failed", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,8 +68,10 @@ func TestMediaRelayRecordsUpstreamFailure(t *testing.T) {
 			began := time.Now()
 			relayGet(t, relayURL)
 			f, ok := r.failureSince(relayURL, began)
-			if ok != (tc.wantReason != "") || f.reason != tc.wantReason || f.timeout != tc.wantTimeout {
-				t.Fatalf("failureSince = %+v, %v; want reason %q timeout %v", f, ok, tc.wantReason, tc.wantTimeout)
+			wantOK := tc.wantReason != ""
+			reasonOK := f.reason == tc.wantReason || (tc.wantAlt != "" && f.reason == tc.wantAlt)
+			if ok != wantOK || (wantOK && !reasonOK) || f.timeout != tc.wantTimeout {
+				t.Fatalf("failureSince = %+v, %v; want reason %q (or %q) timeout %v", f, ok, tc.wantReason, tc.wantAlt, tc.wantTimeout)
 			}
 			if strings.Contains(f.reason, "secret-token") {
 				t.Errorf("reason %q leaks the upstream URL", f.reason)
