@@ -21,6 +21,12 @@ coverage.html
 .env
 *.env
 
+# TLS material written by the get-https route (ProvisionCert) into the app
+# path: never commit a real certificate, key or auth key.
+https-cert.pem
+https-key.pem
+cert-authkey
+
 # Editor / OS
 .DS_Store
 .idea/

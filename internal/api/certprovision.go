@@ -34,6 +34,11 @@ import (
 // background renewer can refresh the cert without another /get-https call.
 const certAuthKeyFile = "cert-authkey"
 
+// certAPIURL is the Stremio certificate endpoint ProvisionCert posts to. It is
+// a variable, not a constant, so tests can point it at a local server and never
+// make a live call (see TestCrossSiteOriginlessGETBlocked).
+var certAPIURL = "https://api.strem.io/api/certificateGet"
+
 // ProvisionResult describes a certificate issued and installed by ProvisionCert.
 type ProvisionResult struct {
 	Domain     string
@@ -72,10 +77,9 @@ func ProvisionCert(appPath, authKey, ipAddress string) (*ProvisionResult, error)
 		return nil, perr(http.StatusBadRequest, "missing authKey")
 	}
 
-	const apiURL = "https://api.strem.io/api/certificateGet"
 	payload, _ := json.Marshal(map[string]string{"authKey": authKey, "ipAddress": ipAddress})
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Post(apiURL, "application/json", bytes.NewReader(payload))
+	resp, err := client.Post(certAPIURL, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return nil, perr(http.StatusBadGateway, "API request failed: %v", err)
 	}
