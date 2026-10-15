@@ -222,6 +222,7 @@ func newHandler(t *testing.T, engines ...*fakeEngine) http.Handler {
 		WebUI:              "https://web.stremio.com/",
 		EnableDLNA:         false,
 		CreateMetadataWait: 90 * time.Second,
+		AppPath:            t.TempDir(), // settings, recordings and cert files stay out of the package dir
 	}
 	return New(newFakeEM(engines...), &fakeSS{}, &fakeProber{}, cfg)
 }
@@ -236,6 +237,7 @@ func newHandlerWithCfg(t *testing.T, mutate func(*types.Config), engines ...*fak
 		WebUI:              "https://web.stremio.com/",
 		EnableDLNA:         false,
 		CreateMetadataWait: 90 * time.Second,
+		AppPath:            t.TempDir(), // settings, recordings and cert files stay out of the package dir
 	}
 	if mutate != nil {
 		mutate(&cfg)

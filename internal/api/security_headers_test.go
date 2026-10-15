@@ -36,7 +36,17 @@ func TestCrossSiteOriginlessGETBlocked(t *testing.T) {
 		"/casting/dev1/player/stop",
 		"/casting",
 	}
-	h := newHandler(t, testEngine())
+	// /get-https reaches ProvisionCert on the same-origin paths: point it at a
+	// local stub (no live call) and install any files under a temp dir.
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"error":"stub: no live API in tests"}`))
+	}))
+	t.Cleanup(stub.Close)
+	prev := certAPIURL
+	certAPIURL = stub.URL + "/api/certificateGet"
+	t.Cleanup(func() { certAPIURL = prev })
+
+	h := newHandlerWithCfg(t, func(c *types.Config) { c.AppPath = t.TempDir() }, testEngine())
 	for _, p := range paths {
 		t.Run(p, func(t *testing.T) {
 			rec := serveWithHeaders(h, p, map[string]string{"Sec-Fetch-Site": "cross-site"})
