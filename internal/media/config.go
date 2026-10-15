@@ -666,9 +666,11 @@ var decimalBitrateRe = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)([kKmMgG]?)$`)
 // parseDecimalBitrate converts a decimalBitrateRe value ("1.5M", "800k",
 // "6000000") to whole bits/second, rounding to the nearest integer. ok is
 // false for anything outside that syntax or too large to represent. Used
-// only for the per-session overrides, whose result is canonicalised to an
-// integer string before it reaches ffmpeg; parseFFmpegBitrate (integers
-// only) is left unchanged so env-derived BANDWIDTH stays byte-identical.
+// for the per-session overrides, whose result is canonicalised to an
+// integer string before it reaches ffmpeg, and for the audio term of
+// BANDWIDTH, since ffmpeg accepts a decimal -b:a such as "0.128M".
+// parseFFmpegBitrate (integers only) still parses the env maxrate, so the
+// legacy-BANDWIDTH test in deriveBandwidthCodecs is unchanged.
 func parseDecimalBitrate(s string) (int64, bool) {
 	m := decimalBitrateRe.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {

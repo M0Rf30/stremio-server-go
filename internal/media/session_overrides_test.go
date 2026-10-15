@@ -367,6 +367,33 @@ func TestStartHLSGateOnWithoutParamsMatchesLegacy(t *testing.T) {
 	}
 }
 
+// TestStartHLSBandwidthDecimalAudioBitrate: a decimal
+// STREMIO_TRANSCODE_AUDIO_BITRATE, which ffmpeg accepts, still counts toward
+// BANDWIDTH instead of being dropped as unparsable.
+func TestStartHLSBandwidthDecimalAudioBitrate(t *testing.T) {
+	for _, c := range []struct{ maxrate, audio, want string }{
+		{"6M", "0.128M", "BANDWIDTH=6128000,"},
+		{"6M", "128k", "BANDWIDTH=6128000,"},
+		{"6M", "96.5k", "BANDWIDTH=6096500,"},
+		// Unconfigured video: the legacy string, whatever the audio bitrate.
+		{"", "0.128M", "BANDWIDTH=4000000,"},
+	} {
+		cfg := DefaultHLSConfig()
+		if c.maxrate != "" {
+			cfg.VideoMaxrate = c.maxrate
+		}
+		cfg.AudioBitrate = c.audio
+		m := newOverrideTestManager(t, false, cfg, nil)
+		master, err := m.StartHLS("a", overrideMediaURL, types.HLSSessionOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(master, c.want) {
+			t.Errorf("audio %q: master missing %q:\n%s", c.audio, c.want, master)
+		}
+	}
+}
+
 func TestStartHLSAppliesOverridesOnCreation(t *testing.T) {
 	m := newOverrideTestManager(t, true, DefaultHLSConfig(), nil)
 	master, err := m.StartHLS("party", overrideMediaURL, types.HLSSessionOptions{
