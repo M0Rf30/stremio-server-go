@@ -346,7 +346,7 @@ func TestHLSManagerAcceptsSelfMediaURL(t *testing.T) {
 
 	// probeMedia will fail on this non-media body, but the failure must come
 	// from probing, not from the SSRF pre-flight rejecting the URL.
-	_, err := m.StartHLS("sess-self", ts.URL+"/ih/0", types.HLSSessionOptions{})
+	_, err := m.StartHLS("sess-self", ts.URL+testSelfPath, types.HLSSessionOptions{})
 	if err != nil && strings.Contains(err.Error(), "only http/https allowed") {
 		t.Fatalf("self-origin mediaURL rejected by the SSRF gate: %v", err)
 	}
@@ -581,14 +581,14 @@ func TestValidateRemoteURL(t *testing.T) {
 		{"public https URL accepted", "https://93.184.216.34/dummy.mkv", "", false},
 		// selfBase carve-out: the https UI on :12470 asking this server to
 		// transcode a stream it serves on :11470 must keep working.
-		{"own origin accepted", "http://127.0.0.1:11470/ih/0", self, false},
-		{"own origin via self-signed https twin accepted", "https://127.0.0.1:12470/ih/0", self, false},
-		{"own origin bare accepted", "http://127.0.0.1:11470", self, false},
+		{"own origin accepted", "http://127.0.0.1:11470" + testSelfPath, self, false},
+		{"own origin via self-signed https twin accepted", "https://127.0.0.1:12470" + testSelfPath, self, false},
+		{"own origin bare rejected", "http://127.0.0.1:11470", self, true},
 		{"file scheme still rejected with selfBase", "file:///etc/passwd", self, true},
 		{"other loopback port still rejected", "http://127.0.0.1:22/dummy.mkv", self, true},
 		{"metadata still rejected with selfBase", "http://169.254.169.254/latest/meta-data/", self, true},
 		{"prefix-confusion host rejected", "http://127.0.0.1:11470.evil.com/x", self, true},
-		{"self host with different scheme rejected", "https://127.0.0.1:11470/ih/0", self, true},
+		{"self host with different scheme rejected", "https://127.0.0.1:11470" + testSelfPath, self, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -703,7 +703,7 @@ func TestProbeAppliesLocalize(t *testing.T) {
 
 	p := newTestProber()
 	p.baseURLLocal = "http://127.0.0.1:11470"
-	raw := "https://127.0.0.1:12470/videos/movie.mkv"
+	raw := "https://127.0.0.1:12470" + testSelfPath
 
 	if _, err := p.Probe(raw); err != nil {
 		t.Fatalf("Probe with stub ffprobe: %v", err)
@@ -943,7 +943,7 @@ func TestOpenSubHashAppliesLocalize(t *testing.T) {
 	// Raw self-signed UI-origin form; validateRemoteURL's selfBase exemption
 	// allows it via its own internal localize() check, but OpenSubHash must
 	// also localize() before calling fetchHTTPChunks.
-	videoURL := "https://127.0.0.1:12470/video.bin"
+	videoURL := "https://127.0.0.1:12470" + testSelfPath
 
 	result, err := p.OpenSubHash(videoURL)
 	if err != nil {

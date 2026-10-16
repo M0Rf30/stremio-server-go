@@ -80,6 +80,10 @@ type relayEntry struct {
 	token     string
 	url       string
 	expiresAt time.Time
+	// self is the server's own origin (selfBase) when url is a media route
+	// on it (classifySelfPath), fetched through selfClient; "" for every
+	// other URL, fetched through the guarded client.
+	self string
 	// fail is the latest upstream failure seen while serving this token
 	// (zero if none); see recordFailure and failureSince.
 	fail relayFailure
@@ -114,6 +118,13 @@ type relayFailure struct {
 // multi-level HLS fetch is funneled back through the same guarded client.
 type mediaRelay struct {
 	client *http.Client
+	// selfClient fetches self entries (relayEntry.self): URLs on the
+	// server's own origin that classifySelfPath admits (issue #65). Its
+	// dialer connects only to the host:port of that origin, carried in the
+	// request context (relaySelfAddrKey), and it never follows a redirect:
+	// proxy re-registers the Location instead, so every hop is classified
+	// again.
+	selfClient *http.Client
 
 	// privateAllow holds the private destinations (STREMIO_HLS_PRIVATE_ALLOW,
 	// HLSConfig.PrivateAllow) that stay reachable while blockPrivate is set;
@@ -129,7 +140,7 @@ type mediaRelay struct {
 
 	mu     sync.Mutex
 	tokens map[string]*list.Element // token → element of order (*relayEntry)
-	byURL  map[string]string        // upstream URL → token (dedupe)
+	byURL  map[string]string        // relayEntryKey → token (dedupe)
 	// order holds every live entry, least recently (re-)registered at the
 	// front. Every registration or refresh sets expiresAt = now+relayTokenTTL
 	// and moves the entry to the back, so the list is also sorted by expiry:
@@ -187,7 +198,50 @@ func newMediaRelay(blockPrivate bool) *mediaRelay {
 			return nil
 		},
 	}
+	r.selfClient = &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if want, _ := ctx.Value(relaySelfAddrKey{}).(string); want == "" || addr != want {
+					return nil, fmt.Errorf("media relay: self dial to %s refused", addr)
+				}
+				return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+			},
+			ResponseHeaderTimeout: 60 * time.Second, // /yt runs yt-dlp before answering
+			MaxIdleConnsPerHost:   8,
+			IdleConnTimeout:       90 * time.Second,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	return r
+}
+
+// relaySelfAddrKey is the request-context key carrying the host:port that
+// selfClient may dial for a self entry.
+type relaySelfAddrKey struct{}
+
+// selfHostPort returns the host:port of origin (scheme://host[:port]), with
+// the scheme's default port filled in, as net/http passes it to DialContext.
+func selfHostPort(origin string) string {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	if u.Port() != "" {
+		return u.Host
+	}
+	if u.Scheme == "https" {
+		return net.JoinHostPort(u.Hostname(), "443")
+	}
+	return net.JoinHostPort(u.Hostname(), "80")
+}
+
+// relayEntryKey is the byURL dedupe key: the same URL registered as a self
+// entry and as a guarded one gets two separate tokens.
+func relayEntryKey(rawURL, self string) string {
+	if self == "" {
+		return rawURL
+	}
+	return "self\x00" + self + "\x00" + rawURL
 }
 
 // setPrivateAllow sets the private destinations the relay may reach
@@ -226,8 +280,16 @@ func (r *mediaRelay) port() int {
 }
 
 // register starts the relay if needed and returns a fresh
-// "http://127.0.0.1:<port>/r/<token>" URL that proxies to rawURL.
+// "http://127.0.0.1:<port>/r/<token>" URL that proxies to rawURL through the
+// guarded client.
 func (r *mediaRelay) register(rawURL string) (string, error) {
+	return r.registerAs(rawURL, "")
+}
+
+// registerAs is register for a self entry when self (the server's own
+// origin) is set: the caller has checked that rawURL is a media route on
+// self (classifySelfPath), and the token's fetches go through selfClient.
+func (r *mediaRelay) registerAs(rawURL, self string) (string, error) {
 	if err := r.start(); err != nil {
 		return "", err
 	}
@@ -235,10 +297,11 @@ func (r *mediaRelay) register(rawURL string) (string, error) {
 	exp := now.Add(relayTokenTTL)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	token, ok := r.byURL[rawURL]
+	key := relayEntryKey(rawURL, self)
+	token, ok := r.byURL[key]
 	if ok {
 		if el, live := r.tokens[token]; live {
-			if e := el.Value.(*relayEntry); e.url == rawURL {
+			if e := el.Value.(*relayEntry); e.url == rawURL && e.self == self {
 				// Same upstream URL already has a token: reuse it (refreshing
 				// its expiry and recency) so re-fetched playlists don't mint
 				// fresh tokens.
@@ -250,8 +313,8 @@ func (r *mediaRelay) register(rawURL string) (string, error) {
 	}
 	r.evictLocked(now)
 	token = randomRelayToken()
-	r.tokens[token] = r.order.PushBack(&relayEntry{token: token, url: rawURL, expiresAt: exp})
-	r.byURL[rawURL] = token
+	r.tokens[token] = r.order.PushBack(&relayEntry{token: token, url: rawURL, expiresAt: exp, self: self})
+	r.byURL[key] = token
 	return fmt.Sprintf("http://127.0.0.1:%d/r/%s", r.port(), token), nil
 }
 
@@ -279,8 +342,8 @@ func (r *mediaRelay) sweepLocked(now time.Time) {
 func (r *mediaRelay) deleteElemLocked(el *list.Element) {
 	e := r.order.Remove(el).(*relayEntry)
 	delete(r.tokens, e.token)
-	if r.byURL[e.url] == e.token {
-		delete(r.byURL, e.url)
+	if key := relayEntryKey(e.url, e.self); r.byURL[key] == e.token {
+		delete(r.byURL, key)
 	}
 }
 
@@ -293,17 +356,24 @@ func randomRelayToken() string {
 // resolve looks up the upstream URL for token, rejecting unknown or expired
 // tokens.
 func (r *mediaRelay) resolve(token string) (string, bool) {
+	upstream, _, ok := r.resolveEntry(token)
+	return upstream, ok
+}
+
+// resolveEntry is resolve that also returns the entry's self origin ("" for
+// a guarded entry).
+func (r *mediaRelay) resolveEntry(token string) (upstream, self string, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	el, ok := r.tokens[token]
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	e := el.Value.(*relayEntry)
 	if time.Now().After(e.expiresAt) {
-		return "", false
+		return "", "", false
 	}
-	return e.url, true
+	return e.url, e.self, true
 }
 
 // janitor periodically sweeps expired tokens so long-running processes don't
@@ -330,12 +400,12 @@ func (r *mediaRelay) handle(w http.ResponseWriter, req *http.Request) {
 	if idx := strings.IndexByte(token, '/'); idx >= 0 {
 		token = token[:idx]
 	}
-	upstream, ok := r.resolve(token)
+	upstream, self, ok := r.resolveEntry(token)
 	if !ok {
 		http.Error(w, "unknown or expired relay token", http.StatusNotFound)
 		return
 	}
-	r.proxy(w, req, token, upstream)
+	r.proxy(w, req, token, upstream, self)
 }
 
 // recordFailure notes an upstream failure for token, unless the downstream
@@ -369,6 +439,9 @@ func (r *mediaRelay) failureSince(relayURL string, since time.Time) (relayFailur
 		return relayFailure{}, false
 	}
 	token := strings.TrimPrefix(u.Path, "/r/")
+	if i := strings.IndexByte(token, '/'); i >= 0 {
+		token = token[:i] // a rewritten entry's /s.<ext> suffix
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	el, ok := r.tokens[token]
@@ -388,11 +461,18 @@ func isTimeout(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
 }
 
-// proxy fetches upstream through r.client (forwarding Range and the
-// method), rewriting nested URIs if the response looks like an HLS
-// playlist, and otherwise streaming status/headers/body straight through.
-func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upstream string) {
-	outReq, err := http.NewRequestWithContext(req.Context(), req.Method, upstream, nil)
+// proxy fetches upstream through r.client, or for a self entry (self != "")
+// through r.selfClient (forwarding Range and the method), rewriting nested
+// URIs if the response looks like an HLS playlist, and otherwise streaming
+// status/headers/body straight through. A self entry's redirect is not
+// followed here: its Location is registered like a nested playlist entry
+// and handed back to ffmpeg as a redirect to that token.
+func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upstream, self string) {
+	ctx, client := req.Context(), r.client
+	if self != "" {
+		ctx, client = context.WithValue(ctx, relaySelfAddrKey{}, selfHostPort(self)), r.selfClient
+	}
+	outReq, err := http.NewRequestWithContext(ctx, req.Method, upstream, nil)
 	if err != nil {
 		http.Error(w, "bad upstream url", http.StatusBadGateway)
 		return
@@ -400,7 +480,7 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 	if rng := req.Header.Get("Range"); rng != "" {
 		outReq.Header.Set("Range", rng)
 	}
-	resp, err := r.client.Do(outReq)
+	resp, err := client.Do(outReq)
 	if err != nil {
 		if isTimeout(err) {
 			r.recordFailure(req, token, "upstream timed out", true)
@@ -411,6 +491,20 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if self != "" && isRedirect(resp.StatusCode) {
+		loc, lerr := outReq.URL.Parse(resp.Header.Get("Location"))
+		if lerr != nil || resp.Header.Get("Location") == "" {
+			http.Error(w, "bad redirect from upstream", http.StatusBadGateway)
+			return
+		}
+		next, ok := r.registerNested(loc.String(), self)
+		if !ok || next == "" {
+			http.Error(w, "redirect target refused", http.StatusBadGateway)
+			return
+		}
+		http.Redirect(w, req, next, http.StatusTemporaryRedirect)
+		return
+	}
 	// 416 is a healthy answer to a read past the end (ffmpeg probing the
 	// tail), not a source failure.
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
@@ -451,7 +545,7 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 			return
 		}
 		if looksLikePlaylist(resp, upstream) || hasPlaylistMagic(head) {
-			r.servePlaylist(w, resp, upstream)
+			r.servePlaylist(w, resp, upstream, self)
 			return
 		}
 	}
@@ -726,7 +820,7 @@ func looksLikePlaylist(resp *http.Response, upstream string) bool {
 // That is the final URL after any redirects (resp.Request.URL), as RFC 8216
 // section 4.1 requires and as ffmpeg itself resolves; upstream, the URL the
 // relay was asked for, is only the fallback.
-func (r *mediaRelay) servePlaylist(w http.ResponseWriter, resp *http.Response, upstream string) {
+func (r *mediaRelay) servePlaylist(w http.ResponseWriter, resp *http.Response, upstream, self string) {
 	var base *url.URL
 	if resp.Request != nil && resp.Request.URL != nil {
 		base = resp.Request.URL
@@ -747,7 +841,7 @@ func (r *mediaRelay) servePlaylist(w http.ResponseWriter, resp *http.Response, u
 		http.Error(w, "upstream playlist too large", http.StatusBadGateway)
 		return
 	}
-	rewritten := r.rewritePlaylist(string(body), base)
+	rewritten := r.rewritePlaylist(string(body), base, self)
 
 	copyProxyHeaders(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
@@ -758,8 +852,9 @@ func (r *mediaRelay) servePlaylist(w http.ResponseWriter, resp *http.Response, u
 
 // rewritePlaylist rewrites every URI reference in an HLS playlist body
 // (plain segment/playlist lines, and quoted URI="..." tag attributes) to a
-// fresh relay token, resolving relative references against base.
-func (r *mediaRelay) rewritePlaylist(body string, base *url.URL) string {
+// fresh relay token, resolving relative references against base. self is
+// the playlist's own entry's self origin (see registerNested).
+func (r *mediaRelay) rewritePlaylist(body string, base *url.URL, self string) string {
 	body = strings.ReplaceAll(body, "\r\n", "\n")
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {
@@ -768,13 +863,13 @@ func (r *mediaRelay) rewritePlaylist(body string, base *url.URL) string {
 			if relayURIAttr.MatchString(line) {
 				lines[i] = relayURIAttr.ReplaceAllStringFunc(line, func(m string) string {
 					sub := relayURIAttr.FindStringSubmatch(m)
-					return `URI="` + r.resolveAndRegister(sub[1], base) + `"`
+					return `URI="` + r.resolveAndRegister(sub[1], base, self) + `"`
 				})
 			}
 		case strings.TrimSpace(line) == "":
 			// blank line, pass through unchanged
 		default:
-			lines[i] = r.resolveAndRegister(line, base)
+			lines[i] = r.resolveAndRegister(line, base, self)
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -783,18 +878,83 @@ func (r *mediaRelay) rewritePlaylist(body string, base *url.URL) string {
 // resolveAndRegister resolves ref against base and registers it for a fresh
 // relay token, returning that token's URL. On any error the original ref is
 // returned unchanged (best-effort; the eventual fetch through the relay
-// simply 404s or fails rather than corrupting the playlist).
-func (r *mediaRelay) resolveAndRegister(ref string, base *url.URL) string {
+// simply 404s or fails rather than corrupting the playlist). A reference
+// refused by registerNested becomes a dead relay URL instead, so ffmpeg
+// never fetches it at all.
+func (r *mediaRelay) resolveAndRegister(ref string, base *url.URL, self string) string {
 	refURL, err := url.Parse(ref)
 	if err != nil {
 		return ref
 	}
 	resolved := base.ResolveReference(refURL).String()
-	token, err := r.register(resolved)
-	if err != nil {
+	token, ok := r.registerNested(resolved, self)
+	if !ok {
+		return fmt.Sprintf("http://127.0.0.1:%d/r/refused", r.port())
+	}
+	if token == "" {
 		return ref
 	}
-	return token
+	return token + relayExtSuffix(resolved)
+}
+
+// relayExtSuffix returns "/s.<ext>" for rawURL whose last path element has a
+// short alphanumeric extension, else "". A rewritten playlist entry keeps
+// its upstream extension this way: ffmpeg's HLS demuxer refuses a segment
+// URL without an allowed extension (extension_picky, the default since
+// ffmpeg 7.1), and handle ignores everything after the token.
+func relayExtSuffix(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	p := u.Path
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		p = p[i+1:]
+	}
+	i := strings.LastIndexByte(p, '.')
+	if i < 0 || i == len(p)-1 || len(p)-i-1 > 8 {
+		return ""
+	}
+	ext := strings.ToLower(p[i+1:])
+	for _, c := range ext {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			return ""
+		}
+	}
+	return "/s." + ext
+}
+
+// registerNested registers rawURL, a nested playlist entry or redirect
+// target of an entry whose self origin is self. Under a self entry, a URL
+// on that same origin stays a self entry only if classifySelfPath admits it
+// (ok=false otherwise: refused, never fetched); every other URL, and every
+// URL under a guarded entry, becomes a guarded entry. So the self exception
+// never reaches a path the top-level check would refuse, and a nested
+// remote entry is checked by the guarded client's dialer like any other.
+// token is "" (ok=true) when the relay could not register it.
+func (r *mediaRelay) registerNested(rawURL, self string) (token string, ok bool) {
+	entrySelf := ""
+	if self != "" && isSelfOrigin(rawURL, self) {
+		if selfURLKind(rawURL) == selfPathRefused {
+			return "", false
+		}
+		rawURL, entrySelf = localize(rawURL), self
+	}
+	token, err := r.registerAs(rawURL, entrySelf)
+	if err != nil {
+		return "", true
+	}
+	return token, true
+}
+
+// isRedirect reports whether code is an HTTP redirect status.
+func isRedirect(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
 }
 
 // copyProxyHeaders copies every header from src to dst except hop-by-hop
@@ -813,19 +973,36 @@ func copyProxyHeaders(dst, src http.Header) {
 // relayInput returns the URL ffmpeg/ffprobe should be given for mediaURL,
 // plus the -protocol_whitelist value to pair with it.
 //
-// mediaURL matching selfBase (this server's own origin — see
-// validateRemoteURL's selfBase carve-out) is passed through directly: it's
-// already loopback-only and this process is both ends of that request, so
-// relaying it would just add a hop. Every other (remote, untrusted) mediaURL
-// is routed through globalRelay instead of being handed to ffmpeg/ffprobe
-// directly (SEC-4): the relay is always plain loopback HTTP, so its
+// mediaURL on selfBase (this server's own origin — see validateRemoteURL's
+// selfBase carve-out) depends on its route (classifySelfPath, issue #65). A
+// route that serves local content is passed through directly: it's already
+// loopback-only and this process is both ends of that request, so relaying
+// it would just add a hop. A route that passes a remote body through
+// (/proxy, /ftp, /yt) is registered as a self entry on globalRelay, so its
+// nested playlist entries and redirects are re-checked like any remote URL.
+// Every other self route is refused. localize has already mapped the https
+// UI origin onto plain http, so the whitelist is "http,tcp" either way.
+//
+// Every other (remote, untrusted) mediaURL is routed through globalRelay
+// instead of being handed to ffmpeg/ffprobe directly (SEC-4): the relay is
+// always plain loopback HTTP, so its
 // protocol_whitelist is deliberately narrow ("http,tcp" — no https/tls/
 // crypto, and never "file", which would reopen the local-file-read path
 // validateRemoteURL exists to close).
 func relayInput(mediaURL, selfBase string) (inputURL, protocolWhitelist string, err error) {
 	localized := localize(mediaURL)
-	if selfBase != "" && (localized == selfBase || strings.HasPrefix(localized, selfBase+"/")) {
-		return localized, "http,https,tcp,tls,crypto", nil
+	if isSelfOrigin(localized, selfBase) {
+		switch selfURLKind(localized) {
+		case selfPathLocal:
+			return localized, "http,tcp", nil
+		case selfPathRelayed:
+			tok, err := globalRelay.registerAs(localized, selfBase)
+			if err != nil {
+				return "", "", fmt.Errorf("media relay: %w", err)
+			}
+			return tok, "http,tcp", nil
+		}
+		return "", "", fmt.Errorf("media relay: %w", validateSelfURL(localized))
 	}
 	tok, err := globalRelay.register(localized)
 	if err != nil {

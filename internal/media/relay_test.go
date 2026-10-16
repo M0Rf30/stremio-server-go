@@ -19,15 +19,17 @@ import (
 
 func TestRelayInputSelfBasePassThrough(t *testing.T) {
 	const self = "http://127.0.0.1:11470"
-	inputURL, protoWL, err := relayInput(self+"/ih/0", self)
+	inputURL, protoWL, err := relayInput(self+testSelfPath, self)
 	if err != nil {
 		t.Fatalf("relayInput: %v", err)
 	}
-	if inputURL != self+"/ih/0" {
-		t.Errorf("selfBase input rewritten to %q, want pass-through %q", inputURL, self+"/ih/0")
+	if inputURL != self+testSelfPath {
+		t.Errorf("selfBase input rewritten to %q, want pass-through %q", inputURL, self+testSelfPath)
 	}
-	if protoWL != "http,https,tcp,tls,crypto" {
-		t.Errorf("protocol whitelist = %q for selfBase input, want the full http(s) set", protoWL)
+	// Plain loopback HTTP only (issue #65): localize already maps the https UI
+	// origin onto http, so https/tls/crypto are never needed here.
+	if protoWL != "http,tcp" {
+		t.Errorf("protocol whitelist = %q for selfBase input, want the narrow \"http,tcp\" set", protoWL)
 	}
 }
 
