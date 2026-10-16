@@ -171,29 +171,30 @@ func TestParseSessionOverridesInvalid(t *testing.T) {
 // also accepted as an override, and vice versa.
 func TestParseDecimalBitrate(t *testing.T) {
 	valid := map[string]int64{
-		"8M": 8_000_000, "800k": 800_000, "8000000": 8_000_000, "1.5M": 1_500_000,
-		"0.5m": 500_000, "2.25K": 2_250, "1G": 1_000_000_000, "1.5": 2, " 6M ": 6_000_000,
+		"8M": 8_000_000, "8.0M": 8_000_000, "8.5M": 8_500_000, "800k": 800_000,
+		"8000000": 8_000_000, "1.5M": 1_500_000, "0.5m": 500_000, "2.25K": 2_250,
+		"1G": 1_000_000_000, "1.5": 2, " 6M ": 6_000_000,
 	}
 	for in, want := range valid {
 		if got, ok := parseDecimalBitrate(in); !ok || got != want {
 			t.Errorf("parseDecimalBitrate(%q) = %d, %v; want %d, true", in, got, ok, want)
 		}
 	}
-	for _, in := range []string{"", "M", "1.M", ".5M", "1.5.2M", "-1M", "1e6", "6Mbps", "1,5M", "9223372036854775807k"} {
+	for _, in := range []string{"", "M", "1.M", ".5M", "1.5.2M", "-1M", "-8M", "1e6", "6Mbps", "8Mi", "1,5M", "9223372036854775807k"} {
 		if got, ok := parseDecimalBitrate(in); ok {
 			t.Errorf("parseDecimalBitrate(%q) = %d, true; want rejected", in, got)
 		}
 	}
 }
 
-func TestParseFFmpegBitrateRejectsOverflow(t *testing.T) {
-	for _, s := range []string{"9223372036854775807k", "9300000000000M", "9300000000G"} {
-		if n, ok := parseFFmpegBitrate(s); ok {
-			t.Errorf("parseFFmpegBitrate(%q) = %d, true; want overflow rejected", s, n)
+func TestParseDecimalBitrateRejectsOverflow(t *testing.T) {
+	for _, s := range []string{"9223372036854775807k", "9223372036854775808", "9300000000000M", "9300000000G"} {
+		if n, ok := parseDecimalBitrate(s); ok {
+			t.Errorf("parseDecimalBitrate(%q) = %d, true; want overflow rejected", s, n)
 		}
 	}
-	if n, ok := parseFFmpegBitrate("9223372036G"); !ok || n != 9_223_372_036_000_000_000 {
-		t.Errorf("parseFFmpegBitrate(largest non-overflowing G) = %d, %v", n, ok)
+	if n, ok := parseDecimalBitrate("9000000000G"); !ok || n != 9_000_000_000_000_000_000 {
+		t.Errorf("parseDecimalBitrate(largest exact G below 2^63) = %d, %v", n, ok)
 	}
 }
 

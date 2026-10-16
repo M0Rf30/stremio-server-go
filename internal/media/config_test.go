@@ -113,32 +113,6 @@ func TestHLSConfigNormalizeSegmentConcurrencyFloor(t *testing.T) {
 	}
 }
 
-// ── parseFFmpegBitrate ───────────────────────────────────────────────────────
-
-func TestParseFFmpegBitrate(t *testing.T) {
-	cases := []struct {
-		in     string
-		want   int64
-		wantOK bool
-	}{
-		{"8M", 8_000_000, true},
-		{"800k", 800_000, true},
-		{"800K", 800_000, true},
-		{"8000000", 8_000_000, true},
-		{"1G", 1_000_000_000, true},
-		{"", 0, false},
-		{"abc", 0, false},
-		{"8Mi", 0, false}, // binary-multiple suffix not supported by this codebase
-		{"-8M", 0, false},
-	}
-	for _, c := range cases {
-		got, ok := parseFFmpegBitrate(c.in)
-		if ok != c.wantOK || (ok && got != c.want) {
-			t.Errorf("parseFFmpegBitrate(%q) = (%d, %v), want (%d, %v)", c.in, got, ok, c.want, c.wantOK)
-		}
-	}
-}
-
 // ── computeScaledDims ────────────────────────────────────────────────────────
 
 func TestComputeScaledDims(t *testing.T) {
@@ -210,6 +184,39 @@ func TestDeriveBandwidthCodecsDefaultCompat(t *testing.T) {
 			t.Errorf("deriveBandwidthCodecs(default, %dx%d, downscaled=false) = (%d,%q), want (%d,%q)",
 				res[0], res[1], bw, codecs, legacyBandwidth, legacyCodecsVideo)
 		}
+	}
+}
+
+// TestDeriveBandwidthCodecsEnvDecimalMaxrate: a decimal
+// STREMIO_TRANSCODE_MAXRATE, which envBitrate accepts, must reach the
+// BANDWIDTH derivation as 8.5 Mbps (plus audio), not fall back to the legacy
+// 4000000. "8.0M" is the default cap and keeps the legacy strings.
+func TestDeriveBandwidthCodecsEnvDecimalMaxrate(t *testing.T) {
+	effective := func(maxrate string) sessionConfig {
+		cfg := DefaultHLSConfig()
+		cfg.VideoBitrate = maxrate
+		cfg.VideoMaxrate = maxrate
+		m := &hlsManager{cfg: cfg}
+		return m.effectiveSessionConfig(sessionOverrides{})
+	}
+
+	sc := effective("8.5M")
+	if sc.maxrateBps != 8_500_000 {
+		t.Fatalf("maxrateBps for 8.5M = %d, want 8500000", sc.maxrateBps)
+	}
+	if sc.isDefaultMaxrate() {
+		t.Error("8.5M must not count as the default maxrate")
+	}
+	if bw, codecs := deriveBandwidthCodecs(sc, testAudioBps, 1920, 1080, false); bw != 8_692_000 || codecs != "avc1.640029" {
+		t.Errorf("deriveBandwidthCodecs(8.5M, 1080p) = (%d,%q), want (8692000,\"avc1.640029\")", bw, codecs)
+	}
+
+	sc = effective("8.0M")
+	if !sc.isDefaultMaxrate() {
+		t.Error("8.0M must count as the default maxrate")
+	}
+	if bw, codecs := deriveBandwidthCodecs(sc, testAudioBps, 1920, 1080, false); bw != legacyBandwidth || codecs != legacyCodecsVideo {
+		t.Errorf("deriveBandwidthCodecs(8.0M, 1080p) = (%d,%q), want legacy (%d,%q)", bw, codecs, legacyBandwidth, legacyCodecsVideo)
 	}
 }
 
