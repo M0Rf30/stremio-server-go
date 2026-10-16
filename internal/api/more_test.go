@@ -17,7 +17,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -156,9 +155,7 @@ func TestHandlerYT_InvalidID(t *testing.T) {
 }
 
 func TestHandlerYT_ValidIDNoYtdlp(t *testing.T) {
-	if _, err := exec.LookPath("yt-dlp"); err == nil {
-		t.Skip("yt-dlp found on PATH; skipping to avoid real network call")
-	}
+	withoutYtDlp(t)
 	h := newHandler(t)
 	rec := serve(t, h, http.MethodGet, "/yt/dQw4w9WgXcQ", nil)
 	if rec.Code != http.StatusNotImplemented {

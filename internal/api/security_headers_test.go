@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/M0Rf30/stremio-server-go/internal/types"
@@ -38,13 +39,22 @@ func TestCrossSiteOriginlessGETBlocked(t *testing.T) {
 	}
 	// /get-https reaches ProvisionCert on the same-origin paths: point it at a
 	// local stub (no live call) and install any files under a temp dir.
+	var stubHits atomic.Int32
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		stubHits.Add(1)
 		_, _ = w.Write([]byte(`{"error":"stub: no live API in tests"}`))
 	}))
 	t.Cleanup(stub.Close)
 	prev := certAPIURL
 	certAPIURL = stub.URL + "/api/certificateGet"
 	t.Cleanup(func() { certAPIURL = prev })
+	// If the redirect is removed the requests go live instead of reaching the
+	// stub; the count makes that a failure rather than a silent network call.
+	t.Cleanup(func() {
+		if stubHits.Load() == 0 {
+			t.Error("cert API stub got no requests; /get-https no longer reaches certAPIURL")
+		}
+	})
 
 	h := newHandlerWithCfg(t, func(c *types.Config) { c.AppPath = t.TempDir() }, testEngine())
 	for _, p := range paths {
@@ -83,6 +93,7 @@ func TestCrossSiteRemoveAllWithoutFetchMetadataSucceeds(t *testing.T) {
 // Media playback (<video src>) is cross-site and Origin-less by design and must
 // keep working, as must non-side-effecting reads.
 func TestCrossSiteOriginlessMediaAndReadsAllowed(t *testing.T) {
+	withoutYtDlp(t)
 	h := newHandler(t, testEngine())
 	for _, p := range []string{"/" + testIH + "/0", "/heartbeat", "/hlsv2/abc/stream_0/seg0.ts", "/hlsv2/abc/master.m3u8?mediaURL=http%3A%2F%2Fexample.com%2Fv.mkv", "/yt/dQw4w9WgXcQ"} {
 		rec := serveWithHeaders(h, p, map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Dest": "video"})
@@ -157,4 +168,13 @@ func TestHandleProxySetsActiveContentGuardsAndIgnoresOverrides(t *testing.T) {
 	if got := rec.Header().Get("X-Custom"); got != "ok" {
 		t.Errorf("non-guarded r= override X-Custom = %q; want ok", got)
 	}
+}
+
+// withoutYtDlp makes /yt resolve a binary that does not exist, so tests never
+// spawn a real yt-dlp (and its network calls) when one is installed.
+func withoutYtDlp(t *testing.T) {
+	t.Helper()
+	prev := ytDlpBinary
+	ytDlpBinary = "yt-dlp-not-installed-for-tests"
+	t.Cleanup(func() { ytDlpBinary = prev })
 }

@@ -37,6 +37,10 @@ const (
 	ytMaxOutput = 8 << 20
 )
 
+// ytDlpBinary is the executable /yt resolves on PATH. A variable so tests can
+// point it at a name that does not exist and stay offline.
+var ytDlpBinary = "yt-dlp"
+
 // ytSem caps concurrent yt-dlp processes.
 var ytSem = make(chan struct{}, 2)
 
@@ -119,7 +123,7 @@ func (s *server) handleYT(w http.ResponseWriter, r *http.Request, seg1 string) {
 
 	videoURL := "https://www.youtube.com/watch?v=" + id
 
-	ytPath, err := exec.LookPath("yt-dlp")
+	ytPath, err := exec.LookPath(ytDlpBinary)
 	if err != nil {
 		http.Error(w, "yt-dlp not found on PATH — YouTube routes require yt-dlp installed", http.StatusNotImplemented)
 		return
