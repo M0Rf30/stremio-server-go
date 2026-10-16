@@ -697,9 +697,10 @@ func (m *hlsManager) StartHLSContext(ctx context.Context, id, mediaURL string, o
 	// Validated once here, before mediaURL is ever stored on the session, so
 	// every later ffprobe/ffmpeg call on s.mediaURL (probeMedia, extractSubtitle,
 	// transcodeSegment) is guaranteed to already be an http(s) URL on a
-	// non-private, non-metadata host — or this server's own origin, which is how
-	// the https UI on :12470 asks for a stream this server serves on :11470 —
-	// or a private host on cfg.PrivateAllow (STREMIO_HLS_PRIVATE_ALLOW).
+	// non-private, non-metadata host — or a media route on this server's
+	// own origin (classifySelfPath), which is how the https UI on :12470 asks for a stream this
+	// server serves on :11470 — or a private host on cfg.PrivateAllow
+	// (STREMIO_HLS_PRIVATE_ALLOW).
 	if err := validateMediaURL(mediaURL, m.selfBase, m.cfg.PrivateAllow); err != nil {
 		return "", fmt.Errorf("hls: %w", err)
 	}

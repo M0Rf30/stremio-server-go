@@ -45,7 +45,7 @@ func TestOpenSubHashSelfOriginLoopbackRealTransport(t *testing.T) {
 
 	// No transport stubbing: ts is on 127.0.0.1, which openSubClient blocks.
 	p := &prober{baseURLLocal: ts.URL}
-	res, err := p.OpenSubHash(ts.URL + "/video.bin")
+	res, err := p.OpenSubHash(ts.URL + testSelfPath)
 	if err != nil {
 		t.Fatalf("OpenSubHash against own loopback origin: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestOpenSubHashSelfOriginLoopbackRealTransport(t *testing.T) {
 
 	// A loopback URL that is NOT the configured self origin stays blocked.
 	other := &prober{baseURLLocal: "http://127.0.0.1:1"}
-	if _, err := other.OpenSubHash(ts.URL + "/video.bin"); err == nil {
+	if _, err := other.OpenSubHash(ts.URL + testSelfPath); err == nil {
 		t.Error("OpenSubHash fetched a non-self loopback URL; SSRF guard bypassed")
 	}
 }
@@ -69,14 +69,14 @@ func TestFetchSubBytesSelfOriginLoopbackRealTransport(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	got, err := fetchSubBytes(ts.URL+"/s.srt", ts.URL)
+	got, err := fetchSubBytes(ts.URL+testSelfPath, ts.URL)
 	if err != nil {
 		t.Fatalf("fetchSubBytes self origin: %v", err)
 	}
 	if string(got) != srt {
 		t.Errorf("body = %q, want %q", got, srt)
 	}
-	if _, err := fetchSubBytes(ts.URL+"/s.srt", ""); err == nil {
+	if _, err := fetchSubBytes(ts.URL+testSelfPath, ""); err == nil {
 		t.Error("fetchSubBytes without selfBase fetched a loopback URL")
 	}
 }
@@ -91,7 +91,7 @@ func TestSelfOriginClientRefusesOffOriginRedirect(t *testing.T) {
 	}))
 	defer self.Close()
 
-	if _, err := fetchSubBytes(self.URL+"/s.srt", self.URL); err == nil {
+	if _, err := fetchSubBytes(self.URL+testSelfPath, self.URL); err == nil {
 		t.Fatal("self-origin client followed a redirect to another loopback origin")
 	}
 }
@@ -163,7 +163,7 @@ func TestOpenSubHashRejectsServerIgnoringRange(t *testing.T) {
 	}))
 	defer ts.Close()
 	p := &prober{baseURLLocal: ts.URL}
-	if _, err := p.OpenSubHash(ts.URL + "/v"); err == nil {
+	if _, err := p.OpenSubHash(ts.URL + testSelfPath); err == nil {
 		t.Error("OpenSubHash returned a hash although the server ignores Range")
 	}
 }
@@ -173,7 +173,7 @@ func TestOpenSubHashSmallFile(t *testing.T) {
 	ts := httptest.NewServer(serveContentHandler(content))
 	defer ts.Close()
 	p := &prober{baseURLLocal: ts.URL}
-	res, err := p.OpenSubHash(ts.URL + "/v")
+	res, err := p.OpenSubHash(ts.URL + testSelfPath)
 	if err != nil {
 		t.Fatalf("OpenSubHash small file: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestExtractSubtitleDoesNotCacheTruncatedOutput(t *testing.T) {
 	m := newTestHLSManager(t)
 	m.selfBase = "http://127.0.0.1:11470"
 	s := injectSession(t, m, "sub")
-	s.mediaURL = m.selfBase + "/x/0"
+	s.mediaURL = m.selfBase + testSelfPath
 
 	if _, err := m.extractSubtitle(context.Background(), s, 0); err == nil {
 		t.Fatal("extractSubtitle accepted a prematurely-ended input")

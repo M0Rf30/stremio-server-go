@@ -598,7 +598,7 @@ func TestProbeMediaVideoFields(t *testing.T) {
 			}
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			const self = "http://127.0.0.1:11470"
-			res := probeMedia(context.Background(), self+"/x/0", self, 5*time.Second)
+			res := probeMedia(context.Background(), self+testSelfPath, self, 5*time.Second)
 			if res.duration != 90 {
 				t.Fatalf("duration = %v, want 90 (stub not used?)", res.duration)
 			}
@@ -635,7 +635,7 @@ func TestTranscodeSegmentNotCachedAfterShutdown(t *testing.T) {
 	m := newTestHLSManager(t)
 	m.selfBase = "http://127.0.0.1:11470"
 	s := injectSession(t, m, "shut")
-	s.mediaURL = m.selfBase + "/x/0"
+	s.mediaURL = m.selfBase + testSelfPath
 
 	p, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0)
 	if err != nil {
@@ -695,7 +695,7 @@ func TestTranscodeSegmentShutdownRefusesFallback(t *testing.T) {
 		m.selfBase = "http://127.0.0.1:11470"
 		m.enc = hwEncoder{codec: "h264_vaapi", isHW: true}
 		s := injectSession(t, m, "fallback")
-		s.mediaURL = m.selfBase + "/x/0"
+		s.mediaURL = m.selfBase + testSelfPath
 		s.tc = sessionConfig{hwEnabled: true}
 		return m, s
 	}
@@ -762,7 +762,7 @@ func TestTranscodeSegmentShutdownRefusesRetry(t *testing.T) {
 		m := newTestHLSManager(t)
 		m.selfBase = "http://127.0.0.1:11470"
 		s := injectSession(t, m, id)
-		s.mediaURL = m.selfBase + "/x/0"
+		s.mediaURL = m.selfBase + testSelfPath
 		s.isTS = true // MPEG-TS input: the retry plan applies
 		s.hasVideo = true
 		return m, s

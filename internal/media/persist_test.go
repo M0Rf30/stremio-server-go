@@ -37,6 +37,13 @@ const testPersistURL = "http://93.184.216.34/movie.mkv"
 // so tests close one manager before building the next on the same dir.
 func newTestPersistManager(t *testing.T, workDir string, cfg HLSConfig, settings SettingsSource) *hlsManager {
 	t.Helper()
+	return newTestPersistManagerSelf(t, workDir, cfg, settings, "")
+}
+
+// newTestPersistManagerSelf is newTestPersistManager with the manager's
+// selfBase set before loadPersisted runs.
+func newTestPersistManagerSelf(t *testing.T, workDir string, cfg HLSConfig, settings SettingsSource, selfBase string) *hlsManager {
+	t.Helper()
 	cfg.WorkDir = workDir
 	cfg.Persist = true
 	cfg = cfg.normalize(1)
@@ -56,6 +63,7 @@ func newTestPersistManager(t *testing.T, workDir string, cfg HLSConfig, settings
 		stopCh:      make(chan struct{}),
 		persist:     true,
 		persistLock: lock,
+		selfBase:    selfBase,
 	}
 	t.Cleanup(m.CloseHLS)
 	m.loadPersisted()

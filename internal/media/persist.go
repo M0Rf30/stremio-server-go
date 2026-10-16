@@ -45,7 +45,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -484,7 +483,8 @@ func readSessionFile(dir string) (persistedSession, error) {
 // access: startup must not block on (or be fooled by) DNS. It requires an
 // http(s) URL with a host, and rejects private/loopback/metadata IP literals
 // unless the URL points at this server's own origin (the same carve-out as
-// validateRemoteURL), except those on allow (HLSConfig.PrivateAllow).
+// validateRemoteURL, limited to the same media routes), except those
+// on allow (HLSConfig.PrivateAllow).
 // Hostnames are left to the relay's dial-time guard, which every later
 // ffmpeg fetch of a non-self URL goes through (SEC-4).
 func validatePersistedURL(raw, selfBase string, allow *netguard.Allow) error {
@@ -498,10 +498,8 @@ func validatePersistedURL(raw, selfBase string, allow *netguard.Allow) error {
 	if u.Hostname() == "" {
 		return errors.New("URL has no host")
 	}
-	if selfBase != "" {
-		if l := localize(raw); l == selfBase || strings.HasPrefix(l, selfBase+"/") {
-			return nil
-		}
+	if isSelfOrigin(raw, selfBase) {
+		return validateSelfURL(raw)
 	}
 	if ip := net.ParseIP(u.Hostname()); ip != nil {
 		if err := netguard.ValidateIPAllow(ip, true, allow); err != nil {
