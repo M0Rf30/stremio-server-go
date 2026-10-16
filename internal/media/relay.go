@@ -7,6 +7,8 @@ package media
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"container/list"
 	"context"
 	"crypto/rand"
@@ -480,6 +482,10 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 	if rng := req.Header.Get("Range"); rng != "" {
 		outReq.Header.Set("Range", rng)
 	}
+	// The body must reach the sniffing below exactly as ffmpeg will read
+	// it, and ffmpeg inflates a gzip/deflate body before it probes. Ask for
+	// it uncompressed (this also stops net/http's own transparent gzip).
+	outReq.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(outReq)
 	if err != nil {
 		if isTimeout(err) {
@@ -513,6 +519,52 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 	}
 
 	if req.Method == http.MethodGet {
+		if resp.StatusCode/100 == 2 && ffmpegInflates(resp.Header.Values("Content-Encoding")) {
+			// Sent compressed anyway. ffmpeg would inflate it before
+			// probing, so decode it here, sniff what ffmpeg would see and
+			// pass that on uncompressed. Only a 2xx is decoded: ffmpeg
+			// reads no body from an error status, so an error passes
+			// through untouched, status, coding and all.
+			if resp.StatusCode == http.StatusPartialContent && !rangeStartsAtZero(resp.Header.Get("Content-Range")) {
+				// A slice from the middle of a compressed stream: ffmpeg's
+				// inflate of it is garbage or nothing, and the decoded bytes
+				// have no offset in the resource ffmpeg asked about.
+				r.recordFailure(req, token, "upstream sent a compressed partial response", false)
+				http.Error(w, "compressed partial upstream response", http.StatusBadGateway)
+				return
+			}
+			cbr := bufio.NewReader(resp.Body)
+			cbody := io.Reader(cbr)
+			// An empty body (a 204, say) has nothing to decode or sniff.
+			if first, _ := cbr.Peek(1); len(first) > 0 {
+				src := &errTrackingReader{r: cbr}
+				dec, err := newInflater(src)
+				if err != nil {
+					// ffmpeg would read nothing from it. Refused rather
+					// than relayed uninspected.
+					r.recordFailure(req, token, "upstream sent an undecodable compressed body", false)
+					http.Error(w, "undecodable compressed upstream response", http.StatusBadGateway)
+					return
+				}
+				cbody = &ffmpegInflateReader{dec: dec, src: src}
+				// The decoded body has no known length, and Content-Range
+				// and Accept-Ranges would count compressed bytes: deliver
+				// it as a plain, non-seekable response (a 206 from byte 0
+				// becomes the 200 it now is).
+				resp.Header.Del("Content-Encoding")
+				resp.Header.Del("Content-Length")
+				resp.Header.Del("Content-Range")
+				resp.Header.Del("Accept-Ranges")
+				resp.ContentLength = -1
+				if resp.StatusCode == http.StatusPartialContent {
+					resp.StatusCode = http.StatusOK
+				}
+			}
+			resp.Body = struct {
+				io.Reader
+				io.Closer
+			}{cbody, resp.Body}
+		}
 		// Sniff the body prefix: ffmpeg detects HLS/DASH by content, not by
 		// Content-Type or extension, so a mislabelled playlist must still
 		// have its nested URIs rewritten through the relay.
@@ -569,6 +621,62 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 			panic(http.ErrAbortHandler)
 		}
 	}
+}
+
+// ffmpegInflates reports whether ffmpeg's http protocol would inflate a
+// response with these Content-Encoding header lines: it checks every line
+// for a "gzip" or "deflate" prefix, case-insensitively, and once one
+// matches it decodes with zlib's gzip/zlib auto-detection. Any other coding
+// reaches ffmpeg's demuxers raw, exactly as the relay sniffs it.
+func ffmpegInflates(lines []string) bool {
+	for _, ce := range lines {
+		ce = strings.ToLower(strings.TrimSpace(ce))
+		if strings.HasPrefix(ce, "gzip") || strings.HasPrefix(ce, "deflate") {
+			return true
+		}
+	}
+	return false
+}
+
+// rangeStartsAtZero reports whether a 206's Content-Range ("bytes 0-N/L")
+// starts at the first byte, where a compressed stream can be decoded from
+// its beginning.
+func rangeStartsAtZero(cr string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(cr)), "bytes 0-")
+}
+
+// newInflater decodes body the way ffmpeg does (zlib inflateInit2 with
+// gzip/zlib auto-detection): a gzip stream if it starts with the gzip
+// magic, a zlib stream otherwise. Like zlib there, it stops after the first
+// gzip member.
+func newInflater(body io.Reader) (io.Reader, error) {
+	br := bufio.NewReader(body)
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return nil, err
+		}
+		gz.Multistream(false)
+		return gz, nil
+	}
+	return zlib.NewReader(br)
+}
+
+// ffmpegInflateReader ends a decoded body the way ffmpeg's http protocol
+// does: a decoding error (bad checksum, truncated stream) ends it cleanly
+// after the bytes decoded so far, while an error reading the upstream body
+// itself still surfaces, so the relay aborts as for any broken upstream.
+type ffmpegInflateReader struct {
+	dec io.Reader
+	src *errTrackingReader
+}
+
+func (f *ffmpegInflateReader) Read(p []byte) (int, error) {
+	n, err := f.dec.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && (f.src.err == nil || errors.Is(f.src.err, io.EOF)) {
+		return n, io.EOF
+	}
+	return n, err
 }
 
 // errTrackingReader records the first read error from the wrapped reader so
