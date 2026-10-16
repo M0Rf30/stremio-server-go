@@ -499,7 +499,7 @@ func (m *hlsManager) effectiveSessionConfig(ov sessionOverrides) sessionConfig {
 		nvencPreset:  cfg.NVENCPreset,
 		qsvPreset:    cfg.QSVPreset,
 	}
-	sc.maxrateBps, _ = parseFFmpegBitrate(cfg.VideoMaxrate)
+	sc.maxrateBps, _ = parseDecimalBitrate(cfg.VideoMaxrate)
 
 	if bps, ok := settingsInt(m.settings, "transcodeMaxBitRate"); ok && bps > 0 {
 		v := int64(bps)
@@ -679,8 +679,9 @@ var decimalBitrateRe = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)([kKmMgG]?)$`)
 // for the per-session overrides, whose result is canonicalised to an
 // integer string before it reaches ffmpeg, and for the audio term of
 // BANDWIDTH, since ffmpeg accepts a decimal -b:a such as "0.128M".
-// parseFFmpegBitrate (integers only) still parses the env maxrate, so the
-// legacy-BANDWIDTH test in deriveBandwidthCodecs is unchanged.
+// It is the only bitrate parser: the env maxrate, the persisted session
+// fields and the overrides all go through it, so "8M" and "8.0M" both reach
+// the legacy-BANDWIDTH test (isDefaultMaxrate) as exactly 8_000_000.
 func parseDecimalBitrate(s string) (int64, bool) {
 	m := decimalBitrateRe.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
@@ -699,7 +700,7 @@ func parseDecimalBitrate(s string) (int64, bool) {
 		f *= 1e9
 	}
 	f = math.Round(f)
-	if f > 1e18 { // far above any accepted bound; keeps the int64 conversion safe
+	if f >= math.MaxInt64 { // float64(2^63): out of int64 range, same as envBitrate's values that cannot be represented
 		return 0, false
 	}
 	return int64(f), true
@@ -743,39 +744,6 @@ func (sc sessionConfig) isDefaultMaxrate() bool {
 }
 
 // ── bitrate / resolution helpers ────────────────────────────────────────────
-
-// ffmpegBitrateValueRe matches a bare ffmpeg bitrate value: digits with an
-// optional k/K/m/M/g/G (decimal SI) suffix.
-var ffmpegBitrateValueRe = regexp.MustCompile(`^([0-9]+)([kKmMgG]?)$`)
-
-// parseFFmpegBitrate converts an ffmpeg -b:v/-maxrate-style string ("8M",
-// "800k", "8000000") to bits/second. ok is false for anything that doesn't
-// match ffmpeg's own bitrate syntax (fractional values are accepted by
-// ffmpeg but never produced by this codebase's config, so they're treated as
-// unparseable here rather than adding float handling nothing exercises).
-func parseFFmpegBitrate(s string) (int64, bool) {
-	m := ffmpegBitrateValueRe.FindStringSubmatch(strings.TrimSpace(s))
-	if m == nil {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(m[1], 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	var mult int64 = 1
-	switch strings.ToLower(m[2]) {
-	case "k":
-		mult = 1_000
-	case "m":
-		mult = 1_000_000
-	case "g":
-		mult = 1_000_000_000
-	}
-	if n > math.MaxInt64/mult {
-		return 0, false // would overflow int64 and wrap to a bogus value
-	}
-	return n * mult, true
-}
 
 // computeScaledDims applies the MaxWidth/MaxHeight downscale caps to a
 // source resolution: preserves aspect ratio (uniform scale factor), never

@@ -315,6 +315,44 @@ func TestHLSPersistRoundTrip(t *testing.T) {
 	}
 }
 
+// TestHLSPersistRestoresDecimalBitrate: a session whose persisted bitrate
+// fields use the decimal syntax envBitrate accepts ("8.5M") must restore,
+// not be discarded as an invalid videoBitrate/videoMaxrate/videoBufsize, and
+// keep its 8.5 Mbps cap for the BANDWIDTH derivation.
+func TestHLSPersistRestoresDecimalBitrate(t *testing.T) {
+	work := t.TempDir()
+	cfg := HLSConfig{}
+	m1 := newTestPersistManager(t, work, cfg, nil)
+	seedPersistedSessionWith(t, m1, "decimal", time.Now(), func(s *hlsSession) {
+		s.tc.videoBitrate = "8.5M"
+		s.tc.videoMaxrate = "8.5M"
+		s.tc.videoBufsize = "17M"
+		s.tc.maxrateBps = 8_500_000
+		s.tc.overridden = true
+	})
+	m1.CloseHLS()
+
+	m2 := newTestPersistManager(t, work, cfg, nil)
+	if n := m2.Sessions(); n != 1 {
+		t.Fatalf("Sessions() after restore = %d, want 1 (decimal bitrates must not be discarded)", n)
+	}
+	m2.mu.Lock()
+	s, ok := m2.sessions["decimal"]
+	m2.mu.Unlock()
+	if !ok {
+		t.Fatal("decimal session was not restored")
+	}
+	if s.tc.videoBitrate != "8.5M" || s.tc.videoMaxrate != "8.5M" || s.tc.videoBufsize != "17M" {
+		t.Errorf("restored bitrate strings = %q/%q/%q, want 8.5M/8.5M/17M", s.tc.videoBitrate, s.tc.videoMaxrate, s.tc.videoBufsize)
+	}
+	if s.tc.maxrateBps != 8_500_000 {
+		t.Errorf("restored maxrateBps = %d, want 8500000", s.tc.maxrateBps)
+	}
+	if bw, _ := deriveBandwidthCodecs(s.tc, testAudioBps, 1920, 1080, false); bw != 8_692_000 {
+		t.Errorf("restored BANDWIDTH = %d, want 8692000 (8.5 Mbps + audio)", bw)
+	}
+}
+
 // TestHLSPersistSurvivesSettingsChange is the reviewer's scenario: a
 // /settings change between runs must not discard a session, which keeps
 // encoding with its own snapshot exactly as it would have in-process.

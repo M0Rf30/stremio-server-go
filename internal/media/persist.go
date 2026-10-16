@@ -213,11 +213,11 @@ func (m *hlsManager) sessionConfig(c persistedConfig) (sessionConfig, error) {
 	for _, r := range []struct{ name, v string }{
 		{"videoBitrate", c.VideoBitrate}, {"videoMaxrate", c.VideoMaxrate}, {"videoBufsize", c.VideoBufsize},
 	} {
-		if _, ok := parseFFmpegBitrate(r.v); !ok {
+		if _, ok := parseDecimalBitrate(r.v); !ok {
 			return sessionConfig{}, fmt.Errorf("invalid %s %q", r.name, r.v)
 		}
 	}
-	maxrateBps, _ := parseFFmpegBitrate(c.VideoMaxrate)
+	maxrateBps, _ := parseDecimalBitrate(c.VideoMaxrate)
 	if c.MaxWidth < 0 || c.MaxHeight < 0 {
 		return sessionConfig{}, fmt.Errorf("invalid max size %dx%d", c.MaxWidth, c.MaxHeight)
 	}
