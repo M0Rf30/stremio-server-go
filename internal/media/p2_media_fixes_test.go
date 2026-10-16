@@ -211,13 +211,24 @@ func TestMediaRelayAbortsOnTruncatedUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.Get(relayURL) //nolint:gosec // our own loopback listener
-	if err != nil {
-		t.Fatalf("GET: %v", err)
+	began := time.Now()
+	// The break can reach the client three ways: as a GET error (the abort
+	// beat the response headers), as a body read error, or as a 502 when the
+	// relay's own fetch failed before it sent headers (seen on Windows). Any of
+	// them is a visible failure; only a 200 that reads to a clean EOF is not.
+	surfaced := false
+	if resp, err := http.Get(relayURL); err != nil { //nolint:gosec // our own loopback listener
+		surfaced = true
+	} else {
+		_, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		surfaced = readErr != nil || resp.StatusCode != http.StatusOK
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if _, err := io.ReadAll(resp.Body); err == nil {
+	if !surfaced {
 		t.Error("truncated upstream looked like a clean end-of-body to the relay client")
+	}
+	if _, ok := r.failureSince(relayURL, began); !ok {
+		t.Error("relay recorded no failure for the truncated upstream")
 	}
 }
 
