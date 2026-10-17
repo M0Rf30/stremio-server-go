@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -37,10 +37,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/M0Rf30/stremio-server-go/internal/dvr"
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
-	"github.com/M0Rf30/stremio-server-go/internal/streamproxy"
-	"github.com/M0Rf30/stremio-server-go/internal/types"
+	"github.com/rivulet-kodi/rivulet-engine/internal/dvr"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/streamproxy"
+	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
 // Test seams: nil means production behaviour (exec ffmpeg found via PATH).

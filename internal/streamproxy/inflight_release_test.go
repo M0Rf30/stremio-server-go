@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
 )
 
 // A client that reads the response headers of a decrypted segment and then

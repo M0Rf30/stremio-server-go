@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
@@ -84,7 +84,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/M0Rf30/stremio-server-go
+        - github.com/rivulet-kodi/rivulet-engine
 
 issues:
   max-issues-per-linter: 0

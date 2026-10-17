@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -52,8 +52,8 @@ import (
 
 	lzstring "github.com/daku10/go-lz-string"
 
-	"github.com/M0Rf30/stremio-server-go/internal/netguard"
-	"github.com/M0Rf30/stremio-server-go/internal/nzb"
+	"github.com/rivulet-kodi/rivulet-engine/internal/netguard"
+	"github.com/rivulet-kodi/rivulet-engine/internal/nzb"
 )
 
 // lz-string size guards — mirrors the limits used in archive.go and ftp.go.

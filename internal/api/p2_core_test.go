@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -26,7 +26,7 @@ import (
 
 	"github.com/huin/goupnp"
 
-	"github.com/M0Rf30/stremio-server-go/internal/types"
+	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
 // genCertPair returns a freshly generated self-signed cert + key PEM pair.

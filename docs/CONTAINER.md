@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 
 SPDX-License-Identifier: MIT
 -->
@@ -21,7 +21,7 @@ Container Registry on every push to `main` and every `v*.*.*` tag, so you can
 skip the local **Build** section below:
 
 ```sh
-podman pull ghcr.io/m0rf30/stremio-server-go:latest   # or a tag, e.g. :v0.1.0
+podman pull ghcr.io/m0rf30/rivulet-engine:latest   # or a tag, e.g. :v0.1.0
 ```
 
 Available tags: `latest` (default branch), semver (`vX.Y.Z` and `X.Y`), the
@@ -34,13 +34,13 @@ branch name, and `sha-<short>`. Replace `podman` with `docker` as needed.
 ### Podman
 
 ```sh
-podman build -t stremio-server-go .
+podman build -t rivulet-engine .
 ```
 
 ### Docker
 
 ```sh
-docker build -t stremio-server-go .
+docker build -t rivulet-engine .
 ```
 
 ### Optional build args
@@ -48,7 +48,7 @@ docker build -t stremio-server-go .
 Embed version metadata at build time:
 
 ```sh
-podman build -t stremio-server-go \
+podman build -t rivulet-engine \
   --build-arg VERSION=$(git describe --tags --always) \
   --build-arg COMMIT=$(git rev-parse --short HEAD) \
   --build-arg DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
@@ -65,10 +65,10 @@ Replace `podman` with `docker` as needed.
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 Point any Stremio client's **streaming server URL** at `http://HOST:11470`.
@@ -81,13 +81,13 @@ publish it on both TCP and UDP:
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -p 11471:11471/tcp \
   -p 11471:11471/udp \
   -e BT_LISTEN_PORT=11471 \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 #### Re-enabling self-signed HTTPS
@@ -97,12 +97,12 @@ HTTPS inside the container:
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -p 12470:12470 \
   -e HTTPS_PORT=12470 \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 For a **browser-trusted** cert (the Stremio UI's "HTTPS endpoint for streaming"
@@ -121,7 +121,7 @@ images by default, which silently drop `HEALTHCHECK` (you will see a
 retain it under Podman, build with the Docker image format:
 
 ```sh
-podman build --format docker -t stremio-server-go .
+podman build --format docker -t rivulet-engine .
 ```
 
 ---
@@ -137,9 +137,9 @@ Portainer stacks or plain `docker compose up -d`.
 
 ```yaml
 services:
-  stremio-server:
-    image: ghcr.io/m0rf30/stremio-server-go:latest   # pin a tag, e.g. :v0.8.3
-    container_name: stremio-server
+  rivulet-engine:
+    image: ghcr.io/m0rf30/rivulet-engine:latest   # pin a tag, e.g. :v0.8.3
+    container_name: rivulet-engine
     restart: unless-stopped
     ports:
       - "11470:11470"          # enginefs HTTP API
@@ -160,9 +160,9 @@ by design. Then point any Stremio client's **streaming server URL** at
 
 ```yaml
 services:
-  stremio-server:
-    image: ghcr.io/m0rf30/stremio-server-go:latest   # pin a tag, e.g. :v0.8.3
-    container_name: stremio-server
+  rivulet-engine:
+    image: ghcr.io/m0rf30/rivulet-engine:latest   # pin a tag, e.g. :v0.8.3
+    container_name: rivulet-engine
     restart: unless-stopped
     ports:
       - "11470:11470"          # HTTP API
@@ -249,11 +249,11 @@ a HuggingFace Space without persistent storage, or any low-disk host:
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -e STREMIO_MEMORY_CACHE_SIZE=536870912 \
   -e STREMIO_MEM_LIMIT=1073741824 \
-  stremio-server-go
+  rivulet-engine
 ```
 
 512 MiB piece cache under a 1 GiB soft memory ceiling. Raise both for higher
@@ -267,13 +267,13 @@ fingerprint BitTorrent via DPI:
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   --network host \
   -e STREMIO_BT_ENCRYPTION=require \
   -e STREMIO_BT_PROXY=socks5://127.0.0.1:9050 \
   -e STREMIO_BT_ANONYMOUS=1 \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 `--network host` (or a shared pod) lets the container reach the host's Tor
@@ -289,14 +289,14 @@ password and secret as **secrets**, not in the image:
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -e STREMIO_PROXY_PUBLIC_URL=https://your-host.example \
   -e STREMIO_PROXY_PASSWORD=change-me \
   -e STREMIO_PROXY_SECRET=$(openssl rand -hex 32) \
   -e STREMIO_PROXY_IP_ACL=10.0.0.0/8 \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 `STREMIO_PROXY_PUBLIC_URL` must be the externally reachable base URL, otherwise
@@ -309,11 +309,11 @@ Discover peers via DHT, PEX, and webseeds only — no outbound tracker announces
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -e STREMIO_DISABLE_TRACKERS=1 \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 ### Indexer-backed streams (Torznab / Bitmagnet)
@@ -322,13 +322,13 @@ Enable the catalog add-ons that resolve streams from a self-hosted indexer:
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -e STREMIO_TORZNAB_URL=http://prowlarr:9696/1/api \
   -e STREMIO_TORZNAB_APIKEY=your-api-key \
   -e STREMIO_BITMAGNET_URL=http://bitmagnet:3333/graphql \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 Add the served `/torznab` and `/bitmagnet` manifests to Stremio. Full guides:
@@ -345,13 +345,13 @@ libx264 automatically.  To pass GPU devices into the container:
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -v stremio-data:/data \
   --device /dev/dri \
   --group-add keep-groups \
   -e STREMIO_HWACCEL=vaapi \
-  stremio-server-go
+  rivulet-engine
 ```
 
 Use `STREMIO_HWACCEL=qsv` for QSV on the same device node.
@@ -362,12 +362,12 @@ Requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud
 
 ```sh
 docker run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -v stremio-data:/data \
   --gpus all \
   -e STREMIO_HWACCEL=nvenc \
-  stremio-server-go
+  rivulet-engine
 ```
 
 With CDI: `--device nvidia.com/gpu=all` (Podman 4.7+, CDI configured).

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -25,7 +25,7 @@ import (
 
 	lzstring "github.com/daku10/go-lz-string"
 
-	"github.com/M0Rf30/stremio-server-go/internal/nzb"
+	"github.com/rivulet-kodi/rivulet-engine/internal/nzb"
 )
 
 // nzbReuseFixture is an NZB served over HTTP (counting the fetches) whose

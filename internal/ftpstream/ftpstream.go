@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -31,8 +31,8 @@ import (
 
 	"github.com/jlaffaye/ftp"
 
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
-	"github.com/M0Rf30/stremio-server-go/internal/netguard"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/netguard"
 )
 
 // ftpAllowPrivate reports whether STREMIO_FTP_ALLOW_PRIVATE opts into

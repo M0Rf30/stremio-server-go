@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/M0Rf30/stremio-server-go/internal/archive"
+	"github.com/rivulet-kodi/rivulet-engine/internal/archive"
 )
 
 // compressibleBytes is n bytes that deflate well: words picked pseudo-randomly

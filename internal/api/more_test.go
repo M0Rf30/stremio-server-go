@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -23,7 +23,7 @@ import (
 
 	lzstring "github.com/daku10/go-lz-string"
 
-	"github.com/M0Rf30/stremio-server-go/internal/types"
+	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
 // ─── handler with localAddonEnabled=true ─────────────────────────────────────

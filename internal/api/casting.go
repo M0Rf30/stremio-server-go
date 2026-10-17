@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -55,8 +55,8 @@ import (
 	"github.com/huin/goupnp/dcps/av1"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
-	"github.com/M0Rf30/stremio-server-go/internal/netguard"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/netguard"
 )
 
 // upnpMaxBody caps any single UPnP description/SOAP response body.

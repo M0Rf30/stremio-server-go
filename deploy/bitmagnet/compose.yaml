@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
-# Local Bitmagnet (DHT crawler + GraphQL index) for the stremio-server-go /bitmagnet add-on.
+# Local Bitmagnet (DHT crawler + GraphQL index) for the rivulet-engine /bitmagnet add-on.
 #
 #   podman compose -f deploy/bitmagnet/compose.yaml up -d
 #

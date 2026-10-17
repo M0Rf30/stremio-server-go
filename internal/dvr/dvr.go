@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -34,7 +34,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
 )
 
 // Recording states (EasyProxy's status vocabulary; DVR addons switch on them).

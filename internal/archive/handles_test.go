@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/M0Rf30/stremio-server-go/internal/archive"
+	"github.com/rivulet-kodi/rivulet-engine/internal/archive"
 )
 
 // A Reader (and the entry streams it hands out) must not hold an OS file handle

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -7,7 +7,7 @@
 // Provisions a TLS certificate from api.strem.io (see certprovision.go for the
 // shared logic), installs https-cert.pem / https-key.pem under cfg.AppPath, and
 // returns {ipAddress, domain, port}. The authKey is cached so the background
-// renewer in cmd/stremio-server can refresh the cert without user interaction.
+// renewer in cmd/rivulet-engine can refresh the cert without user interaction.
 //
 // NOTE: This endpoint requires a valid Stremio authKey issued by api.strem.io
 // after a real Stremio account login. Without it, the API returns no certificate

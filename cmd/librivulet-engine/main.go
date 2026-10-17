@@ -1,16 +1,16 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
-// Command libstremio builds libstremio-server.so, a c-shared version of
-// stremio-server for SELinux-enforcing Android hosts where the shell's exec()
+// Command librivulet-engine builds librivulet-engine.so, a c-shared version of
+// rivulet-engine for SELinux-enforcing Android hosts where the shell's exec()
 // of a bundled executable is blocked by policy but dlopen() of a shared
 // library dropped next to the calling app's own native libs is not. It wraps
 // internal/app.Run behind a tiny, panic-safe C ABI so a Kodi addon (or any
 // other host process) can start/stop the server on a background thread
 // in-process instead of spawning a child.
 //
-// Build: go build -buildmode=c-shared -o libstremio-server.so ./cmd/libstremio
+// Build: go build -buildmode=c-shared -o librivulet-engine.so ./cmd/librivulet-engine
 //
 // No os.Exit and no signal.Notify are reachable from this package or from
 // internal/app: a fatal condition here must return an error code to the
@@ -32,8 +32,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/M0Rf30/stremio-server-go/internal/app"
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/app"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
 )
 
 // stopGrace bounds how long ServerStop waits for a blocking ServerStart call
@@ -76,7 +76,7 @@ func ServerVersion() *C.char {
 // receives appended log output (created if missing); a nil/empty logPath
 // falls back to the process's stderr. envJSON is a JSON object of string
 // env-var values (APP_PATH, HTTP_PORT, STREMIO_*, ...) — the same knobs the
-// stremio-server executable reads from its real environment; a nil/empty
+// rivulet-engine executable reads from its real environment; a nil/empty
 // envJSON means "use every default".
 //
 // Returns 0 on a clean stop (ServerStop called, or ctx-equivalent shutdown),
@@ -86,7 +86,7 @@ func ServerVersion() *C.char {
 func ServerStart(logPath *C.char, envJSON *C.char) (ret C.int) {
 	defer func() {
 		if r := recover(); r != nil {
-			logging.For("libstremio").Error("recovered from panic in ServerStart", "panic", r)
+			logging.For("librivulet-engine").Error("recovered from panic in ServerStart", "panic", r)
 			mu.Lock()
 			cancel = nil
 			stopped = nil
@@ -123,7 +123,7 @@ func ServerStart(logPath *C.char, envJSON *C.char) (ret C.int) {
 
 	envMap, err := parseEnvJSON(envJSON)
 	if err != nil {
-		_, _ = fmt.Fprintf(logw, "libstremio: invalid envJSON: %v\n", err)
+		_, _ = fmt.Fprintf(logw, "librivulet-engine: invalid envJSON: %v\n", err)
 		return 1
 	}
 	defer applyOSEnv(envMap)()
@@ -134,7 +134,7 @@ func ServerStart(logPath *C.char, envJSON *C.char) (ret C.int) {
 	}
 
 	if err := app.Run(runCtx, cfg, logw); err != nil {
-		_, _ = fmt.Fprintf(logw, "libstremio: server exited with error: %v\n", err)
+		_, _ = fmt.Fprintf(logw, "librivulet-engine: server exited with error: %v\n", err)
 		return 1
 	}
 	return 0
@@ -149,7 +149,7 @@ func ServerStart(logPath *C.char, envJSON *C.char) (ret C.int) {
 func ServerStop() (ret C.int) {
 	defer func() {
 		if r := recover(); r != nil {
-			logging.For("libstremio").Error("recovered from panic in ServerStop", "panic", r)
+			logging.For("librivulet-engine").Error("recovered from panic in ServerStop", "panic", r)
 			ret = 0 // Stop is documented as always "safe"; never surface a Stop failure code
 		}
 	}()
@@ -167,7 +167,7 @@ func ServerStop() (ret C.int) {
 		select {
 		case <-s:
 		case <-time.After(stopGrace):
-			logging.For("libstremio").Warn("ServerStop: timed out waiting for ServerStart to return")
+			logging.For("librivulet-engine").Warn("ServerStop: timed out waiting for ServerStart to return")
 		}
 	}
 	return 0
@@ -210,7 +210,7 @@ func openLogFile(path string, warn io.Writer) (io.Writer, func()) {
 	}
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		_, _ = fmt.Fprintf(warn, "libstremio: cannot open log file %q, logging to stderr: %v\n", p, err)
+		_, _ = fmt.Fprintf(warn, "librivulet-engine: cannot open log file %q, logging to stderr: %v\n", p, err)
 		return os.Stderr, func() {}
 	}
 	return f, func() { _ = f.Close() }

@@ -1,12 +1,12 @@
 <!--
-SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 
 SPDX-License-Identifier: MIT
 -->
 
 # Stream Proxy
 
-`stremio-server-go` ships a pure-Go HTTP stream proxy that augments the legacy
+`rivulet-engine` ships a pure-Go HTTP stream proxy that augments the legacy
 `/proxy` byte-forwarder (kept for stremio-web) with:
 
 - **HLS (M3U8) manifest rewriting** — variant/media playlists, segments,

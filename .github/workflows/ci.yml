@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
@@ -141,16 +141,16 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
         run: |
-          out="dist/stremio-server_${GOOS}_${GOARCH}${{ matrix.ext }}"
+          out="dist/rivulet-engine_${GOOS}_${GOARCH}${{ matrix.ext }}"
           ldflags="-s -w ${{ matrix.ldextra }} -X main.buildVersion=${GITHUB_REF_NAME} -X main.buildCommit=${GITHUB_SHA::8}"
           if [ "$CGO_ENABLED" = "1" ]; then
             ldflags="$ldflags -linkmode=external -extldflags \"-pie -lm -static-libstdc++\""
           fi
-          go build -trimpath -ldflags "$ldflags" -o "$out" ./cmd/stremio-server
+          go build -trimpath -ldflags "$ldflags" -o "$out" ./cmd/rivulet-engine
           ls -la "$out"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: stremio-server_${{ matrix.goos }}_${{ matrix.goarch }}
+          name: rivulet-engine_${{ matrix.goos }}_${{ matrix.goarch }}
           path: dist/
           retention-days: 7
 
@@ -174,10 +174,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build image
-        run: docker build -t stremio-server-go:ci .
+        run: docker build -t rivulet-engine:ci .
       - name: Smoke test (/heartbeat + healthcheck)
         run: |
-          cid="$(docker run -d -p 11470:11470 stremio-server-go:ci)"
+          cid="$(docker run -d -p 11470:11470 rivulet-engine:ci)"
           trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null' EXIT
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:11470/heartbeat; then ok=1; break; fi

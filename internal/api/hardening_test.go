@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/M0Rf30/stremio-server-go/internal/streamproxy"
-	"github.com/M0Rf30/stremio-server-go/internal/types"
+	"github.com/rivulet-kodi/rivulet-engine/internal/streamproxy"
+	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
 func TestHostAllowed_RebindingBlocked(t *testing.T) {

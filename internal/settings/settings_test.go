@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -11,8 +11,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/M0Rf30/stremio-server-go/internal/settings"
-	"github.com/M0Rf30/stremio-server-go/internal/types"
+	"github.com/rivulet-kodi/rivulet-engine/internal/settings"
+	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
 func cfg(appPath string) types.Config {

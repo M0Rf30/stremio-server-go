@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
 // Package api — shared TLS-certificate provisioning used by both the
-// GET /get-https handler and the background auto-renewer (cmd/stremio-server).
+// GET /get-https handler and the background auto-renewer (cmd/rivulet-engine).
 //
 // ProvisionCert contacts https://api.strem.io/api/certificateGet, parses the
 // issued Let's Encrypt wildcard cert (current nested schema or the legacy flat

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
-	"github.com/M0Rf30/stremio-server-go/internal/types"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
 const settingsFile = "server-settings.json"
@@ -160,7 +160,7 @@ func (s *store) Save() error {
 		return fmt.Errorf("settings: marshal: %w", err)
 	}
 
-	// appPath is created once at process startup (see cmd/stremio-server)
+	// appPath is created once at process startup (see cmd/rivulet-engine)
 	// and is immutable for the process lifetime, so it is not recreated on
 	// every save.
 	appPath := s.appPath

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
@@ -34,23 +34,23 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-amd64}" go bui
               -X main.buildVersion=${VERSION} \
               -X main.buildCommit=${COMMIT} \
               -X main.buildDate=${DATE}" \
-    -o /out/stremio-server \
-    ./cmd/stremio-server
+    -o /out/rivulet-engine \
+    ./cmd/rivulet-engine
 
 # ---------------------------------------------------------------------------
 # Runtime stage
 # ---------------------------------------------------------------------------
 FROM ${ALPINE_IMAGE}
 
-LABEL org.opencontainers.image.title="stremio-server-go" \
+LABEL org.opencontainers.image.title="rivulet-engine" \
       org.opencontainers.image.description="IPv6-capable drop-in Stremio streaming server" \
-      org.opencontainers.image.source="https://github.com/M0Rf30/stremio-server-go" \
+      org.opencontainers.image.source="https://github.com/rivulet-kodi/rivulet-engine" \
       org.opencontainers.image.licenses="MIT"
 
 RUN apk add --no-cache ffmpeg yt-dlp ca-certificates tzdata && \
     adduser -D -u 1000 user
 
-COPY --from=build /out/stremio-server /usr/local/bin/stremio-server
+COPY --from=build /out/rivulet-engine /usr/local/bin/rivulet-engine
 
 ENV HTTP_PORT=11470 \
     HTTPS_PORT=0 \
@@ -71,4 +71,4 @@ EXPOSE 11470
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD wget -q -O - "http://127.0.0.1:${HTTP_PORT}/heartbeat" >/dev/null 2>&1 || exit 1
 
-ENTRYPOINT ["/usr/local/bin/stremio-server"]
+ENTRYPOINT ["/usr/local/bin/rivulet-engine"]

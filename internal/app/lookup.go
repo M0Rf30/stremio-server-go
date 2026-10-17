@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
 // Package app hosts the reusable server bootstrap (env parsing, subsystem
 // wiring, HTTP/HTTPS listeners, graceful shutdown) shared by the
-// cmd/stremio-server executable and the cmd/libstremio c-shared library.
+// cmd/rivulet-engine executable and the cmd/librivulet-engine c-shared library.
 //
 // Configuration is resolved through a Lookup function rather than direct
 // os.Getenv calls so the exact same code path can be driven either by the
@@ -21,9 +21,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
-	"github.com/M0Rf30/stremio-server-go/internal/media"
-	"github.com/M0Rf30/stremio-server-go/internal/netguard"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/media"
+	"github.com/rivulet-kodi/rivulet-engine/internal/netguard"
 )
 
 // Lookup resolves a configuration key, mirroring os.LookupEnv's (value, ok)
@@ -32,7 +32,7 @@ type Lookup func(key string) (string, bool)
 
 // OSLookup adapts the process environment to Lookup. It is the default used
 // when Config.Lookup is nil, preserving the historical os.Getenv-based
-// behavior of the stremio-server executable.
+// behavior of the rivulet-engine executable.
 func OSLookup(key string) (string, bool) { return os.LookupEnv(key) }
 
 // MapLookup adapts a plain string map (e.g. library mode's envJSON, decoded

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -624,7 +624,7 @@ func (s *server) localAddonManifest(w http.ResponseWriter, r *http.Request) {
 		"id":          "org.stremio.local.go",
 		"version":     "1.0.0",
 		"name":        "Local Files (Go)",
-		"description": "Local video files served by stremio-server-go with IMDB resolution",
+		"description": "Local video files served by rivulet-engine with IMDB resolution",
 		"resources": []any{
 			"catalog",
 			map[string]any{

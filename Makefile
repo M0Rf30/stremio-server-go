@@ -1,13 +1,13 @@
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
-# stremio-server-go
+# rivulet-engine
 
-BINARY      := stremio-server
-MAIN        := ./cmd/stremio-server
-LIB_BINARY  := libstremio-server
-LIBMAIN     := ./cmd/libstremio
+BINARY      := rivulet-engine
+MAIN        := ./cmd/rivulet-engine
+LIB_BINARY  := librivulet-engine
+LIBMAIN     := ./cmd/librivulet-engine
 DIST        := dist
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -51,7 +51,7 @@ ANDROID_AMD64_CXX  ?= x86_64-linux-android21-clang++
 ANDROID_386_CC     ?= i686-linux-android21-clang
 ANDROID_386_CXX    ?= i686-linux-android21-clang++
 ANDROID_LDFLAGS    := -linkmode=external -extldflags "-pie -lm -static-libstdc++"
-# libstremio-server.so (cmd/libstremio, -buildmode=c-shared) reuses the same
+# librivulet-engine.so (cmd/librivulet-engine, -buildmode=c-shared) reuses the same
 # NDK CC/CXX and -static-libstdc++ as the executable above, but MUST NOT pass
 # -pie: cmd/link already adds -shared for c-shared, and some gcc/clang
 # frontends misinterpret "-shared -pie" together and pull in the executable
@@ -96,7 +96,7 @@ tidy: ## go mod tidy
 	go mod tidy
 
 swagger: ## Regenerate the OpenAPI (Swagger 2.0) spec from code annotations (needs swaggo/swag)
-	swag init -g cmd/stremio-server/main.go -o docs --outputTypes yaml,json --parseInternal
+	swag init -g cmd/rivulet-engine/main.go -o docs --outputTypes yaml,json --parseInternal
 
 smoke: build ## Run the end-to-end API smoke test
 	./scripts/smoke.sh
@@ -146,12 +146,12 @@ build-all: ## Cross-build all release targets into dist/
 	fi
 	@$(MAKE) lib-android
 
-# libstremio-server.so: the same server, in c-shared mode, for SELinux-
+# librivulet-engine.so: the same server, in c-shared mode, for SELinux-
 # enforcing Android hosts where a Kodi addon's shell can dlopen() a .so
 # dropped next to its own native libs but is blocked from exec()'ing a
 # bundled executable. Shipped inside the same Android release archives as
-# the stremio-server_android_{arm64,armv7} executable (see .goreleaser.yml).
-lib-android: ## Cross-build libstremio-server.so (c-shared) for android/{arm64,armv7,amd64,386} into dist/
+# the rivulet-engine_android_{arm64,armv7} executable (see .goreleaser.yml).
+lib-android: ## Cross-build librivulet-engine.so (c-shared) for android/{arm64,armv7,amd64,386} into dist/
 	@mkdir -p $(DIST)
 	@if command -v $(ANDROID_ARM64_CC) >/dev/null 2>&1; then \
 		CGO_ENABLED=1 CC=$(ANDROID_ARM64_CC) CXX=$(ANDROID_ARM64_CXX) \
@@ -159,7 +159,7 @@ lib-android: ## Cross-build libstremio-server.so (c-shared) for android/{arm64,a
 		go build -trimpath -buildmode=c-shared -ldflags '-s -w -checklinkname=0 $(ANDROID_LIB_LDFLAGS)' \
 			-o $(DIST)/$(LIB_BINARY)_android_arm64.so $(LIBMAIN); \
 	else \
-		echo "skipping libstremio-server android/arm64: $(ANDROID_ARM64_CC) not found (set ANDROID_ARM64_CC to an NDK clang)"; \
+		echo "skipping librivulet-engine android/arm64: $(ANDROID_ARM64_CC) not found (set ANDROID_ARM64_CC to an NDK clang)"; \
 	fi
 	@if command -v $(ANDROID_ARM_CC) >/dev/null 2>&1; then \
 		CGO_ENABLED=1 CC=$(ANDROID_ARM_CC) CXX=$(ANDROID_ARM_CXX) \
@@ -167,7 +167,7 @@ lib-android: ## Cross-build libstremio-server.so (c-shared) for android/{arm64,a
 		go build -trimpath -buildmode=c-shared -ldflags '-s -w -checklinkname=0 $(ANDROID_LIB_LDFLAGS)' \
 			-o $(DIST)/$(LIB_BINARY)_android_armv7.so $(LIBMAIN); \
 	else \
-		echo "skipping libstremio-server android/armv7: $(ANDROID_ARM_CC) not found (set ANDROID_ARM_CC to an NDK clang)"; \
+		echo "skipping librivulet-engine android/armv7: $(ANDROID_ARM_CC) not found (set ANDROID_ARM_CC to an NDK clang)"; \
 	fi
 	@if command -v $(ANDROID_AMD64_CC) >/dev/null 2>&1; then \
 		CGO_ENABLED=1 CC=$(ANDROID_AMD64_CC) CXX=$(ANDROID_AMD64_CXX) \
@@ -175,7 +175,7 @@ lib-android: ## Cross-build libstremio-server.so (c-shared) for android/{arm64,a
 		go build -trimpath -buildmode=c-shared -ldflags '-s -w -checklinkname=0 $(ANDROID_LIB_LDFLAGS)' \
 			-o $(DIST)/$(LIB_BINARY)_android_amd64.so $(LIBMAIN); \
 	else \
-		echo "skipping libstremio-server android/amd64: $(ANDROID_AMD64_CC) not found (set ANDROID_AMD64_CC to an NDK clang)"; \
+		echo "skipping librivulet-engine android/amd64: $(ANDROID_AMD64_CC) not found (set ANDROID_AMD64_CC to an NDK clang)"; \
 	fi
 	@if command -v $(ANDROID_386_CC) >/dev/null 2>&1; then \
 		CGO_ENABLED=1 CC=$(ANDROID_386_CC) CXX=$(ANDROID_386_CXX) \
@@ -183,7 +183,7 @@ lib-android: ## Cross-build libstremio-server.so (c-shared) for android/{arm64,a
 		go build -trimpath -buildmode=c-shared -ldflags '-s -w -checklinkname=0 $(ANDROID_LIB_LDFLAGS)' \
 			-o $(DIST)/$(LIB_BINARY)_android_386.so $(LIBMAIN); \
 	else \
-		echo "skipping libstremio-server android/386: $(ANDROID_386_CC) not found (set ANDROID_386_CC to an NDK clang)"; \
+		echo "skipping librivulet-engine android/386: $(ANDROID_386_CC) not found (set ANDROID_386_CC to an NDK clang)"; \
 	fi
 	@echo "built -> $(DIST)/"
 

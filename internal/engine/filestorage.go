@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -11,7 +11,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
 )
 
 // newFileStorage is storage.NewFileByInfoHash (data under <dir>/<infohash>,

@@ -1,21 +1,21 @@
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
 [Unit]
 Description=Stremio streaming server (pure-Go implementation)
-Documentation=https://github.com/M0Rf30/stremio-server-go
+Documentation=https://github.com/rivulet-kodi/rivulet-engine
 After=network.target
 
 [Service]
 Type=simple
 # Packaged defaults, then the per-user override (later files win).
-EnvironmentFile=-/etc/stremio-server/stremio-server.env
-EnvironmentFile=-%h/.config/stremio-server/env
+EnvironmentFile=-/etc/rivulet-engine/rivulet-engine.env
+EnvironmentFile=-%h/.config/rivulet-engine/env
 # Create the data dir outside the sandbox ("+"): ProtectHome=read-only would
 # otherwise stop the server creating it, and ReadWritePaths needs it to exist.
 ExecStartPre=+/usr/bin/mkdir -p %h/.stremio-server
-ExecStart=/usr/bin/stremio-server
+ExecStart=/usr/bin/rivulet-engine
 Restart=on-failure
 RestartSec=5
 # Graceful shutdown drains HTTP for 5s before closing the torrent engine.

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/M0Rf30/stremio-server-go/internal/nzb"
+	"github.com/rivulet-kodi/rivulet-engine/internal/nzb"
 )
 
 // ---- fake NNTP server ------------------------------------------------------

@@ -1,10 +1,10 @@
 <!--
-SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 
 SPDX-License-Identifier: MIT
 -->
 
-# stremio-server-go
+# rivulet-engine
 
 A lightweight, **IPv6-capable**, open-source drop-in replacement for Stremio's
 closed-source streaming server (`server.js`), built on
@@ -53,14 +53,14 @@ Not affiliated with or endorsed by Stremio.
 ## Install
 
 Prebuilt binaries for **Linux, macOS, Windows, and Android (arm64/armv7/x86_64/x86)** are
-attached to each [release](https://github.com/M0Rf30/stremio-server-go/releases).
+attached to each [release](https://github.com/rivulet-kodi/rivulet-engine/releases).
 
 From source (Go 1.27.2+; CGO is not required):
 
 ```sh
-go install github.com/M0Rf30/stremio-server-go/cmd/stremio-server@latest
+go install github.com/rivulet-kodi/rivulet-engine/cmd/rivulet-engine@latest
 # or, in a checkout:
-make build          # -> ./stremio-server
+make build          # -> ./rivulet-engine
 make build-all      # cross-compile every target into dist/
 ```
 
@@ -92,8 +92,8 @@ NZBHydra2, or Bitmagnet's built-in `/torznab` endpoint). Setup guide:
 ## Run
 
 ```sh
-./stremio-server            # http://127.0.0.1:11470  (https on :12470)
-./stremio-server version    # print build version
+./rivulet-engine            # http://127.0.0.1:11470  (https on :12470)
+./rivulet-engine version    # print build version
 ```
 
 Then point any Stremio client's **streaming server URL** at
@@ -356,7 +356,7 @@ Example — running behind Tor:
 STREMIO_BT_ENCRYPTION=require \
 STREMIO_BT_PROXY=socks5://127.0.0.1:9050 \
 STREMIO_BT_ANONYMOUS=1 \
-stremio-server
+rivulet-engine
 ```
 
 **Limitation:** the proxy covers tracker/webseed/metainfo traffic only. Peer
@@ -417,11 +417,11 @@ against bionic's real resolver instead (`-ldflags=-checklinkname=0` is also
 needed for `github.com/wlynxg/anet` on Go 1.23+). `android/arm64` also runs
 as a plain `linux/arm64` binary under Termux.
 
-### Library mode (`libstremio-server.so`)
+### Library mode (`librivulet-engine.so`)
 
 Android 10+ denies `exec()` of files an app downloaded into its own data
 directory (SELinux W^X for targetSdk ≥ 29, i.e. Kodi 19+), but still allows
-`dlopen()` of them. `cmd/libstremio` therefore builds the same server with
+`dlopen()` of them. `cmd/librivulet-engine` therefore builds the same server with
 `-buildmode=c-shared` for `android/{arm64,armv7,amd64,386}` (`make lib-android`; shipped
 inside the Android release archives next to the executable). Exports:
 
@@ -440,13 +440,13 @@ exported for the duration of `ServerStart` and restored afterwards.
 reported in `/settings`; `ServerVersion()` always returns the compiled default.
 Start may be called again after Stop. The library never installs signal
 handlers or calls `os.Exit`; Go cannot unload it (golang/go#11100), so load it
-once per process. `scripts/libstremio_smoke.py` exercises it through ctypes.
+once per process. `scripts/librivulet_engine_smoke.py` exercises it through ctypes.
 
 ## Layout
 
 | Path | Responsibility |
 |---|---|
-| `cmd/stremio-server` | entrypoint, wiring, TLS, version |
+| `cmd/rivulet-engine` | entrypoint, wiring, TLS, version |
 | `internal/types` | shared contract (structs + interfaces) |
 | `internal/engine` | anacrolix client, readers, stats, trackers, cache eviction |
 | `internal/api` | enginefs routes, streaming, proxy, casting, local-addon, youtube, archive/nzb/ftp |
@@ -698,10 +698,10 @@ API.
 
 ## License
 
-[MIT](LICENSE) - Copyright (c) 2026 [The stremio-server-go Authors](AUTHORS).
+[MIT](LICENSE) - Copyright (c) 2026 [The rivulet-engine Authors](AUTHORS).
 
 Contributions are accepted under the same license. New files carry the
-project's SPDX header (copyright holder "The stremio-server-go Authors",
-license MIT; `reuse annotate --copyright 'The stremio-server-go Authors'
+project's SPDX header (copyright holder "The rivulet-engine Authors",
+license MIT; `reuse annotate --copyright 'The rivulet-engine Authors'
 --license MIT <file>`); add yourself to [AUTHORS](AUTHORS) in your first pull
 request.

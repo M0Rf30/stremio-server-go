@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 
 SPDX-License-Identifier: MIT
 -->
@@ -11,7 +11,7 @@ Stremio's settings panel shows an **"HTTPS endpoint for streaming"**
 addresses, plus a **remote URL** field that becomes something like
 `https://192-168-0-62.<hash>.stremio.rocks`.
 
-This page explains what that control does, how `stremio-server-go` implements it,
+This page explains what that control does, how `rivulet-engine` implements it,
 and how to set it up.
 
 ---
@@ -78,7 +78,7 @@ device possible.
 1. Run the server with HTTPS enabled (default):
 
    ```sh
-   ./stremio-server         # http on :11470, https on :12470
+   ./rivulet-engine         # http on :11470, https on :12470
    ```
 
 2. In Stremio, open **Settings → Streaming server**. Confirm it is connected to
@@ -98,12 +98,12 @@ restarts:
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 \
   -p 12470:12470 \
   -e HTTPS_PORT=12470 \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 Then complete the dropdown step above. (Swap `podman`→`docker`; flags are
@@ -132,13 +132,13 @@ disturbs a plain HTTP or self-signed setup unless you opt in.
 
 ```sh
 podman run -d \
-  --name stremio-server \
+  --name rivulet-engine \
   -p 11470:11470 -p 12470:12470 \
   -e HTTPS_PORT=12470 \
   -e STREMIO_CERT_AUTHKEY=<your-stremio-authkey> \
   -e STREMIO_CERT_IP=192.168.0.62 \
   -v stremio-data:/data \
-  stremio-server-go
+  rivulet-engine
 ```
 
 ### Getting your authKey

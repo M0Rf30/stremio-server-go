@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 
 SPDX-License-Identifier: MIT
 -->
@@ -37,7 +37,7 @@ Example base URLs:
 Start the server with the env vars set:
 
 ```sh
-STREMIO_TORZNAB_URL=http://localhost:3333/torznab ./stremio-server
+STREMIO_TORZNAB_URL=http://localhost:3333/torznab ./rivulet-engine
 ```
 
 For Prowlarr with an API key:
@@ -45,7 +45,7 @@ For Prowlarr with an API key:
 ```sh
 STREMIO_TORZNAB_URL=http://192.168.1.10:9696/42/api \
 STREMIO_TORZNAB_APIKEY=abc123def456 \
-./stremio-server
+./rivulet-engine
 ```
 
 If `STREMIO_TORZNAB_URL` is unset, the `/torznab` routes serve the manifest but return no streams.
@@ -60,7 +60,7 @@ Open the Stremio app, go to **Addons**, and paste:
 http://<server-host>:11470/torznab/manifest.json
 ```
 
-Replace `<server-host>` with the host running `stremio-server-go` (e.g. `127.0.0.1` for a
+Replace `<server-host>` with the host running `rivulet-engine` (e.g. `127.0.0.1` for a
 local setup).
 
 ---
@@ -87,7 +87,7 @@ The response is RSS/XML with `<torznab:attr>` extensions. For each `<item>` the 
 2. Reads seeders from the `seeders` attribute (defaults to 0 if absent) and sorts results
    highest-seeder-first.
 3. Returns the results as infoHash streams. The Stremio client hands the infoHash back to
-   the same `stremio-server-go` instance, which streams via its DHT engine.
+   the same `rivulet-engine` instance, which streams via its DHT engine.
 
 If the IMDB id query returns no results, the add-on falls back to a keyword search
 (`t=search&q=<title>`) using the title resolved from

@@ -7,7 +7,7 @@
 
 # Build artefacts and pre-built binaries
 dist/
-/stremio-server
+/rivulet-engine
 
 # Container build files (not needed inside the build context)
 Dockerfile

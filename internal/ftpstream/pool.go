@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -18,7 +18,7 @@ import (
 
 	"github.com/jlaffaye/ftp"
 
-	"github.com/M0Rf30/stremio-server-go/internal/netguard"
+	"github.com/rivulet-kodi/rivulet-engine/internal/netguard"
 )
 
 // A player seeking inside a remote file issues one short ranged request per

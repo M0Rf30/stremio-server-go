@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 
 SPDX-License-Identifier: MIT
 -->
@@ -17,7 +17,7 @@ The chain from crawl to playback:
 2. **/bitmagnet add-on** — resolves a Stremio `tt` (IMDB) id to a title and
    year via Cinemeta, queries Bitmagnet by title, filters by content type and
    season/episode, and returns infoHash streams.
-3. **stremio-server-go engine** — receives the infoHash from the Stremio client
+3. **rivulet-engine engine** — receives the infoHash from the Stremio client
    and streams it via its DHT peer engine.
 
 ---
@@ -75,18 +75,18 @@ Named volumes `bitmagnet-config` and `bitmagnet-pgdata` persist across `down`
 # Confirm exact names on your system first:
 podman volume ls
 
-podman volume rm stremio-server-go_bitmagnet-pgdata stremio-server-go_bitmagnet-config
+podman volume rm rivulet-engine_bitmagnet-pgdata rivulet-engine_bitmagnet-config
 ```
 
 ---
 
-## Wire stremio-server-go
+## Wire rivulet-engine
 
 Set `STREMIO_BITMAGNET_URL` to the Bitmagnet GraphQL endpoint before starting
 the server:
 
 ```sh
-STREMIO_BITMAGNET_URL=http://localhost:3333/graphql ./stremio-server
+STREMIO_BITMAGNET_URL=http://localhost:3333/graphql ./rivulet-engine
 ```
 
 If the variable is unset, the `/bitmagnet` routes serve the manifest but return
@@ -98,7 +98,7 @@ no streams (the add-on is inert).
 http://<server-host>:11470/bitmagnet/manifest.json
 ```
 
-Replace `<server-host>` with the host running `stremio-server-go` (e.g.
+Replace `<server-host>` with the host running `rivulet-engine` (e.g.
 `127.0.0.1` for a local setup).
 
 ---

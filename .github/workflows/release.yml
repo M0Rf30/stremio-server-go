@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
@@ -60,8 +60,8 @@ jobs:
         # 127.0.0.1:53 (nothing listens there) and every DNS lookup fails --
         # only cgo linking against bionic's real resolver works. android/arm
         # also can't build any other way: the Go toolchain refuses it without
-        # external linking. See the stremio-server-android and
-        # stremio-server-android-arm builds in .goreleaser.yml.
+        # external linking. See the rivulet-engine-android and
+        # rivulet-engine-android-arm builds in .goreleaser.yml.
         #
         # Use the NDK preinstalled on the runner image rather than fetching
         # one: a cached third-party NDK restored with its clang binary missing

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+// SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 //
 // SPDX-License-Identifier: MIT
 
@@ -25,13 +25,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/M0Rf30/stremio-server-go/internal/api"
-	"github.com/M0Rf30/stremio-server-go/internal/earlyenv"
-	"github.com/M0Rf30/stremio-server-go/internal/engine"
-	"github.com/M0Rf30/stremio-server-go/internal/logging"
-	"github.com/M0Rf30/stremio-server-go/internal/media"
-	"github.com/M0Rf30/stremio-server-go/internal/settings"
-	"github.com/M0Rf30/stremio-server-go/internal/types"
+	"github.com/rivulet-kodi/rivulet-engine/internal/api"
+	"github.com/rivulet-kodi/rivulet-engine/internal/earlyenv"
+	"github.com/rivulet-kodi/rivulet-engine/internal/engine"
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
+	"github.com/rivulet-kodi/rivulet-engine/internal/media"
+	"github.com/rivulet-kodi/rivulet-engine/internal/settings"
+	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
 // DefaultVersion is the Stremio-compatible serverVersion reported when

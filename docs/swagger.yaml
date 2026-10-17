@@ -158,13 +158,13 @@ definitions:
 host: 127.0.0.1:11470
 info:
   contact: {}
-  description: HTTP API served by stremio-server-go, a pure-Go drop-in for Stremio's
+  description: HTTP API served by rivulet-engine, a pure-Go drop-in for Stremio's
     streaming server (server.js). serverVersion is reported as 4.21.0 for client feature-gating;
     it is independent of the binary build version.
   license:
     name: MIT
-    url: https://github.com/M0Rf30/stremio-server-go/blob/main/LICENSE
-  title: stremio-server-go enginefs API
+    url: https://github.com/rivulet-kodi/rivulet-engine/blob/main/LICENSE
+  title: rivulet-engine enginefs API
   version: 4.21.0
 paths:
   /:

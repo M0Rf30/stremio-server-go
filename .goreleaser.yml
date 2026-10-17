@@ -1,10 +1,10 @@
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
 version: 2
 
-project_name: stremio-server
+project_name: rivulet-engine
 
 # Defaults so a local `goreleaser build` works when the NDK toolchain bin dir
 # is on PATH; the release workflow overrides these with absolute paths.
@@ -26,9 +26,9 @@ before:
 
 builds:
   # Desktop / server targets.
-  - id: stremio-server
-    main: ./cmd/stremio-server
-    binary: stremio-server
+  - id: rivulet-engine
+    main: ./cmd/rivulet-engine
+    binary: rivulet-engine
     env:
       - CGO_ENABLED=0
     flags:
@@ -70,9 +70,9 @@ builds:
   # hence CXX is required too -- and -static-libstdc++ so the binary doesn't
   # NEED libc++_shared.so, an NDK-redistributable apps normally bundle inside
   # their APK that a standalone Kodi-addon-dropped binary has no APK to ship.
-  - id: stremio-server-android
-    main: ./cmd/stremio-server
-    binary: stremio-server
+  - id: rivulet-engine-android
+    main: ./cmd/rivulet-engine
+    binary: rivulet-engine
     env:
       - CGO_ENABLED=1
       - CC={{ .Env.ANDROID_ARM64_CC }}
@@ -107,9 +107,9 @@ builds:
   # hence CXX is required too -- and -static-libstdc++ so the binary doesn't
   # NEED libc++_shared.so, an NDK-redistributable apps normally bundle inside
   # their APK that a standalone Kodi-addon-dropped binary has no APK to ship.
-  - id: stremio-server-android-arm
-    main: ./cmd/stremio-server
-    binary: stremio-server
+  - id: rivulet-engine-android-arm
+    main: ./cmd/rivulet-engine
+    binary: rivulet-engine
     env:
       - CGO_ENABLED=1
       - CC={{ .Env.ANDROID_ARM_CC }}
@@ -130,22 +130,22 @@ builds:
     goarm:
       - "7"
 
-  # libstremio-server.so (arm64) — c-shared build of the exact same server
+  # librivulet-engine.so (arm64) — c-shared build of the exact same server
   # for SELinux-enforcing Android hosts where a Kodi addon's shell can
   # dlopen() a .so dropped next to its own native libs but is blocked from
-  # exec()'ing a bundled executable (see cmd/libstremio). Shipped inside the
-  # same archive as stremio-server-android (below), next to the executable.
+  # exec()'ing a bundled executable (see cmd/librivulet-engine). Shipped inside the
+  # same archive as rivulet-engine-android (below), next to the executable.
   #
-  # Same CC/CXX/-static-libstdc++ requirement as stremio-server-android
+  # Same CC/CXX/-static-libstdc++ requirement as rivulet-engine-android
   # above, but deliberately WITHOUT -pie: cmd/link already passes -shared
   # for buildmode=c-shared, and some gcc/clang frontends misinterpret
   # "-shared -pie" together and pull in the executable startup object
   # (Scrt1.o, which wants a `main` symbol a .so doesn't export as an entry
   # point), failing the link. -pie is an executable-only concern; a shared
   # object is already position-independent code.
-  - id: stremio-server-android-lib
-    main: ./cmd/libstremio
-    binary: libstremio-server
+  - id: rivulet-engine-android-lib
+    main: ./cmd/librivulet-engine
+    binary: librivulet-engine
     buildmode: c-shared
     env:
       - CGO_ENABLED=1
@@ -162,12 +162,12 @@ builds:
     goarch:
       - arm64
 
-  # libstremio-server.so (32-bit armv7) — same rationale as
-  # stremio-server-android-lib above, matching stremio-server-android-arm's
+  # librivulet-engine.so (32-bit armv7) — same rationale as
+  # rivulet-engine-android-lib above, matching rivulet-engine-android-arm's
   # target ABI.
-  - id: stremio-server-android-arm-lib
-    main: ./cmd/libstremio
-    binary: libstremio-server
+  - id: rivulet-engine-android-arm-lib
+    main: ./cmd/librivulet-engine
+    binary: librivulet-engine
     buildmode: c-shared
     env:
       - CGO_ENABLED=1
@@ -189,9 +189,9 @@ builds:
   # Android x86_64 / x86 (emulators, Chromebooks/ARC, Android-x86 boxes).
   # Same cgo-for-DNS, external-linking and -static-libstdc++ rationale as the
   # arm builds above; executables use -pie, the c-shared libs do not.
-  - id: stremio-server-android-amd64
-    main: ./cmd/stremio-server
-    binary: stremio-server
+  - id: rivulet-engine-android-amd64
+    main: ./cmd/rivulet-engine
+    binary: rivulet-engine
     env:
       - CGO_ENABLED=1
       - CC={{ .Env.ANDROID_AMD64_CC }}
@@ -210,9 +210,9 @@ builds:
     goarch:
       - amd64
 
-  - id: stremio-server-android-amd64-lib
-    main: ./cmd/libstremio
-    binary: libstremio-server
+  - id: rivulet-engine-android-amd64-lib
+    main: ./cmd/librivulet-engine
+    binary: librivulet-engine
     buildmode: c-shared
     env:
       - CGO_ENABLED=1
@@ -229,9 +229,9 @@ builds:
     goarch:
       - amd64
 
-  - id: stremio-server-android-386
-    main: ./cmd/stremio-server
-    binary: stremio-server
+  - id: rivulet-engine-android-386
+    main: ./cmd/rivulet-engine
+    binary: rivulet-engine
     env:
       - CGO_ENABLED=1
       - CC={{ .Env.ANDROID_386_CC }}
@@ -250,9 +250,9 @@ builds:
     goarch:
       - "386"
 
-  - id: stremio-server-android-386-lib
-    main: ./cmd/libstremio
-    binary: libstremio-server
+  - id: rivulet-engine-android-386-lib
+    main: ./cmd/librivulet-engine
+    binary: librivulet-engine
     buildmode: c-shared
     env:
       - CGO_ENABLED=1
@@ -281,31 +281,31 @@ upx:
 archives:
   - id: default
     ids:
-      - stremio-server
+      - rivulet-engine
     formats: tar.gz
     format_overrides:
       - goos: windows
         formats: zip
     name_template: &archive_name >-
-      stremio-server_
+      rivulet-engine_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-  # Android archives carry two artifacts (executable + libstremio-server.so);
+  # Android archives carry two artifacts (executable + librivulet-engine.so);
   # goreleaser requires a constant binary count per archive group, so they
   # get their own group with the same naming.
   - id: android
     ids:
-      - stremio-server-android
-      - stremio-server-android-arm
-      - stremio-server-android-lib
-      - stremio-server-android-arm-lib
-      - stremio-server-android-amd64
-      - stremio-server-android-amd64-lib
-      - stremio-server-android-386
-      - stremio-server-android-386-lib
+      - rivulet-engine-android
+      - rivulet-engine-android-arm
+      - rivulet-engine-android-lib
+      - rivulet-engine-android-arm-lib
+      - rivulet-engine-android-amd64
+      - rivulet-engine-android-amd64-lib
+      - rivulet-engine-android-386
+      - rivulet-engine-android-386-lib
     formats: tar.gz
     name_template: *archive_name
 

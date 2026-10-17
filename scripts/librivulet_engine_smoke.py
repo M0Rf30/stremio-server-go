@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-# SPDX-FileCopyrightText: 2026 The stremio-server-go Authors
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
 #
 # SPDX-License-Identifier: MIT
 
-"""ctypes smoke test for libstremio-server.so (built from ./cmd/libstremio).
+"""ctypes smoke test for librivulet-engine.so (built from ./cmd/librivulet-engine).
 
 Loads the shared library, starts the server on a background thread (per the
 Contract, ServerStart BLOCKS until stopped), polls the configured HTTP port
@@ -14,7 +14,7 @@ Start -> Stop -> Start -> Stop restart contract holds through the C ABI the
 same way internal/app.TestRunStartStopTwice proves it for the Go API.
 
 Usage:
-    python3 scripts/libstremio_smoke.py /path/to/libstremio.so
+    python3 scripts/librivulet_engine_smoke.py /path/to/librivulet-engine.so
 """
 import ctypes
 import json
@@ -53,7 +53,7 @@ def wait_for_port_closed(host, port, timeout=15.0):
 
 def main():
     if len(sys.argv) != 2:
-        print("usage: libstremio_smoke.py /path/to/libstremio.so", file=sys.stderr)
+        print("usage: librivulet_engine_smoke.py /path/to/librivulet-engine.so", file=sys.stderr)
         return 2
     lib_path = sys.argv[1]
 
