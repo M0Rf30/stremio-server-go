@@ -240,7 +240,7 @@ Notes:
 
 Curated `podman run` recipes (swap `podman`→`docker`; all flags are identical).
 The full env-var reference lives in the project
-[README](../README.md#environment).
+[configuration reference](CONFIGURATION.md).
 
 ### Ephemeral / low-disk (in-RAM piece cache)
 
@@ -279,7 +279,7 @@ podman run -d \
 `--network host` (or a shared pod) lets the container reach the host's Tor
 SOCKS port. Supply `RIVULET_DHT_BOOTSTRAP=host:port,…` as well when the default
 DHT routers are filtered. Peer connections themselves are not tunneled — see the
-[censorship-resistance notes](../README.md#censorship-resistance).
+[censorship-resistance notes](BITTORRENT.md#censorship-resistance).
 
 ### MediaFlow-compatible stream-proxy relay
 

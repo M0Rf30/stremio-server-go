@@ -17,7 +17,7 @@ localhost-trust service with **no authentication** by design — any process
 that can reach the port is trusted. Browser-originated requests are an
 exception: state-changing routes and `/proxy` also check the request's
 `Origin` header against an allowlist (`RIVULET_ALLOWED_ORIGINS` + built-in
-Stremio web/localhost/self-IP defaults, see README) so an arbitrary page open
+Stremio web/localhost/self-IP defaults, see `docs/CONFIGURATION.md`) so an arbitrary page open
 in the user's browser cannot drive the API merely because the port is
 reachable.
 
@@ -158,7 +158,7 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 - **`CGO_ENABLED=0`** everywhere — no native deps.
 - **golangci-lint v2** (`bodyclose, errcheck, errorlint, gosec, govet, ineffassign, misspell, revive, staticcheck, unconvert, unused, whitespace`). `gosec` excludes by-design rules (variable URLs/subprocess/file paths — this is a localhost media server). `_test.go` files skip `errcheck`/`gosec`/`bodyclose`/`unparam` but still face `gofmt`/`staticcheck`/`revive`.
 - **Runtime deps** for full functionality: `ffmpeg`/`ffprobe` (HLS/probe/subtitles), `yt-dlp` (`/yt`). Bundled in the container image.
-- Config knobs are env vars (`RIVULET_*`, `HTTP_PORT`, `APP_PATH`, …) — see the table in `README.md`; add new ones in `main.go` and document them there.
+- Config knobs are env vars (`RIVULET_*`, `HTTP_PORT`, `APP_PATH`, …) — see `docs/CONFIGURATION.md`; add new ones in `main.go` and document them there.
 
 ## Testing & QA
 
