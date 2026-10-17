@@ -19,7 +19,7 @@ import (
 type Config struct {
 	HTTPPort        int    // enginefs HTTP API port (default 11470)
 	HTTPSPort       int    // optional HTTPS port (default 12470, 0 = disabled)
-	AppPath         string // application/cache root, e.g. ~/.stremio-server
+	AppPath         string // application/cache root, e.g. ~/.rivulet-engine
 	CacheRoot       string // torrent piece cache root (defaults to AppPath)
 	MemoryCacheSize int64  // opt-in in-RAM piece cache budget in bytes; 0 = disabled (write pieces to disk)
 	// StorageMmap memory-maps torrent files in the disk piece cache instead of

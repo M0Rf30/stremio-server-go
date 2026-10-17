@@ -98,7 +98,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	}
 	appPath := getenv(lookup, "APP_PATH", "")
 	if appPath == "" {
-		appPath = filepath.Join(home, ".stremio-server")
+		appPath = defaultAppPath(home)
 	}
 	if err := os.MkdirAll(appPath, 0o755); err != nil {
 		return fmt.Errorf("cannot create app path %s: %w", appPath, err)

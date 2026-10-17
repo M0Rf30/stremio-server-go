@@ -14,7 +14,9 @@ EnvironmentFile=-/etc/rivulet-engine/rivulet-engine.env
 EnvironmentFile=-%h/.config/rivulet-engine/env
 # Create the data dir outside the sandbox ("+"): ProtectHome=read-only would
 # otherwise stop the server creating it, and ReadWritePaths needs it to exist.
-ExecStartPre=+/usr/bin/mkdir -p %h/.stremio-server
+# A pre-rename ~/.stremio-server is moved over first so upgrades keep their
+# settings, certificate and caches.
+ExecStartPre=+/bin/sh -c 'if [ -d "%h/.stremio-server" ] && [ ! -e "%h/.rivulet-engine" ]; then mv "%h/.stremio-server" "%h/.rivulet-engine"; fi; mkdir -p "%h/.rivulet-engine"'
 ExecStart=/usr/bin/rivulet-engine
 Restart=on-failure
 RestartSec=5
@@ -26,7 +28,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=-%h/.stremio-server
+ReadWritePaths=-%h/.rivulet-engine
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
