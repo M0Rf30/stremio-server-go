@@ -43,7 +43,7 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-amd64}" go bui
 FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.title="rivulet-engine" \
-      org.opencontainers.image.description="IPv6-capable drop-in Stremio streaming server" \
+      org.opencontainers.image.description="IPv6-capable drop-in streaming server for Stremio clients" \
       org.opencontainers.image.source="https://github.com/rivulet-kodi/rivulet-engine" \
       org.opencontainers.image.licenses="MIT"
 

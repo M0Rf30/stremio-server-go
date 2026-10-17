@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 [Unit]
-Description=Stremio streaming server (pure-Go implementation)
+Description=Rivulet Engine streaming server (pure-Go implementation)
 Documentation=https://github.com/rivulet-kodi/rivulet-engine
 After=network.target
 

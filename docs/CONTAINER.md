@@ -395,7 +395,7 @@ Force software transcode to avoid auto-detect overhead on systems without a GPU:
 
    ```yaml
    ---
-   title: Stremio Server Go
+   title: Rivulet Engine
    emoji: 🎬
    colorFrom: purple
    colorTo: indigo
