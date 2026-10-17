@@ -7,7 +7,7 @@
 // Routes:
 //
 //	GET /torznab/manifest.json
-//	     → Stremio addon manifest (id community.stremioservergo.torznab, v0.1.0)
+//	     → Stremio addon manifest (id community.rivulet-engine.torznab, v0.1.0)
 //	GET /torznab/stream/<type>/<id>.json
 //	     → {streams:[{infoHash,...}]} from a Torznab indexer (Prowlarr/Jackett/NZBHydra/Bitmagnet)
 //
@@ -216,7 +216,7 @@ func (s *server) handleTorznab(w http.ResponseWriter, r *http.Request, seg []str
 
 func (s *server) torznabManifest(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":          "community.stremioservergo.torznab",
+		"id":          "community.rivulet-engine.torznab",
 		"version":     "0.1.0",
 		"name":        "Torznab Indexer",
 		"description": "Torrent streams from a Torznab indexer (Prowlarr/Jackett/NZBHydra/Bitmagnet).",

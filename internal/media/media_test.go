@@ -505,7 +505,7 @@ func TestHLSFileTracksInFlight(t *testing.T) {
 // TestHLSManagerCloseHLSRemovesBaseDir is the regression test for MED-2: the
 // HLS base directory is now created per-manager by os.MkdirTemp (unique,
 // 0700, never shared with another process or user), so unlike the old fixed
-// "$TMPDIR/stremio-hls" path there is no reason to preserve it across
+// "$TMPDIR/rivulet-engine-hls" path there is no reason to preserve it across
 // CloseHLS — removing it, session sub-dirs included, in one shot is both
 // simpler and correct.
 func TestHLSManagerCloseHLSRemovesBaseDir(t *testing.T) {
@@ -535,7 +535,7 @@ func TestHLSManagerCloseHLSRemovesBaseDir(t *testing.T) {
 
 // TestNewHLSBaseDirIsPrivate is the regression test for MED-2: newHLSBaseDir
 // must create a fresh, unpredictable, owner-only (0700) base directory —
-// never the old fixed, world-readable "$TMPDIR/stremio-hls" path a
+// never the old fixed, world-readable "$TMPDIR/rivulet-engine-hls" path a
 // co-resident user on a multi-user host could pre-create or read. Calls
 // newHLSBaseDir directly rather than newHLS, which shells out to ffmpeg to
 // probe encoders.
@@ -546,7 +546,7 @@ func TestNewHLSBaseDirIsPrivate(t *testing.T) {
 	base := newHLSBaseDir("")
 	defer os.RemoveAll(base)
 
-	if filepath.Base(base) == "stremio-hls" {
+	if filepath.Base(base) == "rivulet-engine-hls" {
 		t.Errorf("base dir = %q, want a randomized os.MkdirTemp name, not the old predictable one", base)
 	}
 	fi, err := os.Stat(base)

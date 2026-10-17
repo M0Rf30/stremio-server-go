@@ -29,7 +29,7 @@ type HLSConfig struct {
 	NegProbeTTL    time.Duration // failed-probe negative cache TTL (RIVULET_HLS_NEG_PROBE_TTL)
 	PosProbeTTL    time.Duration // successful-probe cache TTL (RIVULET_HLS_POS_PROBE_TTL)
 	MaxSessions    int           // hard cap on concurrent sessions (RIVULET_HLS_MAX_SESSIONS)
-	WorkDir        string        // "" = os.MkdirTemp default; else stremio-hls-* under it (RIVULET_HLS_WORK_DIR)
+	WorkDir        string        // "" = os.MkdirTemp default; else rivulet-engine-hls-* under it (RIVULET_HLS_WORK_DIR)
 	// DisableIdleEviction turns idle eviction off entirely: the reaper never
 	// removes a session for being idle, so sessions live until DeleteHLS (or
 	// CloseHLS). internal/app sets it for RIVULET_HLS_SESSION_TTL=0, matching
@@ -46,8 +46,8 @@ type HLSConfig struct {
 	// default) ignores those parameters entirely — see parseSessionOverrides.
 	SessionOverrides bool
 	// Persist opts in to HLS sessions that survive a restart: sessions live
-	// in a stable <WorkDir>/stremio-hls-persist directory (instead of a fresh
-	// random stremio-hls-* one), each with a session.json that lets the next
+	// in a stable <WorkDir>/rivulet-engine-hls-persist directory (instead of a fresh
+	// random rivulet-engine-hls-* one), each with a session.json that lets the next
 	// process rehydrate it without re-probing or re-transcoding. Requires
 	// WorkDir; ignored (with a warning) without it. See persist.go.
 	Persist bool // (RIVULET_HLS_PERSIST)

@@ -150,14 +150,14 @@ func TestArchiveSweepStale(t *testing.T) {
 		chtimesAgo(t, p, age)
 		return p
 	}
-	staleDir := mk("stremio-archive-aaa", true, 3*time.Hour)
-	staleDL := mk("stremio-archive-dl-bbb", false, 3*time.Hour)
-	freshDir := mk("stremio-archive-ccc", true, time.Minute)
-	liveDir := mk("stremio-archive-live", true, 3*time.Hour)
-	liveArch := mk("stremio-archive-dl-live", false, 3*time.Hour)
+	staleDir := mk("rivulet-engine-archive-aaa", true, 3*time.Hour)
+	staleDL := mk("rivulet-engine-archive-dl-bbb", false, 3*time.Hour)
+	freshDir := mk("rivulet-engine-archive-ccc", true, time.Minute)
+	liveDir := mk("rivulet-engine-archive-live", true, 3*time.Hour)
+	liveArch := mk("rivulet-engine-archive-dl-live", false, 3*time.Hour)
 	foreignDir := mk("other-stale", true, 3*time.Hour)
-	foreignFile := mk("stremio-archive-mine.zip", false, 3*time.Hour) // not a dl file
-	nzbDir := mk("stremio-nzb-zzz", true, 3*time.Hour)                // other janitor's prefix
+	foreignFile := mk("rivulet-engine-archive-mine.zip", false, 3*time.Hour) // not a dl file
+	nzbDir := mk("rivulet-engine-nzb-zzz", true, 3*time.Hour)                // other janitor's prefix
 
 	archiveSessionsMu.Lock()
 	archiveSessions["sweep-live"] = &archiveSession{key: "sweep-live", tmpDir: liveDir, archivePath: liveArch}
@@ -192,10 +192,10 @@ func TestNzbSweepStale(t *testing.T) {
 		chtimesAgo(t, p, age)
 		return p
 	}
-	stale := mk("stremio-nzb-aaa", 3*time.Hour)
-	fresh := mk("stremio-nzb-bbb", time.Minute)
-	live := mk("stremio-nzb-live", 3*time.Hour)
-	foreign := mk("stremio-archive-old", 3*time.Hour)
+	stale := mk("rivulet-engine-nzb-aaa", 3*time.Hour)
+	fresh := mk("rivulet-engine-nzb-bbb", time.Minute)
+	live := mk("rivulet-engine-nzb-live", 3*time.Hour)
+	foreign := mk("rivulet-engine-archive-old", 3*time.Hour)
 
 	nzbSessionsMu.Lock()
 	nzbSessions["sweep-live"] = &nzbSession{key: "sweep-live", tmpDir: live}

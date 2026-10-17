@@ -217,7 +217,7 @@ type hlsManager struct {
 	closing atomic.Bool
 	// persist is true only when HLSConfig.Persist was requested AND the
 	// stable persist directory was usable (see newHLSBase); base is then
-	// <WorkDir>/stremio-hls-persist, sessions write session.json, and
+	// <WorkDir>/rivulet-engine-hls-persist, sessions write session.json, and
 	// CloseHLS keeps base on disk. False reproduces the historical
 	// per-process, deleted-on-close behaviour exactly.
 	persist bool
@@ -422,25 +422,25 @@ func newHLS(selfBase string, cfg HLSConfig, settings SettingsSource) *hlsManager
 // instead of a fixed, shared, 0755 path — which a co-resident user on a
 // multi-user host could pre-create (or read) before this process ever
 // started. workDir != "" (HLSConfig.WorkDir / RIVULET_HLS_WORK_DIR, issue
-// #20) creates the same kind of fresh stremio-hls-* directory, rooted under
+// #20) creates the same kind of fresh rivulet-engine-hls-* directory, rooted under
 // workDir instead of the OS default temp dir — e.g. to place HLS segments on
 // a specific fast or large disk. Falls back to the workDir-less behaviour if
 // workDir can't be created/used.
 func newHLSBaseDir(workDir string) string {
 	if workDir != "" {
 		if err := os.MkdirAll(workDir, 0o700); err == nil {
-			if base, mkErr := os.MkdirTemp(workDir, "stremio-hls-*"); mkErr == nil {
+			if base, mkErr := os.MkdirTemp(workDir, "rivulet-engine-hls-*"); mkErr == nil {
 				return base
 			}
 		}
 		logging.For("media").Warn("RIVULET_HLS_WORK_DIR unusable; falling back to the OS temp dir", "work_dir", workDir)
 	}
-	base, err := os.MkdirTemp("", "stremio-hls-*")
+	base, err := os.MkdirTemp("", "rivulet-engine-hls-*")
 	if err != nil {
 		// Fall back to a per-process-unique path rather than the old
 		// predictable shared name if MkdirTemp itself fails (e.g. a
 		// read-only default temp dir).
-		base = filepath.Join(os.TempDir(), fmt.Sprintf("stremio-hls-%d", os.Getpid()))
+		base = filepath.Join(os.TempDir(), fmt.Sprintf("rivulet-engine-hls-%d", os.Getpid()))
 		_ = os.MkdirAll(base, 0o700)
 	}
 	return base

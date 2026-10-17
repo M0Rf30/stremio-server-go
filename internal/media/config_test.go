@@ -476,8 +476,8 @@ func TestNewHLSBaseDirWorkDirOption(t *testing.T) {
 	if !strings.HasPrefix(base, sub) {
 		t.Errorf("newHLSBaseDir(%q) = %q, want a path rooted under workDir", sub, base)
 	}
-	if !strings.Contains(base, "stremio-hls-") {
-		t.Errorf("newHLSBaseDir(%q) = %q, want a stremio-hls-* leaf name", sub, base)
+	if !strings.Contains(base, "rivulet-engine-hls-") {
+		t.Errorf("newHLSBaseDir(%q) = %q, want a rivulet-engine-hls-* leaf name", sub, base)
 	}
 }
 

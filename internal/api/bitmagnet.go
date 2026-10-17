@@ -7,7 +7,7 @@
 // Routes:
 //
 //	GET /bitmagnet/manifest.json
-//	     → Stremio addon manifest (id community.stremioservergo.bitmagnet, v0.1.0)
+//	     → Stremio addon manifest (id community.rivulet-engine.bitmagnet, v0.1.0)
 //	GET /bitmagnet/stream/<type>/<id>.json
 //	     → {streams:[{infoHash,...}]} from self-hosted Bitmagnet DHT index
 //
@@ -200,7 +200,7 @@ func (s *server) handleBitmagnet(w http.ResponseWriter, r *http.Request, seg []s
 
 func (s *server) bitmagnetManifest(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":          "community.stremioservergo.bitmagnet",
+		"id":          "community.rivulet-engine.bitmagnet",
 		"version":     "0.1.0",
 		"name":        "Bitmagnet (self-hosted DHT)",
 		"description": "Decentralized torrent streams from a self-hosted Bitmagnet DHT index.",

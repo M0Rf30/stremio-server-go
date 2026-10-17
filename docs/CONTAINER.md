@@ -67,7 +67,7 @@ Replace `podman` with `docker` as needed.
 podman run -d \
   --name rivulet-engine \
   -p 11470:11470 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 
@@ -86,7 +86,7 @@ podman run -d \
   -p 11471:11471/tcp \
   -p 11471:11471/udp \
   -e BT_LISTEN_PORT=11471 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 
@@ -101,7 +101,7 @@ podman run -d \
   -p 11470:11470 \
   -p 12470:12470 \
   -e HTTPS_PORT=12470 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 
@@ -147,12 +147,12 @@ services:
       APP_PATH: /data
       TZ: Europe/Rome
     volumes:
-      - /mnt/POOL/apps/stremio:/data   # replace POOL with your pool/dataset
+      - /mnt/POOL/apps/rivulet-engine:/data   # replace POOL with your pool/dataset
 ```
 
-Create the dataset first (e.g. `/mnt/tank/apps/stremio`) and make it writable by
+Create the dataset first (e.g. `/mnt/tank/apps/rivulet-engine`) and make it writable by
 the container user (**uid/gid 1000**): from a TrueNAS shell run
-`chown -R 1000:1000 /mnt/tank/apps/stremio`. The image runs as non-root uid 1000
+`chown -R 1000:1000 /mnt/tank/apps/rivulet-engine`. The image runs as non-root uid 1000
 by design. Then point any Stremio client's **streaming server URL** at
 `http://HOST:11470`.
 
@@ -179,7 +179,7 @@ services:
       # optional: stream through a bounded RAM cache instead of disk (bytes; 0 = disk)
       # RIVULET_MEMORY_CACHE_SIZE: "536870912"   # 512 MiB
     volumes:
-      - /mnt/POOL/apps/stremio:/data
+      - /mnt/POOL/apps/rivulet-engine:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:11470/heartbeat"]
       interval: 30s
@@ -272,7 +272,7 @@ podman run -d \
   -e RIVULET_BT_ENCRYPTION=require \
   -e RIVULET_BT_PROXY=socks5://127.0.0.1:9050 \
   -e RIVULET_BT_ANONYMOUS=1 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 
@@ -295,7 +295,7 @@ podman run -d \
   -e RIVULET_PROXY_PASSWORD=change-me \
   -e RIVULET_PROXY_SECRET=$(openssl rand -hex 32) \
   -e RIVULET_PROXY_IP_ACL=10.0.0.0/8 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 
@@ -312,7 +312,7 @@ podman run -d \
   --name rivulet-engine \
   -p 11470:11470 \
   -e RIVULET_DISABLE_TRACKERS=1 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 
@@ -327,7 +327,7 @@ podman run -d \
   -e RIVULET_TORZNAB_URL=http://prowlarr:9696/1/api \
   -e RIVULET_TORZNAB_APIKEY=your-api-key \
   -e RIVULET_BITMAGNET_URL=http://bitmagnet:3333/graphql \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 
@@ -347,7 +347,7 @@ libx264 automatically.  To pass GPU devices into the container:
 podman run -d \
   --name rivulet-engine \
   -p 11470:11470 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   --device /dev/dri \
   --group-add keep-groups \
   -e RIVULET_HWACCEL=vaapi \
@@ -364,7 +364,7 @@ Requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud
 docker run -d \
   --name rivulet-engine \
   -p 11470:11470 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   --gpus all \
   -e RIVULET_HWACCEL=nvenc \
   rivulet-engine

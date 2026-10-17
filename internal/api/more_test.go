@@ -48,8 +48,8 @@ func TestHandlerBitmagnetManifest(t *testing.T) {
 		t.Errorf("status = %d; want 200", rec.Code)
 	}
 	m := decodeJSON(t, rec.Body.Bytes())
-	if id, _ := m["id"].(string); id != "community.stremioservergo.bitmagnet" {
-		t.Errorf("bitmagnet manifest id = %q; want community.stremioservergo.bitmagnet", id)
+	if id, _ := m["id"].(string); id != "community.rivulet-engine.bitmagnet" {
+		t.Errorf("bitmagnet manifest id = %q; want community.rivulet-engine.bitmagnet", id)
 	}
 }
 
@@ -72,8 +72,8 @@ func TestHandlerTorznabManifest(t *testing.T) {
 		t.Errorf("status = %d; want 200", rec.Code)
 	}
 	m := decodeJSON(t, rec.Body.Bytes())
-	if id, _ := m["id"].(string); id != "community.stremioservergo.torznab" {
-		t.Errorf("torznab manifest id = %q; want community.stremioservergo.torznab", id)
+	if id, _ := m["id"].(string); id != "community.rivulet-engine.torznab" {
+		t.Errorf("torznab manifest id = %q; want community.rivulet-engine.torznab", id)
 	}
 }
 
@@ -94,8 +94,8 @@ func TestHandlerLocalAddonManifest(t *testing.T) {
 		t.Errorf("status = %d; want 200", rec.Code)
 	}
 	m := decodeJSON(t, rec.Body.Bytes())
-	if id, _ := m["id"].(string); id != "org.stremio.local.go" {
-		t.Errorf("local addon manifest id = %q; want org.stremio.local.go", id)
+	if id, _ := m["id"].(string); id != "community.rivulet-engine.local" {
+		t.Errorf("local addon manifest id = %q; want community.rivulet-engine.local", id)
 	}
 }
 

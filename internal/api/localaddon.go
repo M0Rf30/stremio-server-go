@@ -7,7 +7,7 @@
 // Routes:
 //
 //	GET /local-addon/manifest.json
-//	     → Stremio addon manifest (id org.stremio.local.go, v1.0.0)
+//	     → Stremio addon manifest (id community.rivulet-engine.local, v1.0.0)
 //	GET /local-addon/catalog/:type/:id[.json]
 //	     → {metas:[{id,type,name,poster?}]} — scans LOCAL_FILES_DIR for video files
 //	GET /local-addon/meta/:type/:id[.json]
@@ -621,7 +621,7 @@ func (s *server) handleLocalAddon(w http.ResponseWriter, r *http.Request, seg []
 // idPrefixes includes both "local:" (unresolved) and "tt" (IMDB-resolved).
 func (s *server) localAddonManifest(w http.ResponseWriter, r *http.Request) {
 	manifest := map[string]any{
-		"id":          "org.stremio.local.go",
+		"id":          "community.rivulet-engine.local",
 		"version":     "1.0.0",
 		"name":        "Local Files (Go)",
 		"description": "Local video files served by rivulet-engine with IMDB resolution",

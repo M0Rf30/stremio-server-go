@@ -390,7 +390,7 @@ func TestHandlerMetrics(t *testing.T) {
 		t.Errorf("Content-Type = %q; want text/plain", ct)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "# HELP stremio_goroutines") {
+	if !strings.Contains(body, "# HELP rivulet_engine_goroutines") {
 		t.Errorf("metrics body missing goroutines gauge; got: %s", body[:min(200, len(body))])
 	}
 }

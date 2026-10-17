@@ -6,21 +6,21 @@ package media
 
 // Opt-in HLS session persistence (HLSConfig.Persist / RIVULET_HLS_PERSIST).
 //
-// By default every hlsManager gets a fresh, random, owner-only stremio-hls-*
+// By default every hlsManager gets a fresh, random, owner-only rivulet-engine-hls-*
 // directory (MED-2, see newHLSBaseDir) that CloseHLS deletes, and session
 // state lives only in memory, so a restart throws away every transcoded
 // segment. With Persist on (and WorkDir set) the manager instead uses the
-// stable directory <WorkDir>/stremio-hls-persist, writes a session.json next
+// stable directory <WorkDir>/rivulet-engine-hls-persist, writes a session.json next
 // to each session's segments, keeps the directory on CloseHLS, and on
 // startup rehydrates every still-valid session so already-transcoded
 // segments are served straight from disk.
 //
 // Layout:
 //
-//	<WorkDir>/stremio-hls-persist/        0700, must be ours; exclusively locked while in use
-//	<WorkDir>/stremio-hls-persist/.lock   the lock file (see lockPersistDir)
-//	<WorkDir>/stremio-hls-persist/<id>/   0700, one directory per session id
-//	<WorkDir>/stremio-hls-persist/<id>/session.json   0600, written atomically
+//	<WorkDir>/rivulet-engine-hls-persist/        0700, must be ours; exclusively locked while in use
+//	<WorkDir>/rivulet-engine-hls-persist/.lock   the lock file (see lockPersistDir)
+//	<WorkDir>/rivulet-engine-hls-persist/<id>/   0700, one directory per session id
+//	<WorkDir>/rivulet-engine-hls-persist/<id>/session.json   0600, written atomically
 //
 // lastAccess durability: session.json is written once at creation (after the
 // first successful probe), then rewritten by the reaper on each tick only for
@@ -56,7 +56,7 @@ const (
 	// persistDirName is the fixed directory under HLSConfig.WorkDir that holds
 	// persistent sessions. Fixed (not random) by design: the next process has
 	// to find it.
-	persistDirName = "stremio-hls-persist"
+	persistDirName = "rivulet-engine-hls-persist"
 	// persistLockName is the lock file inside the persist dir.
 	persistLockName = ".lock"
 	// sessionFileName is the per-session metadata file.
@@ -308,7 +308,7 @@ func newHLSBase(cfg HLSConfig) (base string, persist bool, lock io.Closer) {
 	return newHLSBaseDir(cfg.WorkDir), false, nil
 }
 
-// preparePersistDir creates (or reuses) <workDir>/stremio-hls-persist and
+// preparePersistDir creates (or reuses) <workDir>/rivulet-engine-hls-persist and
 // takes its exclusive lock.
 //
 // Unlike newHLSBaseDir the name is predictable, which is what MED-2 moved

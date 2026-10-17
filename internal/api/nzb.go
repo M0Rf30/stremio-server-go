@@ -153,7 +153,7 @@ const nzbSessionTTL = time.Hour
 
 // nzbTmpDirPrefix is the temp-dir prefix of NZB session dirs; only dirs with
 // exactly this prefix are ever swept.
-const nzbTmpDirPrefix = "stremio-nzb-"
+const nzbTmpDirPrefix = "rivulet-engine-nzb-"
 
 // nzbSweepStale removes NZB session dirs under root that no live session owns
 // and that have not been modified within an hour (leaked by a prior process).

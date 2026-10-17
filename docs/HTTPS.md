@@ -102,7 +102,7 @@ podman run -d \
   -p 11470:11470 \
   -p 12470:12470 \
   -e HTTPS_PORT=12470 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 
@@ -137,7 +137,7 @@ podman run -d \
   -e HTTPS_PORT=12470 \
   -e RIVULET_CERT_AUTHKEY=<your-stremio-authkey> \
   -e RIVULET_CERT_IP=192.168.0.62 \
-  -v stremio-data:/data \
+  -v rivulet-engine-data:/data \
   rivulet-engine
 ```
 

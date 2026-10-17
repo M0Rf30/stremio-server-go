@@ -176,7 +176,7 @@ func symlinkOrSkip(t *testing.T, target, link string) {
 }
 
 // TestHLSPersistOffUnchanged: with Persist off, newHLSBase is exactly
-// newHLSBaseDir (a fresh random stremio-hls-* dir, under WorkDir when set)
+// newHLSBaseDir (a fresh random rivulet-engine-hls-* dir, under WorkDir when set)
 // and CloseHLS still deletes it.
 func TestHLSPersistOffUnchanged(t *testing.T) {
 	for _, workDir := range []string{"", t.TempDir()} {
@@ -184,8 +184,8 @@ func TestHLSPersistOffUnchanged(t *testing.T) {
 		if persist || lock != nil {
 			t.Fatalf("WorkDir=%q: persist enabled without Persist", workDir)
 		}
-		if !strings.HasPrefix(filepath.Base(base), "stremio-hls-") || filepath.Base(base) == persistDirName {
-			t.Errorf("WorkDir=%q: base = %q, want a random stremio-hls-* dir", workDir, base)
+		if !strings.HasPrefix(filepath.Base(base), "rivulet-engine-hls-") || filepath.Base(base) == persistDirName {
+			t.Errorf("WorkDir=%q: base = %q, want a random rivulet-engine-hls-* dir", workDir, base)
 		}
 		if workDir != "" && filepath.Dir(base) != workDir {
 			t.Errorf("base %q not under WorkDir %q", base, workDir)
@@ -205,8 +205,8 @@ func TestHLSPersistWithoutWorkDirWarns(t *testing.T) {
 	if persist {
 		t.Fatal("persistence enabled without WorkDir")
 	}
-	if !strings.HasPrefix(filepath.Base(base), "stremio-hls-") || filepath.Base(base) == persistDirName {
-		t.Errorf("base = %q, want a random stremio-hls-* dir", base)
+	if !strings.HasPrefix(filepath.Base(base), "rivulet-engine-hls-") || filepath.Base(base) == persistDirName {
+		t.Errorf("base = %q, want a random rivulet-engine-hls-* dir", base)
 	}
 	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "RIVULET_HLS_PERSIST requires RIVULET_HLS_WORK_DIR") {
 		t.Errorf("missing warning; logs:\n%s", got)
@@ -764,8 +764,8 @@ func TestHLSPersistLockExclusive(t *testing.T) {
 	if persist2 || lock2 != nil || base2 == base1 {
 		t.Fatalf("second manager shared a locked persist dir (base=%q)", base2)
 	}
-	if filepath.Dir(base2) != work || !strings.HasPrefix(filepath.Base(base2), "stremio-hls-") {
-		t.Errorf("fallback base = %q, want a random stremio-hls-* dir under %q", base2, work)
+	if filepath.Dir(base2) != work || !strings.HasPrefix(filepath.Base(base2), "rivulet-engine-hls-") {
+		t.Errorf("fallback base = %q, want a random rivulet-engine-hls-* dir under %q", base2, work)
 	}
 	if !strings.Contains(logs.String(), errPersistLocked.Error()) {
 		t.Errorf("lock conflict not logged:\n%s", logs.String())
@@ -855,8 +855,8 @@ func TestHLSPersistRefusesSymlinkedDir(t *testing.T) {
 	if persist {
 		t.Fatal("symlinked persist dir accepted")
 	}
-	if !strings.HasPrefix(filepath.Base(base), "stremio-hls-") || filepath.Base(base) == persistDirName {
-		t.Errorf("fallback base = %q, want a random stremio-hls-* dir", base)
+	if !strings.HasPrefix(filepath.Base(base), "rivulet-engine-hls-") || filepath.Base(base) == persistDirName {
+		t.Errorf("fallback base = %q, want a random rivulet-engine-hls-* dir", base)
 	}
 	if !strings.Contains(logs.String(), "HLS persist dir unusable") {
 		t.Errorf("refusal not logged:\n%s", logs.String())

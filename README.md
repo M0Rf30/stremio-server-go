@@ -132,7 +132,7 @@ Then point any Stremio client's **streaming server URL** at
 | `RIVULET_HLS_POS_PROBE_TTL` | `600` (`10m`) | seconds (or a duration string) a successful `ffprobe` result is cached, so duplicate HLS sessions for the same URL skip re-probing. |
 | `RIVULET_HLS_SESSION_OVERRIDES` | _(off)_ | `1`/`true` lets the request that creates an HLS session override its idle TTL and output quality via query parameters on `GET /hlsv2/{id}/master.m3u8` (see [Per-session HLS overrides](#per-session-hls-overrides)). Off by default: the parameters are then ignored entirely. **With the gate on, clients can raise as well as lower the env and `/settings` limits; enable it only when every client that can reach the server is trusted.** |
 | `RIVULET_HLS_MAX_SESSIONS` | `64` | hard cap on simultaneously registered HLS transcode sessions. |
-| `RIVULET_HLS_WORK_DIR` | _(OS temp dir)_ | root directory for HLS segment working directories (`stremio-hls-*` created under it). Unset uses the OS default temp dir, matching prior behaviour. Set to move segment I/O onto a specific fast or large disk. |
+| `RIVULET_HLS_WORK_DIR` | _(OS temp dir)_ | root directory for HLS segment working directories (`rivulet-engine-hls-*` created under it). Unset uses the OS default temp dir, matching prior behaviour. Set to move segment I/O onto a specific fast or large disk. |
 | `RIVULET_HLS_PERSIST` | _(off)_ | `1`/`true` keeps HLS sessions and their transcoded segments across restarts. Requires `RIVULET_HLS_WORK_DIR` and, to be useful, a much longer `RIVULET_HLS_SESSION_TTL`. See [Persistent HLS sessions](#persistent-hls-sessions). |
 | `RIVULET_HLS_PRIVATE_ALLOW` | _(unset)_ | comma-separated IPs, CIDRs and hostnames (e.g. `192.168.1.10,10.0.0.0/24,nas.lan`) that a media URL may point at: `/hlsv2` `mediaURL`, `/probe` and `/tracks`, including their redirects and nested playlists. Checked before the session starts and again on the IP actually dialed (DNS-rebinding-safe). Unset, every private, loopback and link-local host is refused. Separate from `RIVULET_PROXY_PRIVATE_ALLOW`: these routes have no password, so anything listed here is reachable by every client that can reach the server. Subtitle and `/opensubHash` fetches never use it, and cloud-metadata can never be allowlisted. |
 | `RIVULET_HLS_VAAPI_DEVICE` | `/dev/dri/renderD128` | VAAPI render-node device path used for hardware transcoding. Override on multi-GPU hosts (e.g. `/dev/dri/renderD129`). |
@@ -296,10 +296,10 @@ HLG path via their base layer.
 ### Persistent HLS sessions
 
 By default HLS sessions live in memory and in a fresh random
-`stremio-hls-*` directory that is deleted on shutdown, so a restart loses
+`rivulet-engine-hls-*` directory that is deleted on shutdown, so a restart loses
 every transcoded segment. `RIVULET_HLS_PERSIST=1` (with
 `RIVULET_HLS_WORK_DIR` set; otherwise a warning is logged and nothing
-persists) keeps them in `<RIVULET_HLS_WORK_DIR>/stremio-hls-persist/<id>/`
+persists) keeps them in `<RIVULET_HLS_WORK_DIR>/rivulet-engine-hls-persist/<id>/`
 with a `session.json` each, so a front end can pre-transcode a title hours
 ahead and still have it after a restart, crash or update.
 
@@ -326,7 +326,7 @@ ahead and still have it after a restart, crash or update.
 - **Security.** `session.json` holds the media URL, which can embed
   credentials (e.g. debrid links). It's written `0600`, and the persist
   directory and session directories are `0700`. On POSIX an existing
-  `stremio-hls-persist` that isn't owned by the server's user, or is a
+  `rivulet-engine-hls-persist` that isn't owned by the server's user, or is a
   symlink, is refused (the server falls back to non-persistent mode); one
   that is ours but more open than `0700` is tightened to `0700`. Use a
   dedicated `RIVULET_HLS_WORK_DIR` owned by the server's user, not a shared

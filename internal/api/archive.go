@@ -182,8 +182,8 @@ func archiveStartJanitor() {
 // Temp-name prefixes created by this server for archive sessions. Only names
 // carrying exactly these prefixes are ever swept.
 const (
-	archiveTmpDirPrefix = "stremio-archive-"    // per-session entry dirs (os.MkdirTemp)
-	archiveTmpDLPrefix  = "stremio-archive-dl-" // downloaded archive files (os.CreateTemp)
+	archiveTmpDirPrefix = "rivulet-engine-archive-"    // per-session entry dirs (os.MkdirTemp)
+	archiveTmpDLPrefix  = "rivulet-engine-archive-dl-" // downloaded archive files (os.CreateTemp)
 )
 
 // archiveSweepStale removes archive session temp dirs and downloaded archive

@@ -860,13 +860,13 @@ func (s *server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	// Runtime gauges
-	writeGauge("stremio_goroutines",
+	writeGauge("rivulet_engine_goroutines",
 		"Current number of goroutines.",
 		float64(runtime.NumGoroutine()))
-	writeGauge("stremio_memstats_alloc_bytes",
+	writeGauge("rivulet_engine_memstats_alloc_bytes",
 		"Bytes of allocated heap objects (runtime.MemStats.Alloc).",
 		float64(ms.Alloc))
-	writeGauge("stremio_memstats_sys_bytes",
+	writeGauge("rivulet_engine_memstats_sys_bytes",
 		"Total bytes of memory obtained from the OS (runtime.MemStats.Sys).",
 		float64(ms.Sys))
 
@@ -875,7 +875,7 @@ func (s *server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	if v, ok := s.em.(interface{ NumTorrents() int }); ok {
 		torrents = v.NumTorrents()
 	}
-	writeGauge("stremio_torrents_active",
+	writeGauge("rivulet_engine_torrents_active",
 		"Number of active torrent engines.",
 		float64(torrents))
 
@@ -883,15 +883,15 @@ func (s *server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	if v, ok := s.prober.(interface{ HLSSessions() int }); ok {
 		hlsSessions = v.HLSSessions()
 	}
-	writeGauge("stremio_hls_sessions",
+	writeGauge("rivulet_engine_hls_sessions",
 		"Number of active HLS transcode sessions.",
 		float64(hlsSessions))
 
 	cacheEntries, cacheBytes := s.sp.CacheStats()
-	writeGauge("stremio_proxy_cache_entries",
+	writeGauge("rivulet_engine_proxy_cache_entries",
 		"Number of entries in the stream-proxy segment cache.",
 		float64(cacheEntries))
-	writeGauge("stremio_proxy_cache_bytes",
+	writeGauge("rivulet_engine_proxy_cache_bytes",
 		"Total bytes used by the stream-proxy segment cache.",
 		float64(cacheBytes))
 
