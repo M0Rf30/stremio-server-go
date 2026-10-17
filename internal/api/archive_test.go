@@ -53,18 +53,18 @@ func TestValidateFetchHost_AllowsPublic(t *testing.T) {
 	}
 }
 
-// TestValidateFetchHost_AllowPrivateOptIn verifies STREMIO_ARCHIVE_ALLOW_PRIVATE
+// TestValidateFetchHost_AllowPrivateOptIn verifies RIVULET_ARCHIVE_ALLOW_PRIVATE
 // restores the ability to target private/loopback hosts, which is a
 // supported use case (archives hosted on a LAN NAS or sibling container).
 func TestValidateFetchHost_AllowPrivateOptIn(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	if err := validateFetchHost("http://127.0.0.1:8080/admin"); err != nil {
 		t.Errorf("validateFetchHost with opt-in = %v; want nil", err)
 	}
 }
 
 // TestArchiveAllowPrivateHostsParsing exercises the accepted truthy/falsy
-// spellings of STREMIO_ARCHIVE_ALLOW_PRIVATE.
+// spellings of RIVULET_ARCHIVE_ALLOW_PRIVATE.
 func TestArchiveAllowPrivateHostsParsing(t *testing.T) {
 	cases := map[string]bool{
 		"":      false,
@@ -77,7 +77,7 @@ func TestArchiveAllowPrivateHostsParsing(t *testing.T) {
 		"on":    true,
 	}
 	for v, want := range cases {
-		t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", v)
+		t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", v)
 		if got := archiveAllowPrivateHosts(); got != want {
 			t.Errorf("archiveAllowPrivateHosts() with env=%q = %v, want %v", v, got, want)
 		}
@@ -87,10 +87,10 @@ func TestArchiveAllowPrivateHostsParsing(t *testing.T) {
 // ─── archiveResolveLocalPath (local-path allowlist confinement) ───────────
 
 // TestArchiveResolveLocalPath_DisabledByDefault verifies local-path archives
-// are rejected outright when neither STREMIO_ARCHIVE_LOCAL_ROOT nor
+// are rejected outright when neither RIVULET_ARCHIVE_LOCAL_ROOT nor
 // LOCAL_FILES_DIR is set.
 func TestArchiveResolveLocalPath_DisabledByDefault(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", "")
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", "")
 	t.Setenv("LOCAL_FILES_DIR", "")
 	if _, err := archiveResolveLocalPath("/etc/passwd"); err == nil {
 		t.Error("expected error when no local root is configured, got nil")
@@ -101,7 +101,7 @@ func TestArchiveResolveLocalPath_DisabledByDefault(t *testing.T) {
 // configured root resolves without error.
 func TestArchiveResolveLocalPath_WithinRoot(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", root)
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", root)
 	t.Setenv("LOCAL_FILES_DIR", "")
 
 	target := filepath.Join(root, "movie.zip")
@@ -120,10 +120,10 @@ func TestArchiveResolveLocalPath_WithinRoot(t *testing.T) {
 
 // TestArchiveResolveLocalPath_LocalFilesDirFallback verifies LOCAL_FILES_DIR
 // (the existing local-files-addon convention) is used as the root when
-// STREMIO_ARCHIVE_LOCAL_ROOT is unset.
+// RIVULET_ARCHIVE_LOCAL_ROOT is unset.
 func TestArchiveResolveLocalPath_LocalFilesDirFallback(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", "")
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", "")
 	t.Setenv("LOCAL_FILES_DIR", root)
 
 	target := filepath.Join(root, "movie.zip")
@@ -144,7 +144,7 @@ func TestArchiveResolveLocalPath_TraversalEscape(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("zip"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", root)
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", root)
 	t.Setenv("LOCAL_FILES_DIR", "")
 
 	escape := filepath.Join(root, "..", "secret.zip")
@@ -175,7 +175,7 @@ func TestArchiveResolveLocalPath_SymlinkEscape(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatalf("Symlink: %v", err)
 	}
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", root)
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", root)
 	t.Setenv("LOCAL_FILES_DIR", "")
 
 	via := filepath.Join(link, "secret.zip")
@@ -210,7 +210,7 @@ func TestHandlerArchiveCreate_LocalPathUniformRejection(t *testing.T) {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", root)
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", root)
 	t.Setenv("LOCAL_FILES_DIR", "")
 
 	outsidePath := filepath.Join(parent, "definitely-exists-but-outside-root.zip")
@@ -241,7 +241,7 @@ func TestHandlerArchiveCreate_LocalPathUniformRejection(t *testing.T) {
 // rejected — the finding's core repro ({"url":"/home/<user>/Downloads/foo.zip"})
 // no longer succeeds by default.
 func TestHandlerArchiveCreate_LocalPathDisabledByDefault(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", "")
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", "")
 	t.Setenv("LOCAL_FILES_DIR", "")
 
 	real := filepath.Join(t.TempDir(), "real.zip")

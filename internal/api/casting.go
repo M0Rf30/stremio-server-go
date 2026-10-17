@@ -195,7 +195,7 @@ const (
 // @Failure  404
 // @Router   /casting/{id} [get]
 func (s *server) handleCasting(w http.ResponseWriter, r *http.Request, seg []string) {
-	// DLNA is opt-in (STREMIO_ENABLE_DLNA). When disabled, advertise no devices
+	// DLNA is opt-in (RIVULET_ENABLE_DLNA). When disabled, advertise no devices
 	// so clients show nothing castable, and 404 any device/control sub-route — no
 	// SSDP discovery runs in this mode.
 	if !s.cfg.EnableDLNA {

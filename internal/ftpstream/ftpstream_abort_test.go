@@ -60,7 +60,7 @@ func waitCtxHookFired(tb testing.TB, rc io.ReadCloser) {
 // logged-in control connection (the cancel hook force-closed it), so N aborted
 // seeks cost N logins; they must now share one session.
 func TestOpenFTPRequestAbortSessionReused(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(8 << 20)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content})
@@ -131,7 +131,7 @@ func TestOpenFTPRequestAbortSessionReused(t *testing.T) {
 // context has to kill the control connection too, or the goroutine would sit
 // there for the whole idle timeout.
 func TestOpenFTPCtxCancelDuringOpenUnblocks(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{silentGreeting: true})
 
@@ -174,7 +174,7 @@ func setAbortGrace(t *testing.T, d time.Duration) {
 // reply, which must therefore not be bounded by it (or every read would fail
 // instantly and the healthy session be thrown away).
 func TestOpenFTPCtxDeadlineSessionReused(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(8 << 20)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content})
@@ -210,7 +210,7 @@ func TestOpenFTPCtxDeadlineSessionReused(t *testing.T) {
 // cancel hook already closed must not turn Close's result into an error that
 // hides it — the session is still in sync and must be pooled.
 func TestOpenFTPCtxCancelAfterCompleteTransferSessionReused(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(64 << 10)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content})
@@ -276,7 +276,7 @@ func TestOpenFTPRefusedRetrKeepsPooledSession(t *testing.T) {
 		{"425 can't open data connection", 425},
 	} {
 		t.Run(strconv.Itoa(tc.code), func(t *testing.T) {
-			t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+			t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 			resetFTPCaches(t)
 			content := poolTestContent(1000)
 			srv := newFakeFTPServer(t, &fakeFTPServer{content: content})
@@ -318,7 +318,7 @@ func TestOpenFTPRefusedRetrKeepsPooledSession(t *testing.T) {
 // rule: 421 (service closing the control connection) is a sign the pooled
 // session is gone, so one redial on a fresh session is still made.
 func TestOpenFTPServerClosingStillRedials(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(1000)})
 	u := "ftp://" + srv.addr() + "/f"
@@ -345,7 +345,7 @@ func TestOpenFTPServerClosingStillRedials(t *testing.T) {
 // connection: the PASV/EPSV reply was consumed, so the session is in sync and
 // a redial would only fail the same way.
 func TestOpenFTPDataDialFailureKeepsPooledSession(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(1000)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content})

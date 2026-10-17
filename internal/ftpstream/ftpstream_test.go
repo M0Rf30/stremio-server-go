@@ -268,7 +268,7 @@ func newRangeServer(t *testing.T, body []byte, rangeHdr *string) *httptest.Serve
 
 // TestOpenHTTPFullRead tests openHTTP at offset=0: full body, size from Content-Length.
 func TestOpenHTTPFullRead(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")      // exercises openHTTP itself, not the SSRF guard
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")      // exercises openHTTP itself, not the SSRF guard
 	content := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 26 bytes
 	srv := newRangeServer(t, content, nil)
 
@@ -300,7 +300,7 @@ func TestOpenHTTPFullRead(t *testing.T) {
 //   - Size is inferred from Content-Range header
 //   - The reader yields only the tail bytes starting at offset
 func TestOpenHTTPRangeRead(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")      // exercises openHTTP itself, not the SSRF guard
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")      // exercises openHTTP itself, not the SSRF guard
 	content := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 26 bytes
 	const offset = int64(10)
 
@@ -338,7 +338,7 @@ func TestOpenHTTPRangeRead(t *testing.T) {
 // TestOpenHTTPRangeNoContentRange covers the 206 path where the server omits
 // Content-Range but sets Content-Length; size = offset + ContentLength.
 func TestOpenHTTPRangeNoContentRange(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")      // exercises openHTTP itself, not the SSRF guard
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")      // exercises openHTTP itself, not the SSRF guard
 	content := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 26 bytes
 	const offset = int64(10)
 
@@ -394,7 +394,7 @@ func TestOpenHTTPBadStatus(t *testing.T) {
 
 // TestOpenHTTPClose verifies that the returned ReadCloser.Close() does not error.
 func TestOpenHTTPClose(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1") // exercises openHTTP itself, not the SSRF guard
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1") // exercises openHTTP itself, not the SSRF guard
 	content := []byte("close test body")
 	srv := newRangeServer(t, content, nil)
 
@@ -423,7 +423,7 @@ func TestOpenHTTPClose(t *testing.T) {
 // TestOpenDispatch verifies that Open routes http/https to openHTTP and returns
 // errors for unsupported schemes and malformed URLs.
 func TestOpenDispatch(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1") // exercises Open's dispatch, not the SSRF guard
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1") // exercises Open's dispatch, not the SSRF guard
 	content := []byte("dispatch test content — 21 bytes")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -474,7 +474,7 @@ func TestOpenDispatch(t *testing.T) {
 
 // TestOpenHTTPWithOffset exercises the Open top-level path with offset > 0.
 func TestOpenHTTPWithOffset(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1") // exercises Open's dispatch, not the SSRF guard
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1") // exercises Open's dispatch, not the SSRF guard
 	content := []byte("0123456789ABCDEFGHIJ")  // 20 bytes
 	const offset = int64(5)
 
@@ -548,7 +548,7 @@ func TestOpenHTTPCtxPreCancelled(t *testing.T) {
 // TestOpenHTTPSizeUnknown checks that openHTTP returns size=-1 when the server
 // sends neither Content-Length nor Content-Range.
 func TestOpenHTTPSizeUnknown(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1") // exercises openHTTP itself, not the SSRF guard
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1") // exercises openHTTP itself, not the SSRF guard
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Write status first, then flush so headers are committed without
 		// Content-Length. This forces chunked transfer encoding, making
@@ -618,7 +618,7 @@ func TestOpenHTTPBlocksCloudMetadata(t *testing.T) {
 }
 
 // TestOpenHTTPBlocksPrivateByDefault verifies that openHTTP rejects a
-// loopback target by default (STREMIO_FTP_ALLOW_PRIVATE unset), closing the
+// loopback target by default (RIVULET_FTP_ALLOW_PRIVATE unset), closing the
 // SSRF finding that previously let /ftp?lz= reach 127.0.0.1 and RFC1918
 // hosts (netguard.DialControl(false) only blocked cloud-metadata). The local
 // handler must never be invoked: the Control hook aborts the dial before any
@@ -643,18 +643,18 @@ func TestOpenHTTPBlocksPrivateByDefault(t *testing.T) {
 	}
 }
 
-// TestOpenHTTPAllowPrivateOptIn verifies that STREMIO_FTP_ALLOW_PRIVATE=1
+// TestOpenHTTPAllowPrivateOptIn verifies that RIVULET_FTP_ALLOW_PRIVATE=1
 // restores the ability to reach loopback/LAN targets, a supported use case
 // (streaming from a local NAS) that must remain available as an explicit
 // opt-in.
 func TestOpenHTTPAllowPrivateOptIn(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	content := []byte("nas-file-contents")
 	srv := newRangeServer(t, content, nil)
 
 	rc, size, err := openHTTP(t.Context(), srv.URL+"/file.bin", 0)
 	if err != nil {
-		t.Fatalf("openHTTP with STREMIO_FTP_ALLOW_PRIVATE=1: %v", err)
+		t.Fatalf("openHTTP with RIVULET_FTP_ALLOW_PRIVATE=1: %v", err)
 	}
 	defer func() { _ = rc.Close() }()
 	if size != int64(len(content)) {
@@ -684,7 +684,7 @@ func TestOpenFTPBlocksPrivateByDefault(t *testing.T) {
 }
 
 // TestFtpAllowPrivateParsing exercises ftpAllowPrivate's accepted truthy/falsy
-// spellings of STREMIO_FTP_ALLOW_PRIVATE.
+// spellings of RIVULET_FTP_ALLOW_PRIVATE.
 func TestFtpAllowPrivateParsing(t *testing.T) {
 	cases := map[string]bool{
 		"":      false,
@@ -698,7 +698,7 @@ func TestFtpAllowPrivateParsing(t *testing.T) {
 		"ON":    true,
 	}
 	for v, want := range cases {
-		t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", v)
+		t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", v)
 		if got := ftpAllowPrivate(); got != want {
 			t.Errorf("ftpAllowPrivate() with env=%q = %v, want %v", v, got, want)
 		}

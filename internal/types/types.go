@@ -29,7 +29,7 @@ type Config struct {
 	ListenPort  int    // BitTorrent peer listen port (0 = random)
 	WebUI       string // redirect target for "GET /" (e.g. https://web.stremio.com/)
 	// PublicURL is this server's externally reachable base URL behind a
-	// reverse proxy (STREMIO_PUBLIC_URL), e.g. https://stremio.example.com.
+	// reverse proxy (RIVULET_PUBLIC_URL), e.g. https://stremio.example.com.
 	// When set it is used verbatim for the GET / landing redirect and the
 	// /settings baseUrl instead of deriving them from r.TLS / the first local
 	// interface, which are wrong when TLS terminates at an edge proxy. It is
@@ -37,17 +37,17 @@ type Config struct {
 	// LocalFilesPublicURL, which must be opted into explicitly).
 	PublicURL   string
 	Version     string // value reported as settings.serverVersion
-	TrackersMax int    // max ranked UDP/HTTP trackers per torrent (STREMIO_TRACKERS_MAX; 0 = default)
-	// remote tracker list source (STREMIO_TRACKERS_URL); "" disables the remote
+	TrackersMax int    // max ranked UDP/HTTP trackers per torrent (RIVULET_TRACKERS_MAX; 0 = default)
+	// remote tracker list source (RIVULET_TRACKERS_URL); "" disables the remote
 	// fetch (embedded/cached list + DHT/PEX only). Default: a curated public list.
 	TrackersURL string
-	// disable ALL BitTorrent tracker announces (DHT/PEX/webseeds still used); STREMIO_DISABLE_TRACKERS; default false
+	// disable ALL BitTorrent tracker announces (DHT/PEX/webseeds still used); RIVULET_DISABLE_TRACKERS; default false
 	DisableTrackers bool
-	// disable WebTorrent/WebRTC peers (pion); cuts ~60% of goroutines + RAM; STREMIO_DISABLE_WEBTORRENT; default true (disabled)
+	// disable WebTorrent/WebRTC peers (pion); cuts ~60% of goroutines + RAM; RIVULET_DISABLE_WEBTORRENT; default true (disabled)
 	DisableWebtorrent bool
-	// established peer connections per torrent (scales half-open=n/2, high-water=n*10); STREMIO_PEERS_PER_TORRENT; 0 = default 50
+	// established peer connections per torrent (scales half-open=n/2, high-water=n*10); RIVULET_PEERS_PER_TORRENT; 0 = default 50
 	PeersPerTorrent int
-	// enable DLNA/UPnP casting discovery + control on /casting; STREMIO_ENABLE_DLNA; default false (disabled)
+	// enable DLNA/UPnP casting discovery + control on /casting; RIVULET_ENABLE_DLNA; default false (disabled)
 	EnableDLNA bool
 
 	// Stream proxy configuration.
@@ -57,16 +57,16 @@ type Config struct {
 	ProxyPrebuffer   int    // number of segments to prefetch (0 = off)
 	ProxySegCacheTTL int    // segment cache TTL in seconds (0 = caching off)
 	ProxyPublicURL   string // explicit external base URL for proxy; "" = derive
-	ProxyUpstream    string // global upstream proxy for stream-proxy fetches; "" = direct (STREMIO_PROXY_UPSTREAM; socks5/http)
+	ProxyUpstream    string // global upstream proxy for stream-proxy fetches; "" = direct (RIVULET_PROXY_UPSTREAM; socks5/http)
 	// ProxyPrivateAllow is a comma-separated list of IPs, CIDRs and hostnames the
 	// stream proxy may reach even when private destinations are blocked
-	// (STREMIO_PROXY_PRIVATE_ALLOW); cloud-metadata is never allowed.
+	// (RIVULET_PROXY_PRIVATE_ALLOW); cloud-metadata is never allowed.
 	ProxyPrivateAllow string
 
 	// Declarative /extractor definitions.
-	ExtractorsFile   string // local definitions file; "" = <AppPath>/extractors.json (STREMIO_EXTRACTORS_FILE)
-	ExtractorsURL    string // remote definitions list; "" disables (STREMIO_EXTRACTORS_URL)
-	ExtractorsPubKey string // ed25519 public key (hex/base64) the remote list must be signed with (STREMIO_EXTRACTORS_PUBKEY)
+	ExtractorsFile   string // local definitions file; "" = <AppPath>/extractors.json (RIVULET_EXTRACTORS_FILE)
+	ExtractorsURL    string // remote definitions list; "" disables (RIVULET_EXTRACTORS_URL)
+	ExtractorsPubKey string // ed25519 public key (hex/base64) the remote list must be signed with (RIVULET_EXTRACTORS_PUBKEY)
 
 	// Bitmagnet integration (self-hosted DHT index).
 	BitmagnetURL string // GraphQL endpoint, e.g. http://localhost:3333/graphql; "" disables stream queries
@@ -76,43 +76,43 @@ type Config struct {
 	TorznabAPIKey string // Optional API key appended as &apikey=; "" = no auth
 
 	// Cinemeta-compatible metadata addon base URL used by the /bitmagnet and
-	// /torznab add-ons to resolve an IMDB id to a title (STREMIO_METADATA_URL).
+	// /torznab add-ons to resolve an IMDB id to a title (RIVULET_METADATA_URL).
 	// Default https://v3-cinemeta.strem.io; "" disables the lookup. Accepts any
 	// addon speaking /meta/{type}/{id}.json (Cinemeta, a self-hosted mirror, or
 	// a TMDB/aiometadata addon's configured base).
 	MetadataURL string
 
 	// LocalIMDB enables the local-files add-on's IMDB title->id resolution
-	// (queries IMDb's suggestion API; STREMIO_LOCAL_IMDB, default true). When
+	// (queries IMDb's suggestion API; RIVULET_LOCAL_IMDB, default true). When
 	// false, local files keep filename-parsed titles and local: ids — no
 	// external IMDb call is made.
 	LocalIMDB bool
 	// LocalFilesPublicURL is the externally reachable base URL used for local-file
-	// streams (STREMIO_LOCAL_FILES_PUBLIC_URL). When empty, the local add-on keeps
+	// streams (RIVULET_LOCAL_FILES_PUBLIC_URL). When empty, the local add-on keeps
 	// returning file:// URLs for backwards-compatible same-host playback.
 	LocalFilesPublicURL string
 
 	// Censorship resistance / anonymity.
-	// BitTorrent peer encryption policy (STREMIO_BT_ENCRYPTION): "prefer" (default; encrypt if peer supports, else
+	// BitTorrent peer encryption policy (RIVULET_BT_ENCRYPTION): "prefer" (default; encrypt if peer supports, else
 	// plaintext), "require" (refuse plaintext — DPI evasion), "disable" (no obfuscation).
 	BTEncryption string
 	// upstream proxy for BitTorrent tracker announces, HTTP webseeds, metainfo + tracker-list fetch
-	// (STREMIO_BT_PROXY; socks5://host:port or http(s)://host:port). "" = direct.
+	// (RIVULET_BT_PROXY; socks5://host:port or http(s)://host:port). "" = direct.
 	// NOTE: peer connections are not proxied (anacrolix uses listen-bound sockets for peer dials).
 	BTProxy string
-	// extra DHT bootstrap nodes appended to defaults (STREMIO_DHT_BOOTSTRAP; comma-separated host:port). "" = defaults only.
+	// extra DHT bootstrap nodes appended to defaults (RIVULET_DHT_BOOTSTRAP; comma-separated host:port). "" = defaults only.
 	DHTBootstrap string
-	// hide client version/fingerprint from peers (STREMIO_BT_ANONYMOUS; cc.AnonymousMode). default false.
+	// hide client version/fingerprint from peers (RIVULET_BT_ANONYMOUS; cc.AnonymousMode). default false.
 	BTAnonymous bool
 	// IdleTimeout removes a torrent that has had no open stream readers and no
-	// access for this long (STREMIO_TORRENT_IDLE_TIMEOUT, seconds; default 300,
+	// access for this long (RIVULET_TORRENT_IDLE_TIMEOUT, seconds; default 300,
 	// 0 = disabled). Matches the official server's inactive-torrent reclaim so a
 	// stopped torrent is dropped even when cacheSize is unlimited, while staying
 	// alive long enough for instant scrub/resume/next-episode.
 	IdleTimeout time.Duration
 	// MaxSeedRatio stops a torrent from uploading once its share ratio
 	// (bytes uploaded / bytes downloaded) reaches this value
-	// (STREMIO_MAX_SEED_RATIO; default 0 = unlimited). Enforcement is
+	// (RIVULET_MAX_SEED_RATIO; default 0 = unlimited). Enforcement is
 	// deliberately independent of IdleTimeout: reaching the ratio only pauses
 	// uploading, it never drops the torrent or purges its cache, so seeding can
 	// be capped without shortening how long a torrent stays available for
@@ -121,22 +121,22 @@ type Config struct {
 	MaxSeedRatio float64
 
 	// HTTPLog enables a structured access-log line per request (method, uri,
-	// status, duration_ms, bytes, remote); STREMIO_HTTP_LOG, default false.
+	// status, duration_ms, bytes, remote); RIVULET_HTTP_LOG, default false.
 	HTTPLog bool
 	// AllowedOrigins lists extra origins the HTTP API accepts beyond the
-	// built-in Stremio-web/localhost/own-IP allowlist (STREMIO_ALLOWED_ORIGINS,
+	// built-in Stremio-web/localhost/own-IP allowlist (RIVULET_ALLOWED_ORIGINS,
 	// comma-separated). Entries are either an exact "scheme://host[:port]" /
 	// "host[:port]" origin, or a "*.domain" host wildcard. Ignored when
 	// AllowAllOrigins is true.
 	AllowedOrigins []string
 	// AllowAllOrigins restores the legacy no-Origin-check behavior (every
 	// response gets Access-Control-Allow-Origin: *) when
-	// STREMIO_ALLOWED_ORIGINS is exactly "*". Default false.
+	// RIVULET_ALLOWED_ORIGINS is exactly "*". Default false.
 	AllowAllOrigins bool
 
 	// CreateMetadataWait bounds how long /create, /{infoHash}/create, and
 	// /{infoHash}/{fileIdx} wait for a newly-added torrent's metadata
-	// (Engine.Ready) before returning 504. STREMIO_CREATE_METADATA_TIMEOUT;
+	// (Engine.Ready) before returning 504. RIVULET_CREATE_METADATA_TIMEOUT;
 	// default 90s. Slow-starting torrents/debrid links may need a longer
 	// window than the default.
 	CreateMetadataWait time.Duration
@@ -147,13 +147,13 @@ type Config struct {
 	SelfURL string
 
 	// DVR (MediaFlow/EasyProxy-compatible /record + /api/recordings), opt-in.
-	// DVREnabled is STREMIO_DVR_ENABLED (default false). DVRDir is
-	// STREMIO_DVR_DIR ("" = <AppPath>/recordings). DVRDefaultDuration and
-	// DVRMaxDuration (STREMIO_DVR_DEFAULT_DURATION / _MAX_DURATION) bound one
-	// recording; DVRMaxActive (STREMIO_DVR_MAX_ACTIVE) caps concurrent ffmpeg
-	// recorders; DVRMaxBytes (STREMIO_DVR_MAX_BYTES, 0 = unlimited) caps the
+	// DVREnabled is RIVULET_DVR_ENABLED (default false). DVRDir is
+	// RIVULET_DVR_DIR ("" = <AppPath>/recordings). DVRDefaultDuration and
+	// DVRMaxDuration (RIVULET_DVR_DEFAULT_DURATION / _MAX_DURATION) bound one
+	// recording; DVRMaxActive (RIVULET_DVR_MAX_ACTIVE) caps concurrent ffmpeg
+	// recorders; DVRMaxBytes (RIVULET_DVR_MAX_BYTES, 0 = unlimited) caps the
 	// total size of the recordings directory; DVRRetentionDays
-	// (STREMIO_DVR_RETENTION_DAYS, 0 = keep forever) ages out finished ones.
+	// (RIVULET_DVR_RETENTION_DAYS, 0 = keep forever) ages out finished ones.
 	DVREnabled         bool
 	DVRDir             string
 	DVRDefaultDuration time.Duration
@@ -338,7 +338,7 @@ type SettingsStore interface {
 // pass as query parameters on GET /hlsv2/{id}/master.m3u8 (ttl, maxWidth,
 // maxHeight, bitrate, maxRate, bufSize). Fields hold the raw, unvalidated
 // query values; "" means "not given". The MediaProber owns parsing, bounds
-// checking and the STREMIO_HLS_SESSION_OVERRIDES opt-in gate — with the gate
+// checking and the RIVULET_HLS_SESSION_OVERRIDES opt-in gate — with the gate
 // off every field is ignored, so callers can always pass the query through.
 type HLSSessionOptions struct {
 	TTL       string // idle-eviction TTL: whole seconds or a Go duration string

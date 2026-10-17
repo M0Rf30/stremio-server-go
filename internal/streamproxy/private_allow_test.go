@@ -16,7 +16,7 @@ import (
 
 // TestPrivatePolicy pins who may reach private destinations. The signing
 // secret alone (auto-generated on every install) must not force blocking, or
-// STREMIO_PROXY_ALLOW_PRIVATE would be a no-op.
+// RIVULET_PROXY_ALLOW_PRIVATE would be a no-op.
 func TestPrivatePolicy(t *testing.T) {
 	_, acl, _ := net.ParseCIDR("203.0.113.0/24")
 	allow, _ := netguard.ParseAllow("127.0.0.1")

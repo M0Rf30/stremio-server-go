@@ -32,7 +32,7 @@ func TestTnFetchErrorOmitsAPIKey(t *testing.T) {
 // TestArchiveDownloadSlowerThanShortTimeout verifies large downloads are not
 // killed by the short overall timeout used for small fetches.
 func TestArchiveDownloadSlowerThanShortTimeout(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	old := archiveFetchClient.Timeout
 	archiveFetchClient.Timeout = 50 * time.Millisecond
 	t.Cleanup(func() { archiveFetchClient.Timeout = old })

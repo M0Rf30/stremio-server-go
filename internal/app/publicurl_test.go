@@ -6,7 +6,7 @@ package app
 
 import "testing"
 
-// TestPublicBaseURL pins the validation of STREMIO_PUBLIC_URL: a valid http(s)
+// TestPublicBaseURL pins the validation of RIVULET_PUBLIC_URL: a valid http(s)
 // URL with a host is accepted (trailing slash trimmed), anything else is
 // ignored so it cannot produce a malformed redirect or baseUrl.
 func TestPublicBaseURL(t *testing.T) {
@@ -26,8 +26,8 @@ func TestPublicBaseURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			lookup := MapLookup(map[string]string{"STREMIO_PUBLIC_URL": tc.value})
-			if got := publicBaseURL(lookup, "STREMIO_PUBLIC_URL"); got != tc.want {
+			lookup := MapLookup(map[string]string{"RIVULET_PUBLIC_URL": tc.value})
+			if got := publicBaseURL(lookup, "RIVULET_PUBLIC_URL"); got != tc.want {
 				t.Errorf("publicBaseURL(%q) = %q; want %q", tc.value, got, tc.want)
 			}
 		})

@@ -585,37 +585,37 @@
                     },
                     {
                         "type": "string",
-                        "description": "per-session idle TTL, seconds or Go duration, 60s to 30 days (master.m3u8 only; needs STREMIO_HLS_SESSION_OVERRIDES; also updates an existing session)",
+                        "description": "per-session idle TTL, seconds or Go duration, 60s to 30 days (master.m3u8 only; needs RIVULET_HLS_SESSION_OVERRIDES; also updates an existing session)",
                         "name": "ttl",
                         "in": "query"
                     },
                     {
                         "type": "integer",
-                        "description": "per-session max output width, 16-7680 (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)",
+                        "description": "per-session max output width, 16-7680 (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)",
                         "name": "maxWidth",
                         "in": "query"
                     },
                     {
                         "type": "integer",
-                        "description": "per-session max output height, 16-7680 (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)",
+                        "description": "per-session max output height, 16-7680 (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)",
                         "name": "maxHeight",
                         "in": "query"
                     },
                     {
                         "type": "string",
-                        "description": "per-session video bitrate, ffmpeg syntax e.g. 6M or 1.5M, 100k-200M (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)",
+                        "description": "per-session video bitrate, ffmpeg syntax e.g. 6M or 1.5M, 100k-200M (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)",
                         "name": "bitrate",
                         "in": "query"
                     },
                     {
                         "type": "string",
-                        "description": "per-session video maxrate, \u003e= bitrate when both given, default = bitrate (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)",
+                        "description": "per-session video maxrate, \u003e= bitrate when both given, default = bitrate (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)",
                         "name": "maxRate",
                         "in": "query"
                     },
                     {
                         "type": "string",
-                        "description": "per-session video bufsize, default = 2x bitrate (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)",
+                        "description": "per-session video bufsize, default = 2x bitrate (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)",
                         "name": "bufSize",
                         "in": "query"
                     }

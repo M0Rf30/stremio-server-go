@@ -16,7 +16,7 @@ import (
 // replies 200 with the full body, the returned reader is still positioned at
 // the requested offset.
 func TestOpenHTTPRangeIgnored(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	content := []byte("0123456789ABCDEFGHIJ")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(content)
@@ -40,7 +40,7 @@ func TestOpenHTTPRangeIgnored(t *testing.T) {
 // TestOpenHTTPRangeIgnoredPastEnd verifies an offset beyond a Range-ignoring
 // upstream's body maps to ErrRangeNotSatisfiable.
 func TestOpenHTTPRangeIgnoredPastEnd(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.(http.Flusher).Flush() // chunked: no Content-Length
 		_, _ = w.Write([]byte("short"))
@@ -54,7 +54,7 @@ func TestOpenHTTPRangeIgnoredPastEnd(t *testing.T) {
 
 // TestOpenHTTP416 verifies an upstream 416 maps to ErrRangeNotSatisfiable.
 func TestOpenHTTP416(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 	}))

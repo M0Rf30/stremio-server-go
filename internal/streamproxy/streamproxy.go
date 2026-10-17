@@ -43,14 +43,14 @@ type Config struct {
 	Client        *http.Client  // shared streaming HTTP client
 	UpstreamProxy string        // global outbound proxy URL; "" = direct (socks5/http/https)
 	// TrustedProxies lists extra reverse-proxy CIDRs (beyond loopback) whose
-	// X-Forwarded-* headers are honoured (STREMIO_TRUSTED_PROXIES).
+	// X-Forwarded-* headers are honoured (RIVULET_TRUSTED_PROXIES).
 	TrustedProxies []*net.IPNet
 	// BlockPrivate rejects loopback/private/link-local destinations even when
 	// no auth is configured. The server sets it unless
-	// STREMIO_PROXY_ALLOW_PRIVATE=1. Zero value keeps the legacy behaviour.
+	// RIVULET_PROXY_ALLOW_PRIVATE=1. Zero value keeps the legacy behaviour.
 	BlockPrivate bool
 	// PrivateAllow lists private destinations that stay reachable even when
-	// private addresses are blocked (STREMIO_PROXY_PRIVATE_ALLOW). nil = none.
+	// private addresses are blocked (RIVULET_PROXY_PRIVATE_ALLOW). nil = none.
 	PrivateAllow *netguard.Allow
 	// AppPath is where extractors.json and the cached remote list live.
 	AppPath string
@@ -743,7 +743,7 @@ func peerIP(r *http.Request) net.IP {
 }
 
 // trustedProxyNets holds the operator-configured reverse-proxy CIDRs
-// (STREMIO_TRUSTED_PROXIES) whose forwarded headers are honoured.
+// (RIVULET_TRUSTED_PROXIES) whose forwarded headers are honoured.
 var trustedProxyNets atomic.Pointer[[]*net.IPNet]
 
 // SetTrustedProxies installs the CIDRs of reverse proxies whose
@@ -1124,8 +1124,8 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request) {
 // It rejects non-http(s) schemes, resolves the hostname, and blocks:
 //   - 169.254.169.254 (cloud-metadata endpoint) — always.
 //   - Loopback, RFC 1918, link-local, and ULA addresses — when the proxy has
-//     a password or IP ACL, or STREMIO_PROXY_ALLOW_PRIVATE is unset, unless
-//     the address is on cfg.PrivateAllow (STREMIO_PROXY_PRIVATE_ALLOW).
+//     a password or IP ACL, or RIVULET_PROXY_ALLOW_PRIVATE is unset, unless
+//     the address is on cfg.PrivateAllow (RIVULET_PROXY_PRIVATE_ALLOW).
 //
 // Returns nil when the destination is permitted.
 func (h *Handler) ValidateDest(rawurl string) error {
@@ -1156,8 +1156,8 @@ func (h *Handler) ValidateDest(rawurl string) error {
 	}
 
 	// Private ranges are blocked when the proxy is exposed (password / IP ACL)
-	// or STREMIO_PROXY_ALLOW_PRIVATE is unset, except for addresses on the
-	// STREMIO_PROXY_PRIVATE_ALLOW allowlist.
+	// or RIVULET_PROXY_ALLOW_PRIVATE is unset, except for addresses on the
+	// RIVULET_PROXY_PRIVATE_ALLOW allowlist.
 	protected := h.proxyBlockPrivate()
 
 	for _, ip := range ips {
@@ -1165,7 +1165,7 @@ func (h *Handler) ValidateDest(rawurl string) error {
 			return fmt.Errorf("destination resolves to disallowed cloud-metadata address %s", ip)
 		}
 		if protected && netguard.IsPrivate(ip) && !h.cfg.PrivateAllow.Contains(ip) {
-			return fmt.Errorf("destination resolves to private address %s (proxy is protected; see STREMIO_PROXY_PRIVATE_ALLOW)", ip)
+			return fmt.Errorf("destination resolves to private address %s (proxy is protected; see RIVULET_PROXY_PRIVATE_ALLOW)", ip)
 		}
 	}
 	return nil
@@ -1190,11 +1190,11 @@ func (h *Handler) Authorize(r *http.Request) error {
 
 // proxyBlockPrivate reports whether this handler must block private/loopback
 // destinations for outbound requests made on a client's behalf: either the
-// operator left STREMIO_PROXY_ALLOW_PRIVATE unset (cfg.BlockPrivate) or the
+// operator left RIVULET_PROXY_ALLOW_PRIVATE unset (cfg.BlockPrivate) or the
 // proxy is exposed to untrusted clients (a password or IP ACL is set).
 //
 // The signing secret deliberately does not count: it is auto-generated on
-// every install, so counting it made STREMIO_PROXY_ALLOW_PRIVATE a no-op.
+// every install, so counting it made RIVULET_PROXY_ALLOW_PRIVATE a no-op.
 // Signed URLs are a capability mechanism, not a sign of exposure. Mirrors
 // the "protected" signal in ValidateDest exactly, so a proxy URL and a
 // destination URL are held to the same trust boundary. Addresses on

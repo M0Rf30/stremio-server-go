@@ -24,16 +24,16 @@ import (
 // plain struct; internal/media never calls os.Getenv itself.
 type HLSConfig struct {
 	// --- session lifecycle ---
-	SessionTTL     time.Duration // idle-eviction window (STREMIO_HLS_SESSION_TTL)
-	ReaperInterval time.Duration // reaper scan period (STREMIO_HLS_REAPER_INTERVAL)
-	NegProbeTTL    time.Duration // failed-probe negative cache TTL (STREMIO_HLS_NEG_PROBE_TTL)
-	PosProbeTTL    time.Duration // successful-probe cache TTL (STREMIO_HLS_POS_PROBE_TTL)
-	MaxSessions    int           // hard cap on concurrent sessions (STREMIO_HLS_MAX_SESSIONS)
-	WorkDir        string        // "" = os.MkdirTemp default; else stremio-hls-* under it (STREMIO_HLS_WORK_DIR)
+	SessionTTL     time.Duration // idle-eviction window (RIVULET_HLS_SESSION_TTL)
+	ReaperInterval time.Duration // reaper scan period (RIVULET_HLS_REAPER_INTERVAL)
+	NegProbeTTL    time.Duration // failed-probe negative cache TTL (RIVULET_HLS_NEG_PROBE_TTL)
+	PosProbeTTL    time.Duration // successful-probe cache TTL (RIVULET_HLS_POS_PROBE_TTL)
+	MaxSessions    int           // hard cap on concurrent sessions (RIVULET_HLS_MAX_SESSIONS)
+	WorkDir        string        // "" = os.MkdirTemp default; else stremio-hls-* under it (RIVULET_HLS_WORK_DIR)
 	// DisableIdleEviction turns idle eviction off entirely: the reaper never
 	// removes a session for being idle, so sessions live until DeleteHLS (or
-	// CloseHLS). internal/app sets it for STREMIO_HLS_SESSION_TTL=0, matching
-	// STREMIO_TORRENT_IDLE_TIMEOUT=0. A separate flag rather than
+	// CloseHLS). internal/app sets it for RIVULET_HLS_SESSION_TTL=0, matching
+	// RIVULET_TORRENT_IDLE_TIMEOUT=0. A separate flag rather than
 	// SessionTTL==0 because normalize treats a zero SessionTTL as "unset" (a
 	// caller-built HLSConfig literal), which must keep meaning the 60s default.
 	// An explicit per-session ttl (see SessionOverrides) still wins over this
@@ -42,7 +42,7 @@ type HLSConfig struct {
 	DisableIdleEviction bool
 	// SessionOverrides opts in to the per-session query overrides (ttl,
 	// maxWidth, maxHeight, bitrate, maxRate, bufSize) on GET
-	// /hlsv2/{id}/master.m3u8 (STREMIO_HLS_SESSION_OVERRIDES). false (the
+	// /hlsv2/{id}/master.m3u8 (RIVULET_HLS_SESSION_OVERRIDES). false (the
 	// default) ignores those parameters entirely — see parseSessionOverrides.
 	SessionOverrides bool
 	// Persist opts in to HLS sessions that survive a restart: sessions live
@@ -50,54 +50,54 @@ type HLSConfig struct {
 	// random stremio-hls-* one), each with a session.json that lets the next
 	// process rehydrate it without re-probing or re-transcoding. Requires
 	// WorkDir; ignored (with a warning) without it. See persist.go.
-	Persist bool // (STREMIO_HLS_PERSIST)
+	Persist bool // (RIVULET_HLS_PERSIST)
 
 	// --- output quality / bandwidth ---
-	VideoBitrate string // -b:v, e.g. "8M" (STREMIO_TRANSCODE_VIDEO_BITRATE)
-	VideoMaxrate string // -maxrate (STREMIO_TRANSCODE_MAXRATE)
-	VideoBufsize string // -bufsize (STREMIO_TRANSCODE_BUFSIZE)
-	MaxWidth     int    // 0 = no downscale (STREMIO_TRANSCODE_MAX_WIDTH)
-	MaxHeight    int    // 0 = no downscale (STREMIO_TRANSCODE_MAX_HEIGHT)
+	VideoBitrate string // -b:v, e.g. "8M" (RIVULET_TRANSCODE_VIDEO_BITRATE)
+	VideoMaxrate string // -maxrate (RIVULET_TRANSCODE_MAXRATE)
+	VideoBufsize string // -bufsize (RIVULET_TRANSCODE_BUFSIZE)
+	MaxWidth     int    // 0 = no downscale (RIVULET_TRANSCODE_MAX_WIDTH)
+	MaxHeight    int    // 0 = no downscale (RIVULET_TRANSCODE_MAX_HEIGHT)
 
 	// --- encoder tuning ---
-	VAAPIQP     int    // -qp for h264_vaapi (STREMIO_TRANSCODE_VAAPI_QP)
-	NVENCPreset string // -preset for h264_nvenc (STREMIO_TRANSCODE_NVENC_PRESET)
-	QSVPreset   string // -preset for h264_qsv (STREMIO_TRANSCODE_QSV_PRESET)
-	X264Preset  string // -preset for libx264 (STREMIO_TRANSCODE_X264_PRESET)
-	X264CRF     int    // -crf for libx264 (STREMIO_TRANSCODE_X264_CRF)
+	VAAPIQP     int    // -qp for h264_vaapi (RIVULET_TRANSCODE_VAAPI_QP)
+	NVENCPreset string // -preset for h264_nvenc (RIVULET_TRANSCODE_NVENC_PRESET)
+	QSVPreset   string // -preset for h264_qsv (RIVULET_TRANSCODE_QSV_PRESET)
+	X264Preset  string // -preset for libx264 (RIVULET_TRANSCODE_X264_PRESET)
+	X264CRF     int    // -crf for libx264 (RIVULET_TRANSCODE_X264_CRF)
 
 	// Tonemap is the tonemap filter algorithm used to convert HDR (PQ/HLG)
 	// sources to SDR BT.709 ("hable", "mobius", …; see TonemapAlgorithms).
 	// "" disables tone mapping, which is the default and today's behaviour
-	// (STREMIO_TRANSCODE_TONEMAP).
+	// (RIVULET_TRANSCODE_TONEMAP).
 	Tonemap string
 
 	// --- audio ---
-	AudioChannels int    // -ac (STREMIO_TRANSCODE_AUDIO_CHANNELS)
-	AudioBitrate  string // -b:a (STREMIO_TRANSCODE_AUDIO_BITRATE)
+	AudioChannels int    // -ac (RIVULET_TRANSCODE_AUDIO_CHANNELS)
+	AudioBitrate  string // -b:a (RIVULET_TRANSCODE_AUDIO_BITRATE)
 
 	// --- concurrency / hardware ---
-	SegmentConcurrency int    // concurrent ffmpeg segment jobs; 0 resolves to runtime.NumCPU() (STREMIO_TRANSCODE_CONCURRENCY)
-	VAAPIDevice        string // renderD* device path (STREMIO_HLS_VAAPI_DEVICE)
+	SegmentConcurrency int    // concurrent ffmpeg segment jobs; 0 resolves to runtime.NumCPU() (RIVULET_TRANSCODE_CONCURRENCY)
+	VAAPIDevice        string // renderD* device path (RIVULET_HLS_VAAPI_DEVICE)
 
 	// --- segment cache ---
 	// SegmentCacheBytes caps the transcoded-segment bytes kept on disk per
 	// session; the least recently used segments are deleted beyond it. 0 (the
 	// default) derives the cap from the session's max bitrate (~20 minutes of
 	// media, see segmentCacheBytes); a negative value disables the cap
-	// (STREMIO_HLS_SEGMENT_CACHE_BYTES).
+	// (RIVULET_HLS_SEGMENT_CACHE_BYTES).
 	SegmentCacheBytes int64
 
 	// --- timeouts ---
-	SegmentTimeout  time.Duration // per-segment transcode (STREMIO_HLS_SEGMENT_TIMEOUT)
-	SubtitleTimeout time.Duration // subtitle extraction (STREMIO_HLS_SUBTITLE_TIMEOUT)
-	ProbeTimeout    time.Duration // ffprobe combined probe (STREMIO_HLS_PROBE_TIMEOUT)
+	SegmentTimeout  time.Duration // per-segment transcode (RIVULET_HLS_SEGMENT_TIMEOUT)
+	SubtitleTimeout time.Duration // subtitle extraction (RIVULET_HLS_SUBTITLE_TIMEOUT)
+	ProbeTimeout    time.Duration // ffprobe combined probe (RIVULET_HLS_PROBE_TIMEOUT)
 
 	// --- seeking ---
 	// SeekPreroll is the input-seek pre-roll transcodeSegment decodes ahead
 	// of each segment's start for sources in an indexed container (Matroska,
 	// MP4; see seekIndexed), where ffmpeg's input seek is already
-	// frame-accurate when re-encoding (STREMIO_HLS_SEEK_PREROLL). It can
+	// frame-accurate when re-encoding (RIVULET_HLS_SEEK_PREROLL). It can
 	// only shrink the margin: every other source (MPEG-TS, HLS, FLV, raw
 	// streams, anything unrecognised) keeps the full defaultSeekPreroll,
 	// because its input seek can start decoding at the keyframe *after* the
@@ -114,7 +114,7 @@ type HLSConfig struct {
 	// PrivateAllow lists the private hosts (IPs, CIDRs, hostnames) a media
 	// URL may point at: /probe, /tracks and /hlsv2 mediaURL, checked before
 	// the session starts and again by the relay on every address it dials
-	// (STREMIO_HLS_PRIVATE_ALLOW). nil, the default, allows none. Subtitle
+	// (RIVULET_HLS_PRIVATE_ALLOW). nil, the default, allows none. Subtitle
 	// and /opensubHash fetches never use it. Cloud-metadata is always
 	// refused.
 	PrivateAllow *netguard.Allow
@@ -206,13 +206,13 @@ func DefaultHLSConfig() HLSConfig {
 
 // DefaultReaperInterval derives the reaper's default scan interval from the
 // session idle-eviction TTL: min(30s, ttl/2). Exported so internal/app can
-// compute the default before applying STREMIO_HLS_REAPER_INTERVAL as an
+// compute the default before applying RIVULET_HLS_REAPER_INTERVAL as an
 // explicit override (issue #20: "Should probably scale with the TTL above"),
 // giving the derivation a single, unit-tested home instead of duplicating it
 // in internal/app.
 //
 // A zero (or negative) ttl yields the historical 30s rather than 0: ttl==0
-// is how STREMIO_HLS_SESSION_TTL=0 ("never evict", see
+// is how RIVULET_HLS_SESSION_TTL=0 ("never evict", see
 // HLSConfig.DisableIdleEviction) reaches here, and a 0 interval would make
 // time.NewTicker panic, while a tiny one would spin the reaper.
 func DefaultReaperInterval(ttl time.Duration) time.Duration {
@@ -452,7 +452,7 @@ func isKnownX264Preset(profile string) bool {
 // effectiveSessionConfig computes the per-session transcode configuration at
 // session-creation time (StartHLS), applying live /settings overrides on top
 // of m.cfg's env-resolved defaults, then the session's own query overrides
-// (ov; zero value when STREMIO_HLS_SESSION_OVERRIDES is off or none were
+// (ov; zero value when RIVULET_HLS_SESSION_OVERRIDES is off or none were
 // given) on top of both. Overall precedence: per-session override >
 // /settings > env. Per key:
 //
@@ -463,7 +463,7 @@ func isKnownX264Preset(profile string) bool {
 //     when > 0 AND != 1920, so a server whose /settings was never touched
 //     keeps today's uncapped-resolution output byte-for-byte. An operator who
 //     wants exactly 1920 as an intentional cap should set
-//     STREMIO_TRANSCODE_MAX_WIDTH=1920 instead — indistinguishable from
+//     RIVULET_TRANSCODE_MAX_WIDTH=1920 instead — indistinguishable from
 //     "untouched" is the unavoidable cost of the byte-identical-default
 //     requirement, since the settings store cannot tell "user re-saved 1920"
 //     from "user never saved anything".
@@ -477,12 +477,12 @@ func isKnownX264Preset(profile string) bool {
 //   - per-session bitrate (?bitrate=): overrides videoBitrate and, unless
 //     also given explicitly, videoMaxrate (= bitrate) and videoBufsize
 //     (= 2x bitrate) — mirroring transcodeMaxBitRate's derivation — beating
-//     both transcodeMaxBitRate and the STREMIO_TRANSCODE_* env values.
+//     both transcodeMaxBitRate and the RIVULET_TRANSCODE_* env values.
 //   - per-session maxRate/bufSize (?maxRate=, ?bufSize=): override just that
 //     value (maxrate also drives BANDWIDTH); a lone maxRate/bufSize leaves
 //     the /settings- or env-resolved bitrate alone.
 //   - per-session maxWidth/maxHeight (?maxWidth=, ?maxHeight=): override
-//     transcodeMaxWidth and STREMIO_TRANSCODE_MAX_WIDTH/HEIGHT for that
+//     transcodeMaxWidth and RIVULET_TRANSCODE_MAX_WIDTH/HEIGHT for that
 //     axis; the other axis keeps its /settings/env value.
 //   - per-session ttl is not a transcode knob; StartHLS stores it on the
 //     session itself (hlsSession.ttl) for evictIdle.
@@ -552,7 +552,7 @@ func (m *hlsManager) effectiveSessionConfig(ov sessionOverrides) sessionConfig {
 	return sc
 }
 
-// ── per-session overrides (STREMIO_HLS_SESSION_OVERRIDES) ──────────────────
+// ── per-session overrides (RIVULET_HLS_SESSION_OVERRIDES) ──────────────────
 
 // Bounds for the per-session query overrides. Deliberately generous (they
 // exist to reject nonsense and typos, not to second-guess the caller) but
@@ -598,7 +598,7 @@ func (o sessionOverrides) hasQuality() bool {
 // gets a session that quietly ignored the quality it asked for.
 //
 //   - ttl: whole seconds or a Go duration string (the same syntax as the
-//     STREMIO_HLS_* duration env knobs), >= 60s (minOverrideTTL) and <= 30
+//     RIVULET_HLS_* duration env knobs), >= 60s (minOverrideTTL) and <= 30
 //     days.
 //   - maxWidth/maxHeight: integers in [16, 7680], rounded down to even (the
 //     yuv420p/nv12 encoders need even dimensions; computeScaledDims keeps
@@ -667,7 +667,7 @@ func parseOverrideBitrate(name, raw string, maxBps int64) (int64, error) {
 }
 
 // decimalBitrateRe is the bitrate syntax internal/app's envBitrate accepts
-// for the STREMIO_TRANSCODE_* rate knobs (its ffmpegBitrateRe, duplicated
+// for the RIVULET_TRANSCODE_* rate knobs (its ffmpegBitrateRe, duplicated
 // because internal/app imports this package): an integer or decimal number
 // with an optional k/K/m/M/g/G (SI, decimal) suffix. Keeping the two in step
 // means a value accepted in the env is accepted as a per-session override.
@@ -719,7 +719,7 @@ func formatBitrate(bps int64) string {
 }
 
 // parseSecondsOrDuration accepts the same syntax as internal/app's
-// envDuration (used by every STREMIO_HLS_* duration knob): a Go duration
+// envDuration (used by every RIVULET_HLS_* duration knob): a Go duration
 // string ("90s", "2h30m") or a bare non-negative integer of whole seconds.
 // A local copy rather than a shared helper because internal/app imports
 // this package (the reverse import would cycle) and envDuration's

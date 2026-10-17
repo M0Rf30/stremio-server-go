@@ -87,7 +87,7 @@ var seekOffsets = []int64{0, 9000, 100, 7000, 8000, 50, 5000, 9500, 1, 4000}
 // control connections, 10 logins, 10 SIZE); with the pool N opens cost exactly
 // one control connection, one login and (SIZE cached for seeks) one SIZE.
 func TestOpenFTPSequentialRangesReuseSession(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(10000)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content})
@@ -125,7 +125,7 @@ func TestOpenFTPSequentialRangesReuseSession(t *testing.T) {
 // TestOpenFTPOffsetZeroRefreshesSize verifies a playback start (offset 0)
 // never trusts the cached SIZE, while seeks do.
 func TestOpenFTPOffsetZeroRefreshesSize(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(1000)})
 	u := "ftp://" + srv.addr() + "/f"
@@ -144,7 +144,7 @@ func TestOpenFTPOffsetZeroRefreshesSize(t *testing.T) {
 
 // TestOpenFTPSizeCacheExpires verifies an expired cached SIZE is re-fetched.
 func TestOpenFTPSizeCacheExpires(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(1000)})
 	u := "ftp://" + srv.addr() + "/f"
@@ -161,7 +161,7 @@ func TestOpenFTPSizeCacheExpires(t *testing.T) {
 // connection died while idle (server idle timeout/restart) is detected on use
 // and the open transparently succeeds on a fresh connection.
 func TestOpenFTPStaleSessionRedials(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(1000)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content})
@@ -187,7 +187,7 @@ func TestOpenFTPStaleSessionRedials(t *testing.T) {
 // ends (a seek abandoning the previous range) still leaves a reusable control
 // connection: the server's 226/426 reply is consumed by Close.
 func TestOpenFTPAbortedTransferSessionReused(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(8 << 20)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content})
@@ -218,7 +218,7 @@ func TestOpenFTPAbortedTransferSessionReused(t *testing.T) {
 // TestOpenFTPPoolBounded verifies concurrent opens each get their own session
 // and that at most ftpPoolMaxPerKey stay idle afterwards; the rest are quit.
 func TestOpenFTPPoolBounded(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(1000)})
 	u := "ftp://" + srv.addr() + "/f"
@@ -264,7 +264,7 @@ func TestOpenFTPPoolBounded(t *testing.T) {
 // oldest idle session rather than refusing the newest one: stale sessions of
 // servers nobody uses any more must not block pooling for the active one.
 func TestOpenFTPPoolGlobalCapEvictsOldest(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(100)})
 	userURL := func(i int) string {
@@ -294,7 +294,7 @@ func TestOpenFTPPoolGlobalCapEvictsOldest(t *testing.T) {
 // TestOpenFTPPoolKeyedByCredentials verifies sessions are never shared across
 // different credentials (a wrong password must not ride a pooled login).
 func TestOpenFTPPoolKeyedByCredentials(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(1000)})
 
@@ -313,7 +313,7 @@ func TestOpenFTPPoolKeyedByCredentials(t *testing.T) {
 // TestOpenFTPPoolTTLEvicts verifies idle sessions older than the TTL are
 // closed by the sweeper and not handed out.
 func TestOpenFTPPoolTTLEvicts(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(1000)})
 	u := "ftp://" + srv.addr() + "/f"
@@ -348,7 +348,7 @@ func TestOpenFTPPoolTTLEvicts(t *testing.T) {
 // transfer is torn down, never parked for reuse — and that Close waits for
 // that reply only for the short abort grace, not the idle timeout.
 func TestOpenFTPCtxCancelNotPooled(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	setAbortGrace(t, 100*time.Millisecond)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: []byte("abcdef"), stallData: true})
@@ -377,7 +377,7 @@ func TestOpenFTPCtxCancelNotPooled(t *testing.T) {
 // TestOpenFTPCloseIdempotent verifies a double Close releases the session to
 // the pool once — never twice (two owners of one ServerConn).
 func TestOpenFTPCloseIdempotent(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(100)})
 
@@ -394,20 +394,20 @@ func TestOpenFTPCloseIdempotent(t *testing.T) {
 }
 
 // TestOpenFTPPoolNotReusedAcrossPolicyFlip is the SSRF guard for pooling: a
-// connection dialled while STREMIO_FTP_ALLOW_PRIVATE=1 must not be handed out
+// connection dialled while RIVULET_FTP_ALLOW_PRIVATE=1 must not be handed out
 // once the opt-in is withdrawn — the open must be rejected like a fresh one.
 func TestOpenFTPPoolNotReusedAcrossPolicyFlip(t *testing.T) {
 	resetFTPCaches(t)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: poolTestContent(100)})
 	u := "ftp://" + srv.addr() + "/f"
 
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	readRange(t, u, 0, 8)
 	if poolIdle() != 1 {
 		t.Fatalf("idle = %d, want 1", poolIdle())
 	}
 
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "")
 	rc, _, err := openFTP(t.Context(), u, 0)
 	if err == nil {
 		_ = rc.Close()
@@ -422,7 +422,7 @@ func TestOpenFTPPoolNotReusedAcrossPolicyFlip(t *testing.T) {
 // Control hook: with the pre-flight cache primed to "allowed" for a blocked
 // address, the dial itself still refuses it.
 func TestOpenFTPDialStillGuarded(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "")
 	resetFTPCaches(t)
 	preflightPut(preflightKey{host: "127.0.0.1", blockPrivate: true}, nil) // pre-flight says "fine"
 
@@ -443,7 +443,7 @@ func TestOpenFTPDialStillGuarded(t *testing.T) {
 // RETR (no REST, no throwaway seeked transfer), where the old
 // seek-then-reopen sequence cost two logins and two RETRs.
 func TestOpenRangedFTPUnknownSizeOpensOnce(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(1000)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content, noSize: true})
@@ -469,7 +469,7 @@ func TestOpenRangedFTPUnknownSizeOpensOnce(t *testing.T) {
 // TestOpenRangedFTPKnownSizeSeeks verifies the normal case is untouched:
 // size known → reader positioned at offset, pos == offset.
 func TestOpenRangedFTPKnownSizeSeeks(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(1000)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content})
@@ -491,7 +491,7 @@ func TestOpenRangedFTPKnownSizeSeeks(t *testing.T) {
 // TestOpenFTPNoSizeKeepsSeekSemantics verifies plain Open keeps seeking even
 // when SIZE is unavailable (size -1), as before.
 func TestOpenFTPNoSizeKeepsSeekSemantics(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(t)
 	content := poolTestContent(1000)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: content, noSize: true})
@@ -566,7 +566,7 @@ func TestCachesBounded(t *testing.T) {
 // (dial, USER/PASS/FEAT/TYPE, SIZE) show up in ns/op. Before pooling: every
 // op = 1 control conn + 1 login.
 func BenchmarkOpenFTPSeek(b *testing.B) {
-	b.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	b.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	resetFTPCaches(b)
 	content := poolTestContent(10000)
 	srv := newFakeFTPServer(b, &fakeFTPServer{content: content, delay: time.Millisecond})

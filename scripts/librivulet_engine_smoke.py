@@ -78,11 +78,11 @@ def main():
             "HTTP_PORT": str(PORT),
             "HTTPS_PORT": "0",
             "BT_LISTEN_PORT": "0",
-            "STREMIO_DISABLE_TRACKERS": "1",
-            "STREMIO_DISABLE_WEBTORRENT": "1",
-            "STREMIO_TRACKERS_URL": "off",
-            "STREMIO_METADATA_URL": "off",
-            "STREMIO_ENABLE_DLNA": "0",
+            "RIVULET_DISABLE_TRACKERS": "1",
+            "RIVULET_DISABLE_WEBTORRENT": "1",
+            "RIVULET_TRACKERS_URL": "off",
+            "RIVULET_METADATA_URL": "off",
+            "RIVULET_ENABLE_DLNA": "0",
         }
         env_json = json.dumps(env).encode()
 

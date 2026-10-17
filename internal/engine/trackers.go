@@ -23,13 +23,13 @@ import (
 	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
 )
 
-// The remote tracker source URL is configurable (STREMIO_TRACKERS_URL, wired via
+// The remote tracker source URL is configurable (RIVULET_TRACKERS_URL, wired via
 // types.Config.TrackersURL). The embeddedTrackers snapshot below is the always
 // available fallback when the remote fetch is disabled or unreachable, so
 // startup is never blocked.
 
 // defaultTrackerTopN is the fallback number of ranked UDP/HTTP trackers attached
-// per torrent when STREMIO_TRACKERS_MAX is unset or invalid. Kept small:
+// per torrent when RIVULET_TRACKERS_MAX is unset or invalid. Kept small:
 // anacrolix's announce dispatcher does work proportional to (torrents x trackers)
 // and recomputes bytesLeft over every piece per announce, so a large list
 // dominates CPU on big 4K torrents. DHT + PEX + webseeds cover peer discovery;

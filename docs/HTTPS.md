@@ -124,8 +124,8 @@ on its own (headless setups, or to refresh before expiry without re-clicking):
 
 | Variable | Purpose |
 |---|---|
-| `STREMIO_CERT_AUTHKEY` | Stremio authKey used to auto-provision/renew a trusted cert from `api.strem.io`. If unset, the key cached from a prior `/get-https` call is reused. |
-| `STREMIO_CERT_IP` | IP encoded into the provisioned cert's domain. Defaults to the first non-loopback IPv4. |
+| `RIVULET_CERT_AUTHKEY` | Stremio authKey used to auto-provision/renew a trusted cert from `api.strem.io`. If unset, the key cached from a prior `/get-https` call is reused. |
+| `RIVULET_CERT_IP` | IP encoded into the provisioned cert's domain. Defaults to the first non-loopback IPv4. |
 
 The background renewer is a **no-op** until an authKey is available, so it never
 disturbs a plain HTTP or self-signed setup unless you opt in.
@@ -135,8 +135,8 @@ podman run -d \
   --name rivulet-engine \
   -p 11470:11470 -p 12470:12470 \
   -e HTTPS_PORT=12470 \
-  -e STREMIO_CERT_AUTHKEY=<your-stremio-authkey> \
-  -e STREMIO_CERT_IP=192.168.0.62 \
+  -e RIVULET_CERT_AUTHKEY=<your-stremio-authkey> \
+  -e RIVULET_CERT_IP=192.168.0.62 \
   -v stremio-data:/data \
   rivulet-engine
 ```
@@ -144,7 +144,7 @@ podman run -d \
 ### Getting your authKey
 
 The authKey is the session token of a logged-in Stremio account. The interactive
-dropdown supplies it for you; for the headless `STREMIO_CERT_AUTHKEY` path you can
+dropdown supplies it for you; for the headless `RIVULET_CERT_AUTHKEY` path you can
 read it from a logged-in Stremio web session (browser dev tools → the
 `api.strem.io` login response / stored auth) or from the Stremio app's local
 state. Treat it like a password — it is cached at `APP_PATH/cert-authkey` with
@@ -166,7 +166,7 @@ browser web app at `web.stremio.com` will **not** trust this; use the
 
 - **Dropdown is empty / no IP listed.** The UI lists the addresses the server
   reports. Make sure the client is actually connected to the streaming server and
-  that the host has a non-loopback IPv4. Pin one with `STREMIO_CERT_IP`.
+  that the host has a non-loopback IPv4. Pin one with `RIVULET_CERT_IP`.
 - **Provisioning fails (HTTP 400 / "missing authKey").** You are not logged in,
   or the authKey expired — log in to Stremio again and retry.
 - **Cert provisioned but the page still warns.** Confirm you opened the
@@ -174,16 +174,16 @@ browser web app at `web.stremio.com` will **not** trust this; use the
   published/reachable. In containers, both `-p 12470:12470` and
   `-e HTTPS_PORT=12470` are required.
 - **Cert lost after restart.** Persist `APP_PATH` (`-v …:/data`); the cert lives
-  at `APP_PATH/https-cert.pem` + `https-key.pem`. Set `STREMIO_CERT_AUTHKEY` for
+  at `APP_PATH/https-cert.pem` + `https-key.pem`. Set `RIVULET_CERT_AUTHKEY` for
   automatic re-provisioning.
-- **Renewal not happening.** Ensure `STREMIO_CERT_AUTHKEY` is set (or a prior
+- **Renewal not happening.** Ensure `RIVULET_CERT_AUTHKEY` is set (or a prior
   interactive `/get-https` cached one) and that `APP_PATH` is persistent.
 
 ---
 
 ## Related
 
-- Env vars: `HTTPS_PORT`, `STREMIO_CERT_AUTHKEY`, `STREMIO_CERT_IP` — see the
+- Env vars: `HTTPS_PORT`, `RIVULET_CERT_AUTHKEY`, `RIVULET_CERT_IP` — see the
   [README env table](../README.md#environment).
 - Container/HuggingFace specifics: [CONTAINER.md](CONTAINER.md).
 - API reference: `GET /get-https` in the [swagger spec](swagger.yaml).

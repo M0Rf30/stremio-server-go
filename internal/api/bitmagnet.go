@@ -11,10 +11,10 @@
 //	GET /bitmagnet/stream/<type>/<id>.json
 //	     → {streams:[{infoHash,...}]} from self-hosted Bitmagnet DHT index
 //
-// Bitmagnet is queried via its GraphQL API (POST to STREMIO_BITMAGNET_URL).
+// Bitmagnet is queried via its GraphQL API (POST to RIVULET_BITMAGNET_URL).
 // Title and year are resolved via a Cinemeta-compatible metadata addon
-// (STREMIO_METADATA_URL, default Cinemeta) and cached
-// for 6 hours. If STREMIO_BITMAGNET_URL is unset the manifest still serves but
+// (RIVULET_METADATA_URL, default Cinemeta) and cached
+// for 6 hours. If RIVULET_BITMAGNET_URL is unset the manifest still serves but
 // all stream requests return an empty result set.
 package api
 

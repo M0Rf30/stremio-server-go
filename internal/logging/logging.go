@@ -8,8 +8,8 @@
 //
 // Configuration is environment-driven and applied once via Setup:
 //
-//	STREMIO_LOG_LEVEL   debug | info | warn | error   (default: info)
-//	STREMIO_LOG_FORMAT  text  | json                  (default: text)
+//	RIVULET_LOG_LEVEL   debug | info | warn | error   (default: info)
+//	RIVULET_LOG_FORMAT  text  | json                  (default: text)
 //
 // Subsystems obtain a tagged logger with For("engine"), which stamps every
 // record with component=engine so output can be filtered and read at a glance:
@@ -48,7 +48,7 @@ func For(component string) *slog.Logger {
 }
 
 func levelFromEnv() slog.Level {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("STREMIO_LOG_LEVEL"))) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RIVULET_LOG_LEVEL"))) {
 	case "debug":
 		return slog.LevelDebug
 	case "warn", "warning":
@@ -68,7 +68,7 @@ const (
 )
 
 func formatFromEnv() format {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("STREMIO_LOG_FORMAT")), "json") {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("RIVULET_LOG_FORMAT")), "json") {
 		return formatJSON
 	}
 	return formatText

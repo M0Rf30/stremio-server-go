@@ -93,7 +93,7 @@ type server struct {
 	proxyClient *http.Client
 	blobClient  *http.Client
 	// dvr is the opt-in recorder behind /record and /api/recordings (nil
-	// unless STREMIO_DVR_ENABLED; dvrInitErr says why when enabled but unusable).
+	// unless RIVULET_DVR_ENABLED; dvrInitErr says why when enabled but unusable).
 	dvr        *dvr.Manager
 	dvrInitErr string
 }
@@ -102,7 +102,7 @@ type server struct {
 func New(em types.EngineManager, ss types.SettingsStore, prober types.MediaProber, cfg types.Config) http.Handler {
 	localIMDBDisabled.Store(!cfg.LocalIMDB)
 	// The signing secret is not part of this: it is auto-generated on every
-	// install, so counting it made STREMIO_PROXY_ALLOW_PRIVATE a no-op. Only
+	// install, so counting it made RIVULET_PROXY_ALLOW_PRIVATE a no-op. Only
 	// a password or IP ACL signals that untrusted clients can reach the proxy.
 	blockPrivate := cfg.ProxyPassword != "" || cfg.ProxyIPACL != "" || !proxyAllowPrivate()
 	privateAllow := parsePrivateAllow(cfg.ProxyPrivateAllow)
@@ -155,7 +155,7 @@ var (
 )
 
 // builtinAllowedOrigins are the official stremio-web deployments, always
-// allowed regardless of STREMIO_ALLOWED_ORIGINS (SEC-1 / Contract 2).
+// allowed regardless of RIVULET_ALLOWED_ORIGINS (SEC-1 / Contract 2).
 var builtinAllowedOrigins = []string{
 	"https://web.stremio.com",
 	"https://web.strem.io",
@@ -186,7 +186,7 @@ func originHostAllowed(host string) bool {
 
 // originPortAllowed restricts loopback/own-IP origins to this server's own
 // HTTP/HTTPS ports; other local web apps must be listed in
-// STREMIO_ALLOWED_ORIGINS. Unconfigured ports (0) leave it unrestricted.
+// RIVULET_ALLOWED_ORIGINS. Unconfigured ports (0) leave it unrestricted.
 func originPortAllowed(cfg types.Config, u *url.URL, scheme string) bool {
 	if cfg.HTTPPort == 0 && cfg.HTTPSPort == 0 {
 		return true
@@ -206,7 +206,7 @@ func originPortAllowed(cfg types.Config, u *url.URL, scheme string) bool {
 	return p == cfg.HTTPPort || p == cfg.HTTPSPort
 }
 
-// originEntryMatches reports whether a single STREMIO_ALLOWED_ORIGINS entry
+// originEntryMatches reports whether a single RIVULET_ALLOWED_ORIGINS entry
 // matches the request Origin. entry, normOrigin and host are already
 // lower-cased by the caller. An entry may be:
 //   - "*"                    — matches any origin.
@@ -235,7 +235,7 @@ func originEntryMatches(entry, normOrigin, host string) bool {
 
 // originAllowed implements the Contract 2 allowlist. A request with no Origin
 // header (native players, curl, same-process fetches) is always allowed;
-// cfg.AllowAllOrigins (STREMIO_ALLOWED_ORIGINS="*") restores the legacy
+// cfg.AllowAllOrigins (RIVULET_ALLOWED_ORIGINS="*") restores the legacy
 // allow-everything behavior; otherwise the origin must match the built-in
 // Stremio-web/localhost/own-IP allowlist or a configured extra. The literal
 // "null" origin (sandboxed iframes, file:// pages) is always rejected here
@@ -358,7 +358,7 @@ func hostOf(raw string) string {
 
 // hostAllowed defends against DNS rebinding: a non-media request must carry
 // a Host that is loopback, an own interface IP, an IP literal, a .local name,
-// the configured public URL host, or listed in STREMIO_ALLOWED_HOSTS.
+// the configured public URL host, or listed in RIVULET_ALLOWED_HOSTS.
 func hostAllowed(cfg types.Config, r *http.Request) bool {
 	if cfg.AllowAllOrigins || mediaRoute(r) {
 		return true
@@ -391,7 +391,7 @@ func hostAllowed(cfg types.Config, r *http.Request) bool {
 			return true
 		}
 	}
-	for _, e := range strings.Split(os.Getenv("STREMIO_ALLOWED_HOSTS"), ",") {
+	for _, e := range strings.Split(os.Getenv("RIVULET_ALLOWED_HOSTS"), ",") {
 		if e = strings.ToLower(strings.TrimSpace(e)); e != "" && e == host {
 			return true
 		}
@@ -408,20 +408,20 @@ func remoteIP(r *http.Request) net.IP {
 	return net.ParseIP(h)
 }
 
-// proxyAllowPrivate reports STREMIO_PROXY_ALLOW_PRIVATE=1, which re-enables
+// proxyAllowPrivate reports RIVULET_PROXY_ALLOW_PRIVATE=1, which re-enables
 // proxying to loopback/private destinations on an unprotected server.
 func proxyAllowPrivate() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("STREMIO_PROXY_ALLOW_PRIVATE")))
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("RIVULET_PROXY_ALLOW_PRIVATE")))
 	return v == "1" || v == "true" || v == "yes"
 }
 
-// parsePrivateAllow parses STREMIO_PROXY_PRIVATE_ALLOW (IPs, CIDRs and
+// parsePrivateAllow parses RIVULET_PROXY_PRIVATE_ALLOW (IPs, CIDRs and
 // hostnames that stay reachable through the proxy even when private
 // destinations are blocked). Invalid entries are logged and skipped.
 func parsePrivateAllow(spec string) *netguard.Allow {
 	a, bad := netguard.ParseAllow(spec)
 	if len(bad) > 0 {
-		logging.For("config").Warn("ignoring invalid STREMIO_PROXY_PRIVATE_ALLOW entries", "entries", strings.Join(bad, ","))
+		logging.For("config").Warn("ignoring invalid RIVULET_PROXY_PRIVATE_ALLOW entries", "entries", strings.Join(bad, ","))
 	}
 	if a != nil {
 		logging.For("streamproxy").Info("private destinations allowlisted", "allow", a.String())
@@ -429,7 +429,7 @@ func parsePrivateAllow(spec string) *netguard.Allow {
 	return a
 }
 
-// parseTrustedProxies parses STREMIO_TRUSTED_PROXIES (comma-separated CIDRs
+// parseTrustedProxies parses RIVULET_TRUSTED_PROXIES (comma-separated CIDRs
 // or bare IPs).
 func parseTrustedProxies(s string) []*net.IPNet {
 	var out []*net.IPNet
@@ -1742,7 +1742,7 @@ func (s *server) handleHLSProbe(w http.ResponseWriter, r *http.Request) {
 // handleHLS dispatches /hlsv2/* : probe, the per-session master playlist, and
 // the live media playlist + .ts segments produced by ffmpeg.
 //
-// With STREMIO_HLS_SESSION_OVERRIDES enabled, the master.m3u8 request may
+// With RIVULET_HLS_SESSION_OVERRIDES enabled, the master.m3u8 request may
 // carry per-session overrides (ttl, maxWidth, maxHeight, bitrate, maxRate,
 // bufSize); they are passed through verbatim and validated by the prober,
 // and an invalid value is answered with 400. Names are case-sensitive:
@@ -1755,12 +1755,12 @@ func (s *server) handleHLSProbe(w http.ResponseWriter, r *http.Request) {
 // @Param    id         path   string  true   "session id"
 // @Param    file       path   string  true   "playlist or segment"
 // @Param    mediaURL   query  string  false  "media URL to transcode (master.m3u8 only)"
-// @Param    ttl        query  string  false  "per-session idle TTL, seconds or Go duration, 60s to 30 days (master.m3u8 only; needs STREMIO_HLS_SESSION_OVERRIDES; also updates an existing session)"
-// @Param    maxWidth   query  integer false  "per-session max output width, 16-7680 (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)"
-// @Param    maxHeight  query  integer false  "per-session max output height, 16-7680 (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)"
-// @Param    bitrate    query  string  false  "per-session video bitrate, ffmpeg syntax e.g. 6M or 1.5M, 100k-200M (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)"
-// @Param    maxRate    query  string  false  "per-session video maxrate, >= bitrate when both given, default = bitrate (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)"
-// @Param    bufSize    query  string  false  "per-session video bufsize, default = 2x bitrate (master.m3u8 on session creation only; needs STREMIO_HLS_SESSION_OVERRIDES)"
+// @Param    ttl        query  string  false  "per-session idle TTL, seconds or Go duration, 60s to 30 days (master.m3u8 only; needs RIVULET_HLS_SESSION_OVERRIDES; also updates an existing session)"
+// @Param    maxWidth   query  integer false  "per-session max output width, 16-7680 (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
+// @Param    maxHeight  query  integer false  "per-session max output height, 16-7680 (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
+// @Param    bitrate    query  string  false  "per-session video bitrate, ffmpeg syntax e.g. 6M or 1.5M, 100k-200M (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
+// @Param    maxRate    query  string  false  "per-session video maxrate, >= bitrate when both given, default = bitrate (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
+// @Param    bufSize    query  string  false  "per-session video bufsize, default = 2x bitrate (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
 // @Success  200  {string}  string  "m3u8 / MPEG-TS / WebVTT"
 // @Failure  400  {string}  string  "invalid per-session override"
 // @Failure  404  {string}  string  "unknown session or segment"
@@ -1829,7 +1829,7 @@ func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string)
 // as soon as no request for it is still being served. Lets a front end that
 // manages its own session lifecycle clean up without waiting for the idle
 // reaper, and is the only way to end a session when
-// STREMIO_HLS_SESSION_TTL=0 disables idle eviction. Like every other route
+// RIVULET_HLS_SESSION_TTL=0 disables idle eviction. Like every other route
 // it is gated by the Origin allowlist in ServeHTTP.
 //
 // @Summary  Delete an HLS transcode session
@@ -2227,7 +2227,7 @@ func buildStreamProxyConfig(cfg types.Config, client *http.Client, privateAllow 
 		UpstreamProxy:    cfg.ProxyUpstream,
 		BlockPrivate:     !proxyAllowPrivate(),
 		PrivateAllow:     privateAllow,
-		TrustedProxies:   parseTrustedProxies(os.Getenv("STREMIO_TRUSTED_PROXIES")),
+		TrustedProxies:   parseTrustedProxies(os.Getenv("RIVULET_TRUSTED_PROXIES")),
 		AppPath:          cfg.AppPath,
 		ExtractorsFile:   cfg.ExtractorsFile,
 		ExtractorsURL:    cfg.ExtractorsURL,

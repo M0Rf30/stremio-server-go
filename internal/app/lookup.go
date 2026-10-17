@@ -103,7 +103,7 @@ func envBool(lookup Lookup, key string, def bool) bool {
 // envDuration parses a duration env var. Accepts either a Go duration string
 // (time.ParseDuration, e.g. "90s", "5m30s") or a bare non-negative integer
 // interpreted as whole seconds — matching every historical *_TIMEOUT-style
-// knob in this file (STREMIO_TORRENT_IDLE_TIMEOUT, etc.), which were plain
+// knob in this file (RIVULET_TORRENT_IDLE_TIMEOUT, etc.), which were plain
 // seconds long before any duration-string knob existed. Unset/empty → def.
 // Unparseable or negative → def, with a warning logged.
 func envDuration(lookup Lookup, key string, def time.Duration) time.Duration {
@@ -130,7 +130,7 @@ func envDuration(lookup Lookup, key string, def time.Duration) time.Duration {
 	return def
 }
 
-// seekPreroll resolves STREMIO_HLS_SEEK_PREROLL (seconds or a Go duration,
+// seekPreroll resolves RIVULET_HLS_SEEK_PREROLL (seconds or a Go duration,
 // via envDuration) into media.HLSConfig.SeekPreroll, the pre-roll used for
 // indexed containers only. Unset, unparseable or negative → def (envDuration
 // warns). An explicit 0 is translated to media.SeekPrerollNone, because a
@@ -138,7 +138,7 @@ func envDuration(lookup Lookup, key string, def time.Duration) time.Duration {
 // media.MaxSeekPreroll (the default) are clamped with a warning: the knob
 // only shrinks the margin.
 func seekPreroll(lookup Lookup, def time.Duration) time.Duration {
-	const key = "STREMIO_HLS_SEEK_PREROLL"
+	const key = "RIVULET_HLS_SEEK_PREROLL"
 	d := envDuration(lookup, key, def)
 	switch {
 	case d == 0:
@@ -191,7 +191,7 @@ func envBitrate(lookup Lookup, key, def string) string {
 	return v
 }
 
-// envTonemap parses STREMIO_TRANSCODE_TONEMAP, the HDR→SDR tone-mapping
+// envTonemap parses RIVULET_TRANSCODE_TONEMAP, the HDR→SDR tone-mapping
 // algorithm for HLS transcodes. Unset/empty or off/0/false/no/none → ""
 // (disabled, today's behaviour); on/1/true/yes → "mobius" (measured closest
 // to the SDR reference brightness; "hable" is noticeably darker); one of
@@ -214,7 +214,7 @@ func envTonemap(lookup Lookup, key string) string {
 	return ""
 }
 
-// allowedOrigins parses STREMIO_ALLOWED_ORIGINS (Contract 2 / SEC-1): a
+// allowedOrigins parses RIVULET_ALLOWED_ORIGINS (Contract 2 / SEC-1): a
 // comma-separated list of extra origins the HTTP API accepts beyond the
 // built-in Stremio-web/localhost/own-IP allowlist, in addition to the
 // "scheme://host[:port]" / "host[:port]" / "*.domain" wildcard forms. A
@@ -222,7 +222,7 @@ func envTonemap(lookup Lookup, key string) string {
 // (allowAll=true) instead of being treated as an extra entry. Unset → no
 // extras, allowAll=false.
 func allowedOrigins(lookup Lookup) (extras []string, allowAll bool) {
-	raw, _ := lookup("STREMIO_ALLOWED_ORIGINS")
+	raw, _ := lookup("RIVULET_ALLOWED_ORIGINS")
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, false
@@ -243,7 +243,7 @@ func allowedOrigins(lookup Lookup) (extras []string, allowAll bool) {
 // the official Cinemeta. An explicit empty value or off/0/false/no/disabled
 // turns resolution off (the add-ons then query by the raw IMDB id).
 func metadataURL(lookup Lookup) string {
-	v, ok := lookup("STREMIO_METADATA_URL")
+	v, ok := lookup("RIVULET_METADATA_URL")
 	if !ok {
 		return "https://v3-cinemeta.strem.io"
 	}
@@ -255,7 +255,7 @@ func metadataURL(lookup Lookup) string {
 }
 
 // publicBaseURL reads an externally reachable base URL (e.g.
-// STREMIO_PUBLIC_URL) and validates it: it must parse, use an http(s) scheme
+// RIVULET_PUBLIC_URL) and validates it: it must parse, use an http(s) scheme
 // and carry a host. An invalid value is ignored with a warning rather than
 // producing a malformed redirect or baseUrl.
 func publicBaseURL(lookup Lookup, key string) string {
@@ -272,12 +272,12 @@ func publicBaseURL(lookup Lookup, key string) string {
 }
 
 // defaultTrackersURL is the curated public tracker list fetched and ranked at
-// startup. Override via STREMIO_TRACKERS_URL; an empty/off value disables the
+// startup. Override via RIVULET_TRACKERS_URL; an empty/off value disables the
 // remote fetch entirely (the embedded/cached list plus DHT/PEX still apply).
 const defaultTrackersURL = "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt"
 
 func trackersURL(lookup Lookup) string {
-	v, ok := lookup("STREMIO_TRACKERS_URL")
+	v, ok := lookup("RIVULET_TRACKERS_URL")
 	if !ok {
 		return defaultTrackersURL
 	}

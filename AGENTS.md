@@ -16,7 +16,7 @@ closed-source streaming server (`server.js`), built on
 localhost-trust service with **no authentication** by design — any process
 that can reach the port is trusted. Browser-originated requests are an
 exception: state-changing routes and `/proxy` also check the request's
-`Origin` header against an allowlist (`STREMIO_ALLOWED_ORIGINS` + built-in
+`Origin` header against an allowlist (`RIVULET_ALLOWED_ORIGINS` + built-in
 Stremio web/localhost/self-IP defaults, see README) so an arbitrary page open
 in the user's browser cannot drive the API merely because the port is
 reachable.
@@ -110,23 +110,23 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 - **Env config** lives only in `main.go` via `getenv`/`envInt`/`envBool`, or a
   `LookupEnv`-based helper when empty must mean "disabled" (see `metadataURL()`,
   `trackersURL()` — `off`/`0`/`false`/empty → disabled); the parsed value is
-  threaded through `types.Config` (`STREMIO_HTTP_LOG` → `Config.HTTPLog`,
+  threaded through `types.Config` (`RIVULET_HTTP_LOG` → `Config.HTTPLog`,
   parsed once in `main.go` via `envBool` and passed to `api.New`, is the
   reference example — it used to be read ad hoc as `os.Getenv(...) != ""` in
-  `internal/api`, so `STREMIO_HTTP_LOG=0` now *disables* logging like every
+  `internal/api`, so `RIVULET_HTTP_LOG=0` now *disables* logging like every
   other `envBool` knob instead of enabling it). Sanctioned exceptions that
   read `os.Getenv`/`os.LookupEnv` directly in their own package instead —
   because the value is needed before `types.Config` exists, or must be
   re-read per call rather than pinned at startup — and must stay that way:
-  - `internal/logging`: `STREMIO_LOG_LEVEL` / `STREMIO_LOG_FORMAT` — `Setup()`
+  - `internal/logging`: `RIVULET_LOG_LEVEL` / `RIVULET_LOG_FORMAT` — `Setup()`
     runs before `main` builds `types.Config`.
   - `internal/api/archive.go`, `internal/ftpstream/ftpstream.go`:
-    `STREMIO_ARCHIVE_ALLOW_PRIVATE` / `STREMIO_FTP_ALLOW_PRIVATE` — re-checked
+    `RIVULET_ARCHIVE_ALLOW_PRIVATE` / `RIVULET_FTP_ALLOW_PRIVATE` — re-checked
     on every fetch.
   - `internal/api/archive.go`, `internal/api/localaddon.go`:
-    `STREMIO_ARCHIVE_LOCAL_ROOT` / `LOCAL_FILES_DIR` — local-root resolution
+    `RIVULET_ARCHIVE_LOCAL_ROOT` / `LOCAL_FILES_DIR` — local-root resolution
     for archive and local-files sources.
-  - `internal/media/hls.go`: `STREMIO_HWACCEL` — probed lazily at first
+  - `internal/media/hls.go`: `RIVULET_HWACCEL` — probed lazily at first
     transcode, not at startup.
   Do not add a new outside-`main.go` env read without adding it to this list.
 - **Imports**: the project module goes in its **own** goimports group
@@ -158,7 +158,7 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 - **`CGO_ENABLED=0`** everywhere — no native deps.
 - **golangci-lint v2** (`bodyclose, errcheck, errorlint, gosec, govet, ineffassign, misspell, revive, staticcheck, unconvert, unused, whitespace`). `gosec` excludes by-design rules (variable URLs/subprocess/file paths — this is a localhost media server). `_test.go` files skip `errcheck`/`gosec`/`bodyclose`/`unparam` but still face `gofmt`/`staticcheck`/`revive`.
 - **Runtime deps** for full functionality: `ffmpeg`/`ffprobe` (HLS/probe/subtitles), `yt-dlp` (`/yt`). Bundled in the container image.
-- Config knobs are env vars (`STREMIO_*`, `HTTP_PORT`, `APP_PATH`, …) — see the table in `README.md`; add new ones in `main.go` and document them there.
+- Config knobs are env vars (`RIVULET_*`, `HTTP_PORT`, `APP_PATH`, …) — see the table in `README.md`; add new ones in `main.go` and document them there.
 
 ## Testing & QA
 

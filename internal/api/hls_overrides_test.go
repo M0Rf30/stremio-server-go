@@ -7,7 +7,7 @@ package api
 // Handler tests for the per-session HLS overrides on
 // GET /hlsv2/{id}/master.m3u8: query pass-through to MediaProber.StartHLS
 // and the 400 mapping for types.ErrInvalidHLSOption. Parsing, validation and
-// the STREMIO_HLS_SESSION_OVERRIDES gate live in internal/media and are
+// the RIVULET_HLS_SESSION_OVERRIDES gate live in internal/media and are
 // tested there (session_overrides_test.go).
 
 import (

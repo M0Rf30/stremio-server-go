@@ -567,7 +567,7 @@ func TestHLSConfigNormalizeTonemap(t *testing.T) {
 // TestVideoEncodeArgsQSVPresetHonoredWithTonemap pins the PR28 x PR27
 // interaction: after the video-arg switch was refactored into
 // videoEncodeArgs (PR27), the h264_qsv case must still read the per-session
-// QSV preset (PR28's STREMIO_TRANSCODE_QSV_PRESET / transcodeProfile
+// QSV preset (PR28's RIVULET_TRANSCODE_QSV_PRESET / transcodeProfile
 // mapping) instead of the pre-PR28 hardcoded "veryfast" — with tone mapping
 // both off and on, since the tone-mapping filter chain is orthogonal to the
 // encoder preset flag.

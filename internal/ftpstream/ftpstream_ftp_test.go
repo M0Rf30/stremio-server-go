@@ -205,7 +205,7 @@ func (f *fakeFTPServer) serve(c net.Conn) {
 }
 
 func TestOpenFTPStalledGreetingTimesOut(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	old := ftpIdleTimeout
 	ftpIdleTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { ftpIdleTimeout = old })
@@ -228,7 +228,7 @@ func TestOpenFTPStalledGreetingTimesOut(t *testing.T) {
 }
 
 func TestOpenFTPReadsContent(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	want := []byte("hello ftp world")
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: want})
 
@@ -250,7 +250,7 @@ func TestOpenFTPReadsContent(t *testing.T) {
 }
 
 func TestOpenFTPCtxCancelUnblocksRead(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	setAbortGrace(t, 100*time.Millisecond)
 	srv := newFakeFTPServer(t, &fakeFTPServer{content: []byte("abcdef"), stallData: true})
 

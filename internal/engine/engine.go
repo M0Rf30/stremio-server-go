@@ -315,7 +315,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 
 	// Maximize peer sourcing + feature set.
 	cc.DisablePEX = false                        // BEP11 peer exchange
-	cc.DisableWebtorrent = cfg.DisableWebtorrent // WebRTC/WebTorrent peers (pion); gated by STREMIO_DISABLE_WEBTORRENT
+	cc.DisableWebtorrent = cfg.DisableWebtorrent // WebRTC/WebTorrent peers (pion); gated by RIVULET_DISABLE_WEBTORRENT
 	cc.DisableWebseeds = false                   // BEP19 HTTP webseeds
 	cc.Seed = true                               // keep uploading while/after streaming (swarm health; uses IPv6 inbound)
 	cc.AcceptPeerConnections = true
@@ -331,7 +331,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 
 	// Connection budgets tuned for streaming: enough peers for full throughput
 	// without excessive MSE/RC4 handshakes and dial churn, which are the dominant
-	// engine CPU cost on large, fast swarms (4K). Scaled by STREMIO_PEERS_PER_TORRENT
+	// engine CPU cost on large, fast swarms (4K). Scaled by RIVULET_PEERS_PER_TORRENT
 	// (cfg.PeersPerTorrent); default 0 keeps the historical 50/25/500 ratios.
 	est, half, high := peerBudget(cfg.PeersPerTorrent)
 	cc.EstablishedConnsPerTorrent = est
@@ -432,11 +432,11 @@ func New(cfg types.Config) (types.EngineManager, error) {
 // ErrTooManyEngines aliases types.ErrTooManyEngines.
 var ErrTooManyEngines = types.ErrTooManyEngines
 
-// defaultMaxEngines is the active-engine cap when STREMIO_MAX_ENGINES is unset.
+// defaultMaxEngines is the active-engine cap when RIVULET_MAX_ENGINES is unset.
 const defaultMaxEngines = 20
 
 func maxEnginesFromEnv() int {
-	if v := strings.TrimSpace(os.Getenv("STREMIO_MAX_ENGINES")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("RIVULET_MAX_ENGINES")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n // <=0 disables the cap
 		}
@@ -1900,7 +1900,7 @@ func (e *engine) stats(idx int, touch bool) *types.Stats {
 	// polled continuously by dashboards and monitors across every torrent)
 	// passes touch=false: counting those polls reset the idle clock on every
 	// call and kept abandoned torrents resident forever, so
-	// STREMIO_TORRENT_IDLE_TIMEOUT never fired (issue #41).
+	// RIVULET_TORRENT_IDLE_TIMEOUT never fired (issue #41).
 	if touch {
 		e.lastAccess = now
 	}

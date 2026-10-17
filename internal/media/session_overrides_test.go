@@ -5,7 +5,7 @@
 package media
 
 // Tests for the opt-in per-session HLS overrides on master.m3u8
-// (STREMIO_HLS_SESSION_OVERRIDES): query parsing/validation, precedence over
+// (RIVULET_HLS_SESSION_OVERRIDES): query parsing/validation, precedence over
 // /settings and env, BANDWIDTH/CODECS derivation, the gate, existing-session
 // behaviour, and per-session TTL eviction. StartHLS is driven without
 // ffprobe by pre-seeding the manager's positive probe cache for the media
@@ -369,7 +369,7 @@ func TestStartHLSGateOnWithoutParamsMatchesLegacy(t *testing.T) {
 }
 
 // TestStartHLSBandwidthDecimalAudioBitrate: a decimal
-// STREMIO_TRANSCODE_AUDIO_BITRATE, which ffmpeg accepts, still counts toward
+// RIVULET_TRANSCODE_AUDIO_BITRATE, which ffmpeg accepts, still counts toward
 // BANDWIDTH instead of being dropped as unparsable.
 func TestStartHLSBandwidthDecimalAudioBitrate(t *testing.T) {
 	for _, c := range []struct{ maxrate, audio, want string }{
@@ -612,7 +612,7 @@ func TestEvictIdleHonoursPerSessionTTL(t *testing.T) {
 }
 
 // TestEvictIdleDisableIdleEvictionHonoursPerSessionTTL pins the
-// DisableIdleEviction (STREMIO_HLS_SESSION_TTL=0) x per-session ?ttl=
+// DisableIdleEviction (RIVULET_HLS_SESSION_TTL=0) x per-session ?ttl=
 // interaction: an explicit per-session ttl still wins and gets evicted on
 // schedule even while global idle eviction is off, while a session with no
 // ttl of its own is never evicted in that mode, however stale.

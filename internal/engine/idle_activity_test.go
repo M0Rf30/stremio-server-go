@@ -36,7 +36,7 @@ func newIdleTestManager(t *testing.T, ih string) (*manager, *engine) {
 // issue #41 ("Idle torrent not evicted"): the global /stats.json (AllStats)
 // used to bump every torrent's lastAccess, so any dashboard or monitor polling
 // it reset the idle clock on every call and no torrent was ever reclaimed by
-// STREMIO_TORRENT_IDLE_TIMEOUT.
+// RIVULET_TORRENT_IDLE_TIMEOUT.
 func TestGlobalStatsPollingDoesNotKeepTorrentAlive(t *testing.T) {
 	const ih = "08ada5a7a6183aae1e09d831df6748d566095a10"
 	m, e := newIdleTestManager(t, ih)

@@ -31,7 +31,7 @@ func BenchmarkNzbCreateSeek(b *testing.B) {
 		nseg    = 40
 		segSize = 64 * 1024
 	)
-	b.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	b.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	tmp := b.TempDir()
 	b.Setenv("TMPDIR", tmp)
 	b.Setenv("TMP", tmp)

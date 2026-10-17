@@ -109,7 +109,7 @@ func progCreate(t *testing.T, h http.Handler, archivePath, ext string) (string, 
 // identical one reuses it.
 func progCreateWith(t *testing.T, h http.Handler, archivePath, ext string, extra map[string]any) (string, *archiveSession) {
 	t.Helper()
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", filepath.Dir(archivePath))
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", filepath.Dir(archivePath))
 	key := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
 	payload := map[string]any{"url": archivePath}
 	for k, v := range extra {

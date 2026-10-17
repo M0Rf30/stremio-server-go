@@ -40,7 +40,7 @@ type defRegistry struct {
 	pubKey    ed25519.PublicKey
 	refresh   time.Duration
 	// client fetches the operator-configured remote list. It deliberately
-	// does not use the SSRF-guarded proxy client: like STREMIO_TRACKERS_URL,
+	// does not use the SSRF-guarded proxy client: like RIVULET_TRACKERS_URL,
 	// the URL comes from the environment, not from a request, and may point
 	// at a self-hosted LAN/localhost copy. Authenticity comes from the
 	// ed25519 signature, not from the address.
@@ -106,7 +106,7 @@ func (reg *defRegistry) close() {
 func parsePubKey(s string) (ed25519.PublicKey, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return nil, errors.New("STREMIO_EXTRACTORS_PUBKEY is not set")
+		return nil, errors.New("RIVULET_EXTRACTORS_PUBKEY is not set")
 	}
 	for _, dec := range []func(string) ([]byte, error){hex.DecodeString, base64.StdEncoding.DecodeString, base64.RawURLEncoding.DecodeString} {
 		if b, err := dec(s); err == nil && len(b) == ed25519.PublicKeySize {

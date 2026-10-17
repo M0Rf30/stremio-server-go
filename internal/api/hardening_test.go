@@ -113,7 +113,7 @@ func TestSideEffectingRouteCoverage(t *testing.T) {
 }
 
 func TestProxyBlocksPrivateByDefault(t *testing.T) {
-	t.Setenv("STREMIO_PROXY_ALLOW_PRIVATE", "")
+	t.Setenv("RIVULET_PROXY_ALLOW_PRIVATE", "")
 	h := newHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/proxy/d=http%3A%2F%2F127.0.0.1%3A1/x", nil)
 	rec := httptest.NewRecorder()

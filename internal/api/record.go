@@ -23,7 +23,7 @@ package api
 //	GET    /api/recordings/{id}/download  attachment, Range
 //
 // Everything requires api_password (query or X-Api-Password) when
-// STREMIO_PROXY_PASSWORD is set, through the same Authorize helper /proxy uses.
+// RIVULET_PROXY_PASSWORD is set, through the same Authorize helper /proxy uses.
 
 import (
 	"encoding/json"
@@ -75,7 +75,7 @@ func newDVR(cfg types.Config) (*dvr.Manager, error) {
 	log.Info("dvr enabled", "dir", m.Dir(), "max_active", m.MaxActive(), "max_duration", m.MaxDuration().String(),
 		"ffmpeg", m.FFmpegAvailable())
 	if cfg.ProxyPassword == "" && cfg.ProxyIPACL == "" {
-		log.Warn("dvr is enabled without STREMIO_PROXY_PASSWORD or STREMIO_PROXY_IP_ACL: anyone who can reach this server can record and read recordings")
+		log.Warn("dvr is enabled without RIVULET_PROXY_PASSWORD or RIVULET_PROXY_IP_ACL: anyone who can reach this server can record and read recordings")
 	}
 	return m, nil
 }

@@ -156,7 +156,7 @@ func TestCrossSiteMasterSelfTorrentFileAllowed(t *testing.T) {
 func TestCrossSiteMasterSelfArchiveCreateAllowed(t *testing.T) {
 	requireFFprobe(t)
 	zp := writeTestZip(t, "movie.mkv", []byte(strings.Repeat("not media ", 1000)))
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", filepath.Dir(zp))
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", filepath.Dir(zp))
 	lz, err := lzstring.CompressToEncodedURIComponent(fmt.Sprintf(`{"url":%q}`, zp))
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func TestCrossSiteMasterSelfProxyRelayed(t *testing.T) {
 	requireFFprobe(t)
 	// The proxy's destination is loopback here, so let streamproxy reach it;
 	// the relay's own guard is unaffected.
-	t.Setenv("STREMIO_PROXY_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_PROXY_ALLOW_PRIVATE", "1")
 	s := newSelfOriginServer(t)
 
 	var private pathRecorder

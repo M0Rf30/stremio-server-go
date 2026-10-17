@@ -13,7 +13,7 @@ import (
 // loopback, Host example.com) working; security tests opt back in with
 // t.Setenv.
 func TestMain(m *testing.M) {
-	_ = os.Setenv("STREMIO_PROXY_ALLOW_PRIVATE", "1")
-	_ = os.Setenv("STREMIO_ALLOWED_HOSTS", "example.com")
+	_ = os.Setenv("RIVULET_PROXY_ALLOW_PRIVATE", "1")
+	_ = os.Setenv("RIVULET_ALLOWED_HOSTS", "example.com")
 	os.Exit(m.Run())
 }

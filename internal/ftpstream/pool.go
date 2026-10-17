@@ -53,7 +53,7 @@ const (
 
 // ftpPoolKey identifies interchangeable logged-in control connections: same
 // server, same credentials, same TLS mode and the same private-address policy
-// the connection was dialled under (so flipping STREMIO_FTP_ALLOW_PRIVATE
+// the connection was dialled under (so flipping RIVULET_FTP_ALLOW_PRIVATE
 // never reuses a connection dialled under the other policy).
 type ftpPoolKey struct {
 	addr         string

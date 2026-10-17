@@ -776,13 +776,13 @@ func archiveLargestVideo(files []archive.Entry) string {
 // every hop — closing the DNS-rebinding / redirect-to-loopback gap that a
 // pure pre-flight check cannot foreclose by itself.
 
-// archiveAllowPrivateHosts reports whether STREMIO_ARCHIVE_ALLOW_PRIVATE
+// archiveAllowPrivateHosts reports whether RIVULET_ARCHIVE_ALLOW_PRIVATE
 // opts /create endpoints (archive download, NZB fetch) into reaching
 // private/loopback/RFC1918 hosts. Default is false (secure): only public
 // addresses are reachable. The cloud-metadata address is always blocked
 // regardless, via netguard.ValidateIP's unconditional check.
 func archiveAllowPrivateHosts() bool {
-	v := strings.TrimSpace(os.Getenv("STREMIO_ARCHIVE_ALLOW_PRIVATE"))
+	v := strings.TrimSpace(os.Getenv("RIVULET_ARCHIVE_ALLOW_PRIVATE"))
 	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
 }
 
@@ -935,12 +935,12 @@ const archiveLocalPathErrMsg = "local path not found"
 // archiveLocalRoot returns the directory local archive sources are confined
 // to, or "" when local-path archives are disabled (the default — without
 // this the "url"/"from" field could name any file on disk; see
-// archiveResolveLocalPath). STREMIO_ARCHIVE_LOCAL_ROOT is an archive-specific
+// archiveResolveLocalPath). RIVULET_ARCHIVE_LOCAL_ROOT is an archive-specific
 // override; LOCAL_FILES_DIR (internal/api/localaddon.go's existing
 // local-files-addon root) is reused as a fallback so operators who already
 // mount a media directory get local-archive support without a second knob.
 func archiveLocalRoot() string {
-	if root := strings.TrimSpace(os.Getenv("STREMIO_ARCHIVE_LOCAL_ROOT")); root != "" {
+	if root := strings.TrimSpace(os.Getenv("RIVULET_ARCHIVE_LOCAL_ROOT")); root != "" {
 		return root
 	}
 	return strings.TrimSpace(os.Getenv("LOCAL_FILES_DIR"))

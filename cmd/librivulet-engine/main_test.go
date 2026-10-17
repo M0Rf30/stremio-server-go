@@ -13,21 +13,21 @@ import (
 )
 
 func TestApplyOSEnv(t *testing.T) {
-	t.Setenv("STREMIO_HWACCEL", "orig")
+	t.Setenv("RIVULET_HWACCEL", "orig")
 	os.Unsetenv("LOCAL_FILES_DIR")
 	restore := applyOSEnv(map[string]string{
-		"STREMIO_HWACCEL": "0",
+		"RIVULET_HWACCEL": "0",
 		"LOCAL_FILES_DIR": "/x",
 		"HTTP_PORT":       "1",
 	})
-	if os.Getenv("STREMIO_HWACCEL") != "0" || os.Getenv("LOCAL_FILES_DIR") != "/x" {
+	if os.Getenv("RIVULET_HWACCEL") != "0" || os.Getenv("LOCAL_FILES_DIR") != "/x" {
 		t.Fatal("env not applied")
 	}
 	if _, ok := os.LookupEnv("HTTP_PORT"); ok {
 		t.Fatal("non-allowlisted key leaked into env")
 	}
 	restore()
-	if os.Getenv("STREMIO_HWACCEL") != "orig" {
+	if os.Getenv("RIVULET_HWACCEL") != "orig" {
 		t.Fatal("not restored")
 	}
 	if _, ok := os.LookupEnv("LOCAL_FILES_DIR"); ok {

@@ -23,8 +23,8 @@ so it usually needs no Cinemeta lookup for movies and series.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `STREMIO_TORZNAB_URL` | _(unset)_ | Torznab indexer API base URL. Unset = add-on is inert. |
-| `STREMIO_TORZNAB_APIKEY` | _(unset)_ | API key sent with every request. Required by Prowlarr and Jackett; not needed for Bitmagnet. |
+| `RIVULET_TORZNAB_URL` | _(unset)_ | Torznab indexer API base URL. Unset = add-on is inert. |
+| `RIVULET_TORZNAB_APIKEY` | _(unset)_ | API key sent with every request. Required by Prowlarr and Jackett; not needed for Bitmagnet. |
 
 Example base URLs:
 
@@ -37,18 +37,18 @@ Example base URLs:
 Start the server with the env vars set:
 
 ```sh
-STREMIO_TORZNAB_URL=http://localhost:3333/torznab ./rivulet-engine
+RIVULET_TORZNAB_URL=http://localhost:3333/torznab ./rivulet-engine
 ```
 
 For Prowlarr with an API key:
 
 ```sh
-STREMIO_TORZNAB_URL=http://192.168.1.10:9696/42/api \
-STREMIO_TORZNAB_APIKEY=abc123def456 \
+RIVULET_TORZNAB_URL=http://192.168.1.10:9696/42/api \
+RIVULET_TORZNAB_APIKEY=abc123def456 \
 ./rivulet-engine
 ```
 
-If `STREMIO_TORZNAB_URL` is unset, the `/torznab` routes serve the manifest but return no streams.
+If `RIVULET_TORZNAB_URL` is unset, the `/torznab` routes serve the manifest but return no streams.
 
 ---
 
@@ -93,7 +93,7 @@ If the IMDB id query returns no results, the add-on falls back to a keyword sear
 (`t=search&q=<title>`) using the title resolved from
 [Cinemeta](https://v3-cinemeta.strem.io) (6-hour cache).
 
-> The metadata source is the Cinemeta-compatible add-on at `STREMIO_METADATA_URL`
+> The metadata source is the Cinemeta-compatible add-on at `RIVULET_METADATA_URL`
 > (default `https://v3-cinemeta.strem.io`; set to empty/`off` to disable). Since
 > Torznab searches by IMDB id first, disabling it only removes the title-search
 > fallback.

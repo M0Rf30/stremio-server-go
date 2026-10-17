@@ -57,7 +57,7 @@ func newArchReuseOrigin(t *testing.T, data []byte) *archReuseOrigin {
 // creates inside the test's own directory.
 func archReuseEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 	t.Setenv("TMP", tmp)
@@ -346,7 +346,7 @@ func TestArchiveCreate_LocalFileChangeRebuilds(t *testing.T) {
 	old := progNoise(256<<10, 56)
 	changed := progNoise(300<<10, 57)
 	dir := t.TempDir()
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", dir)
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", dir)
 	p := filepath.Join(dir, "m.zip")
 	write := func(content []byte) {
 		t.Helper()
@@ -453,7 +453,7 @@ func TestArchiveCreate_FailedSessionRebuilds(t *testing.T) {
 
 func archReuseFailedRetry(t *testing.T, p string, size int) {
 	t.Helper()
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", filepath.Dir(p))
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", filepath.Dir(p))
 	srv := httptest.NewServer(newHandler(t))
 	t.Cleanup(srv.Close)
 	key := archReuseKey(t)
@@ -638,7 +638,7 @@ func TestArchiveReuseOrLead_JoinsInFlightBuildAndSharesFailure(t *testing.T) {
 	}
 
 	// The leader fails (local archives are disabled here): waiters get the same answer.
-	t.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", "")
+	t.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", "")
 	t.Setenv("LOCAL_FILES_DIR", "")
 	payload := &archivePayload{URL: "/nowhere/a.zip"}
 	res := archiveBuildAndRegister("zip", key, sig, lead, payload, payload.URL)

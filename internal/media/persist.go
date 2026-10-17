@@ -4,7 +4,7 @@
 
 package media
 
-// Opt-in HLS session persistence (HLSConfig.Persist / STREMIO_HLS_PERSIST).
+// Opt-in HLS session persistence (HLSConfig.Persist / RIVULET_HLS_PERSIST).
 //
 // By default every hlsManager gets a fresh, random, owner-only stremio-hls-*
 // directory (MED-2, see newHLSBaseDir) that CloseHLS deletes, and session
@@ -90,13 +90,13 @@ type persistedSession struct {
 	Probe       persistedProbe  `json:"probe"`
 	LastAccess  time.Time       `json:"lastAccess"`
 	// TTL is the session's own per-session ?ttl= override in nanoseconds
-	// (STREMIO_HLS_SESSION_OVERRIDES; see hlsSession.ttl), 0 when unset (the
+	// (RIVULET_HLS_SESSION_OVERRIDES; see hlsSession.ttl), 0 when unset (the
 	// restored session then falls back to the current process's
 	// HLSConfig.SessionTTL, exactly like a freshly created one). An explicit
 	// per-session ttl must survive a restart: it is what makes a session
 	// created ahead of a scheduled party outlive the process, and — per
 	// evictIdle's documented precedence — it is honoured even when
-	// DisableIdleEviction (STREMIO_HLS_SESSION_TTL=0) is set.
+	// DisableIdleEviction (RIVULET_HLS_SESSION_TTL=0) is set.
 	TTL time.Duration `json:"ttl,omitempty"`
 }
 
@@ -111,7 +111,7 @@ type persistedConfig struct {
 	HWEnabled    bool   `json:"hwEnabled"`
 	X264Preset   string `json:"x264Preset"`
 	NVENCPreset  string `json:"nvencPreset"`
-	// QSVPreset is the h264_qsv -preset snapshot (STREMIO_TRANSCODE_QSV_PRESET
+	// QSVPreset is the h264_qsv -preset snapshot (RIVULET_TRANSCODE_QSV_PRESET
 	// / transcodeProfile, see qsvPresetForX264). Required: a record without
 	// one (e.g. written before this field existed) fails sessionConfig's
 	// validation and is discarded, rather than restoring a session whose
@@ -266,7 +266,7 @@ func (m *hlsManager) sessionConfig(c persistedConfig) (sessionConfig, error) {
 //
 // pre is the session's pre-roll plan (segPreRollPlan). The first attempt's
 // pre-roll decides which source frames a segment starts decoding from, so
-// a restored session whose pre-roll changed (STREMIO_HLS_SEEK_PREROLL, for
+// a restored session whose pre-roll changed (RIVULET_HLS_SEEK_PREROLL, for
 // an indexed container) is re-transcoded rather than mixing segments. It
 // is appended only when it differs from the full margin, so the
 // fingerprint of every session at the default is unchanged.
@@ -294,13 +294,13 @@ func newHLSBase(cfg HLSConfig) (base string, persist bool, lock io.Closer) {
 	log := logging.For("media")
 	if cfg.Persist {
 		if cfg.WorkDir == "" {
-			log.Warn("STREMIO_HLS_PERSIST requires STREMIO_HLS_WORK_DIR; HLS sessions will not persist across restarts")
+			log.Warn("RIVULET_HLS_PERSIST requires RIVULET_HLS_WORK_DIR; HLS sessions will not persist across restarts")
 		} else if dir, lk, err := preparePersistDir(cfg.WorkDir); err != nil {
 			log.Warn("HLS persist dir unusable; HLS sessions will not persist across restarts", "work_dir", cfg.WorkDir, "err", err)
 		} else {
 			log.Info("HLS sessions persist across restarts", "dir", dir)
 			if cfg.SessionTTL == defaultSessionTTL && !cfg.DisableIdleEviction {
-				log.Warn("STREMIO_HLS_PERSIST is on but STREMIO_HLS_SESSION_TTL is still the default; persisted sessions are evicted a minute after last use and discarded by any restart longer than that — raise it (e.g. 12h)", "session_ttl", cfg.SessionTTL)
+				log.Warn("RIVULET_HLS_PERSIST is on but RIVULET_HLS_SESSION_TTL is still the default; persisted sessions are evicted a minute after last use and discarded by any restart longer than that — raise it (e.g. 12h)", "session_ttl", cfg.SessionTTL)
 			}
 			return dir, true, lk
 		}
@@ -607,7 +607,7 @@ func (m *hlsManager) loadPersisted() {
 		}
 		// Same rule as evictIdle: the session's own ttl if it has one, else
 		// SessionTTL, and no idle cutoff at all when idle eviction is
-		// disabled (STREMIO_HLS_SESSION_TTL=0) and it has no ttl of its own.
+		// disabled (RIVULET_HLS_SESSION_TTL=0) and it has no ttl of its own.
 		switch {
 		case rec.TTL > 0:
 			if lastAccess.Before(now.Add(-rec.TTL)) {
@@ -650,7 +650,7 @@ func (m *hlsManager) loadPersisted() {
 			return kept[i].s.lastAccess.Load() > kept[j].s.lastAccess.Load()
 		})
 		for _, c := range kept[m.cfg.MaxSessions:] {
-			log.Info("discarding persisted HLS session: over STREMIO_HLS_MAX_SESSIONS", "id", c.id, "max_sessions", m.cfg.MaxSessions)
+			log.Info("discarding persisted HLS session: over RIVULET_HLS_MAX_SESSIONS", "id", c.id, "max_sessions", m.cfg.MaxSessions)
 			if err := os.RemoveAll(c.s.dir); err != nil {
 				log.Warn("remove persisted HLS session failed", "id", c.id, "err", err)
 			}

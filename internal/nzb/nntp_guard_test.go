@@ -24,7 +24,7 @@ import (
 
 // TestDial_ControlBlocksLoopbackByDefault proves that when Control is set to
 // the same guard api/nzb.go wires in by default (blockPrivate=true, i.e.
-// STREMIO_ARCHIVE_ALLOW_PRIVATE unset), Dial refuses a loopback target before
+// RIVULET_ARCHIVE_ALLOW_PRIVATE unset), Dial refuses a loopback target before
 // ever reaching the fake server's protocol handshake.
 func TestDial_ControlBlocksLoopbackByDefault(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -57,7 +57,7 @@ func TestDial_ControlBlocksLoopbackByDefault(t *testing.T) {
 }
 
 // TestDial_ControlAllowsLoopbackWhenOptedIn proves that when Control is set
-// to the opted-in guard (blockPrivate=false, i.e. STREMIO_ARCHIVE_ALLOW_PRIVATE
+// to the opted-in guard (blockPrivate=false, i.e. RIVULET_ARCHIVE_ALLOW_PRIVATE
 // set), Dial still reaches a loopback server and completes the handshake
 // normally.
 func TestDial_ControlAllowsLoopbackWhenOptedIn(t *testing.T) {

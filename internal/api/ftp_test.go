@@ -55,7 +55,7 @@ func newFakeFTPSource(data []byte) *httptest.Server {
 // parseRange decides about the response status/Content-Length, so the
 // declared Content-Length always equals the actual body length.
 func TestHandlerFTP_RangeFraming(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1") // exercises range framing, not the SSRF guard
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1") // exercises range framing, not the SSRF guard
 	data := make([]byte, 1000)
 	for i := range data {
 		data[i] = byte('a' + i%26)

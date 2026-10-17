@@ -124,7 +124,7 @@ func TestLandingIgnoresBogusForwardedProto(t *testing.T) {
 }
 
 // TestSettingsBaseURLUsesPublicURL is the handler-level check that
-// STREMIO_PUBLIC_URL also drives the /settings baseUrl (not only the landing
+// RIVULET_PUBLIC_URL also drives the /settings baseUrl (not only the landing
 // redirect).
 func TestSettingsBaseURLUsesPublicURL(t *testing.T) {
 	h := newHandlerWithCfg(t, func(c *types.Config) {

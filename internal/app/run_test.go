@@ -60,11 +60,11 @@ func TestRunStartStopTwice(t *testing.T) {
 			"HTTP_PORT":                  strconv.Itoa(port),
 			"HTTPS_PORT":                 "0", // disable HTTPS listener for this test
 			"BT_LISTEN_PORT":             "0",
-			"STREMIO_DISABLE_TRACKERS":   "1", // avoid upstream tracker/udp network flake
-			"STREMIO_DISABLE_WEBTORRENT": "1", // avoid spawning pion goroutines
-			"STREMIO_TRACKERS_URL":       "off",
-			"STREMIO_METADATA_URL":       "off",
-			"STREMIO_ENABLE_DLNA":        "0",
+			"RIVULET_DISABLE_TRACKERS":   "1", // avoid upstream tracker/udp network flake
+			"RIVULET_DISABLE_WEBTORRENT": "1", // avoid spawning pion goroutines
+			"RIVULET_TRACKERS_URL":       "off",
+			"RIVULET_METADATA_URL":       "off",
+			"RIVULET_ENABLE_DLNA":        "0",
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		runErr := make(chan error, 1)
@@ -136,11 +136,11 @@ func TestRunLoopbackFallbackForNonLoopbackBindAddress(t *testing.T) {
 		"HTTP_PORT":                  strconv.Itoa(port),
 		"HTTPS_PORT":                 "0",
 		"BT_LISTEN_PORT":             "0",
-		"STREMIO_DISABLE_TRACKERS":   "1",
-		"STREMIO_DISABLE_WEBTORRENT": "1",
-		"STREMIO_TRACKERS_URL":       "off",
-		"STREMIO_METADATA_URL":       "off",
-		"STREMIO_ENABLE_DLNA":        "0",
+		"RIVULET_DISABLE_TRACKERS":   "1",
+		"RIVULET_DISABLE_WEBTORRENT": "1",
+		"RIVULET_TRACKERS_URL":       "off",
+		"RIVULET_METADATA_URL":       "off",
+		"RIVULET_ENABLE_DLNA":        "0",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
@@ -175,11 +175,11 @@ func TestRunNoLoopbackFallbackForLoopbackBindAddress(t *testing.T) {
 		"HTTP_PORT":                  strconv.Itoa(port),
 		"HTTPS_PORT":                 "0",
 		"BT_LISTEN_PORT":             "0",
-		"STREMIO_DISABLE_TRACKERS":   "1",
-		"STREMIO_DISABLE_WEBTORRENT": "1",
-		"STREMIO_TRACKERS_URL":       "off",
-		"STREMIO_METADATA_URL":       "off",
-		"STREMIO_ENABLE_DLNA":        "0",
+		"RIVULET_DISABLE_TRACKERS":   "1",
+		"RIVULET_DISABLE_WEBTORRENT": "1",
+		"RIVULET_TRACKERS_URL":       "off",
+		"RIVULET_METADATA_URL":       "off",
+		"RIVULET_ENABLE_DLNA":        "0",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)

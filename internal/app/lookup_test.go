@@ -99,23 +99,23 @@ func TestHLSConfigDefaultsWhenNothingSet(t *testing.T) {
 
 func TestHLSConfigPrivateAllow(t *testing.T) {
 	if got := hlsConfig(MapLookup(map[string]string{})).PrivateAllow; got != nil {
-		t.Errorf("PrivateAllow with STREMIO_HLS_PRIVATE_ALLOW unset = %v, want nil", got)
+		t.Errorf("PrivateAllow with RIVULET_HLS_PRIVATE_ALLOW unset = %v, want nil", got)
 	}
-	// STREMIO_PROXY_PRIVATE_ALLOW is /proxy's list and must not leak into media.
-	if got := hlsConfig(MapLookup(map[string]string{"STREMIO_PROXY_PRIVATE_ALLOW": "192.168.1.10"})).PrivateAllow; got != nil {
-		t.Errorf("PrivateAllow from STREMIO_PROXY_PRIVATE_ALLOW = %v, want nil", got)
+	// RIVULET_PROXY_PRIVATE_ALLOW is /proxy's list and must not leak into media.
+	if got := hlsConfig(MapLookup(map[string]string{"RIVULET_PROXY_PRIVATE_ALLOW": "192.168.1.10"})).PrivateAllow; got != nil {
+		t.Errorf("PrivateAllow from RIVULET_PROXY_PRIVATE_ALLOW = %v, want nil", got)
 	}
-	got := hlsConfig(MapLookup(map[string]string{"STREMIO_HLS_PRIVATE_ALLOW": "192.168.1.0/24, bad_host!"})).PrivateAllow
+	got := hlsConfig(MapLookup(map[string]string{"RIVULET_HLS_PRIVATE_ALLOW": "192.168.1.0/24, bad_host!"})).PrivateAllow
 	if got == nil || !got.Contains(net.ParseIP("192.168.1.10")) || got.Contains(net.ParseIP("10.0.0.1")) {
-		t.Errorf("PrivateAllow from STREMIO_HLS_PRIVATE_ALLOW = %v, want 192.168.1.0/24 only", got)
+		t.Errorf("PrivateAllow from RIVULET_HLS_PRIVATE_ALLOW = %v, want 192.168.1.0/24 only", got)
 	}
 }
 
 func TestHLSConfigSessionTTLOverrideDerivesReaperInterval(t *testing.T) {
-	// STREMIO_HLS_REAPER_INTERVAL left unset: its default must scale with the
+	// RIVULET_HLS_REAPER_INTERVAL left unset: its default must scale with the
 	// overridden SessionTTL (issue #20: "Should probably scale with the TTL
 	// above"), not stay pinned at the historical 30s.
-	got := hlsConfig(MapLookup(map[string]string{"STREMIO_HLS_SESSION_TTL": "10s"}))
+	got := hlsConfig(MapLookup(map[string]string{"RIVULET_HLS_SESSION_TTL": "10s"}))
 	if got.SessionTTL != 10*time.Second {
 		t.Fatalf("SessionTTL = %s, want 10s", got.SessionTTL)
 	}
@@ -125,8 +125,8 @@ func TestHLSConfigSessionTTLOverrideDerivesReaperInterval(t *testing.T) {
 	}
 }
 
-// STREMIO_HLS_SESSION_TTL=0 disables idle eviction (like
-// STREMIO_TORRENT_IDLE_TIMEOUT=0); unset keeps the 60s default and negative or
+// RIVULET_HLS_SESSION_TTL=0 disables idle eviction (like
+// RIVULET_TORRENT_IDLE_TIMEOUT=0); unset keeps the 60s default and negative or
 // invalid values keep falling back to it. In every case the derived reaper
 // interval stays a sane positive value (never 0, which would panic
 // time.NewTicker, or a tiny busy-loop interval).
@@ -138,13 +138,13 @@ func TestHLSConfigSessionTTLZeroDisablesEviction(t *testing.T) {
 		wantDisable bool
 	}{
 		{"unset", map[string]string{}, 60 * time.Second, false},
-		{"empty", map[string]string{"STREMIO_HLS_SESSION_TTL": ""}, 60 * time.Second, false},
-		{"zero", map[string]string{"STREMIO_HLS_SESSION_TTL": "0"}, 0, true},
-		{"zero duration string", map[string]string{"STREMIO_HLS_SESSION_TTL": "0s"}, 0, true},
-		{"negative seconds", map[string]string{"STREMIO_HLS_SESSION_TTL": "-5"}, 60 * time.Second, false},
-		{"negative duration", map[string]string{"STREMIO_HLS_SESSION_TTL": "-1m"}, 60 * time.Second, false},
-		{"invalid", map[string]string{"STREMIO_HLS_SESSION_TTL": "forever"}, 60 * time.Second, false},
-		{"positive", map[string]string{"STREMIO_HLS_SESSION_TTL": "90"}, 90 * time.Second, false},
+		{"empty", map[string]string{"RIVULET_HLS_SESSION_TTL": ""}, 60 * time.Second, false},
+		{"zero", map[string]string{"RIVULET_HLS_SESSION_TTL": "0"}, 0, true},
+		{"zero duration string", map[string]string{"RIVULET_HLS_SESSION_TTL": "0s"}, 0, true},
+		{"negative seconds", map[string]string{"RIVULET_HLS_SESSION_TTL": "-5"}, 60 * time.Second, false},
+		{"negative duration", map[string]string{"RIVULET_HLS_SESSION_TTL": "-1m"}, 60 * time.Second, false},
+		{"invalid", map[string]string{"RIVULET_HLS_SESSION_TTL": "forever"}, 60 * time.Second, false},
+		{"positive", map[string]string{"RIVULET_HLS_SESSION_TTL": "90"}, 90 * time.Second, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -164,43 +164,43 @@ func TestHLSConfigSessionTTLZeroDisablesEviction(t *testing.T) {
 
 func TestHLSConfigReaperIntervalExplicitOverride(t *testing.T) {
 	got := hlsConfig(MapLookup(map[string]string{
-		"STREMIO_HLS_SESSION_TTL":     "10s",
-		"STREMIO_HLS_REAPER_INTERVAL": "3s",
+		"RIVULET_HLS_SESSION_TTL":     "10s",
+		"RIVULET_HLS_REAPER_INTERVAL": "3s",
 	}))
 	if got.ReaperInterval != 3*time.Second {
-		t.Errorf("explicit STREMIO_HLS_REAPER_INTERVAL not honoured: got %s, want 3s", got.ReaperInterval)
+		t.Errorf("explicit RIVULET_HLS_REAPER_INTERVAL not honoured: got %s, want 3s", got.ReaperInterval)
 	}
 }
 
 func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 	env := map[string]string{
-		"STREMIO_HLS_SESSION_TTL":          "45s",
-		"STREMIO_HLS_NEG_PROBE_TTL":        "2m",
-		"STREMIO_HLS_POS_PROBE_TTL":        "3m",
-		"STREMIO_HLS_MAX_SESSIONS":         "10",
-		"STREMIO_HLS_WORK_DIR":             "/data/hls",
-		"STREMIO_HLS_SESSION_OVERRIDES":    "1",
-		"STREMIO_HLS_PERSIST":              "1",
-		"STREMIO_TRANSCODE_VIDEO_BITRATE":  "4M",
-		"STREMIO_TRANSCODE_MAXRATE":        "5M",
-		"STREMIO_TRANSCODE_BUFSIZE":        "10M",
-		"STREMIO_TRANSCODE_MAX_WIDTH":      "1280",
-		"STREMIO_TRANSCODE_MAX_HEIGHT":     "720",
-		"STREMIO_TRANSCODE_VAAPI_QP":       "18",
-		"STREMIO_TRANSCODE_NVENC_PRESET":   "p1",
-		"STREMIO_TRANSCODE_QSV_PRESET":     "medium",
-		"STREMIO_TRANSCODE_X264_PRESET":    "fast",
-		"STREMIO_TRANSCODE_X264_CRF":       "20",
-		"STREMIO_TRANSCODE_TONEMAP":        "mobius",
-		"STREMIO_TRANSCODE_AUDIO_CHANNELS": "6",
-		"STREMIO_TRANSCODE_AUDIO_BITRATE":  "256k",
-		"STREMIO_TRANSCODE_CONCURRENCY":    "2",
-		"STREMIO_HLS_VAAPI_DEVICE":         "/dev/dri/renderD129",
-		"STREMIO_HLS_SEGMENT_TIMEOUT":      "60s",
-		"STREMIO_HLS_SUBTITLE_TIMEOUT":     "45s",
-		"STREMIO_HLS_PROBE_TIMEOUT":        "15s",
-		"STREMIO_HLS_SEEK_PREROLL":         "3",
-		"STREMIO_HLS_SEGMENT_CACHE_BYTES":  "536870912",
+		"RIVULET_HLS_SESSION_TTL":          "45s",
+		"RIVULET_HLS_NEG_PROBE_TTL":        "2m",
+		"RIVULET_HLS_POS_PROBE_TTL":        "3m",
+		"RIVULET_HLS_MAX_SESSIONS":         "10",
+		"RIVULET_HLS_WORK_DIR":             "/data/hls",
+		"RIVULET_HLS_SESSION_OVERRIDES":    "1",
+		"RIVULET_HLS_PERSIST":              "1",
+		"RIVULET_TRANSCODE_VIDEO_BITRATE":  "4M",
+		"RIVULET_TRANSCODE_MAXRATE":        "5M",
+		"RIVULET_TRANSCODE_BUFSIZE":        "10M",
+		"RIVULET_TRANSCODE_MAX_WIDTH":      "1280",
+		"RIVULET_TRANSCODE_MAX_HEIGHT":     "720",
+		"RIVULET_TRANSCODE_VAAPI_QP":       "18",
+		"RIVULET_TRANSCODE_NVENC_PRESET":   "p1",
+		"RIVULET_TRANSCODE_QSV_PRESET":     "medium",
+		"RIVULET_TRANSCODE_X264_PRESET":    "fast",
+		"RIVULET_TRANSCODE_X264_CRF":       "20",
+		"RIVULET_TRANSCODE_TONEMAP":        "mobius",
+		"RIVULET_TRANSCODE_AUDIO_CHANNELS": "6",
+		"RIVULET_TRANSCODE_AUDIO_BITRATE":  "256k",
+		"RIVULET_TRANSCODE_CONCURRENCY":    "2",
+		"RIVULET_HLS_VAAPI_DEVICE":         "/dev/dri/renderD129",
+		"RIVULET_HLS_SEGMENT_TIMEOUT":      "60s",
+		"RIVULET_HLS_SUBTITLE_TIMEOUT":     "45s",
+		"RIVULET_HLS_PROBE_TIMEOUT":        "15s",
+		"RIVULET_HLS_SEEK_PREROLL":         "3",
+		"RIVULET_HLS_SEGMENT_CACHE_BYTES":  "536870912",
 	}
 	got := hlsConfig(MapLookup(env))
 	want := media.HLSConfig{
@@ -267,9 +267,9 @@ func TestEnvTonemap(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			env := map[string]string{}
 			if c.set {
-				env["STREMIO_TRANSCODE_TONEMAP"] = c.value
+				env["RIVULET_TRANSCODE_TONEMAP"] = c.value
 			}
-			if got := envTonemap(MapLookup(env), "STREMIO_TRANSCODE_TONEMAP"); got != c.want {
+			if got := envTonemap(MapLookup(env), "RIVULET_TRANSCODE_TONEMAP"); got != c.want {
 				t.Errorf("envTonemap(%q) = %q, want %q", c.value, got, c.want)
 			}
 			if got := hlsConfig(MapLookup(env)).Tonemap; got != c.want {
@@ -284,17 +284,17 @@ func TestHLSConfigSessionOverridesGate(t *testing.T) {
 	for v, want := range cases {
 		env := map[string]string{}
 		if v != "" {
-			env["STREMIO_HLS_SESSION_OVERRIDES"] = v
+			env["RIVULET_HLS_SESSION_OVERRIDES"] = v
 		}
 		if got := hlsConfig(MapLookup(env)).SessionOverrides; got != want {
-			t.Errorf("STREMIO_HLS_SESSION_OVERRIDES=%q → SessionOverrides=%v, want %v", v, got, want)
+			t.Errorf("RIVULET_HLS_SESSION_OVERRIDES=%q → SessionOverrides=%v, want %v", v, got, want)
 		}
 	}
 }
 func TestHLSConfigNegativeMaxWidthHeightRejected(t *testing.T) {
 	got := hlsConfig(MapLookup(map[string]string{
-		"STREMIO_TRANSCODE_MAX_WIDTH":  "-1",
-		"STREMIO_TRANSCODE_MAX_HEIGHT": "-1",
+		"RIVULET_TRANSCODE_MAX_WIDTH":  "-1",
+		"RIVULET_TRANSCODE_MAX_HEIGHT": "-1",
 	}))
 	if got.MaxWidth != 0 || got.MaxHeight != 0 {
 		t.Errorf("negative MaxWidth/MaxHeight must fall back to default 0, got %d/%d", got.MaxWidth, got.MaxHeight)
@@ -306,9 +306,9 @@ func TestHLSConfigCreateMetadataWaitViaTypesConfig(t *testing.T) {
 	// media.HLSConfig; covered by envDuration directly plus the run_test.go
 	// integration coverage. This is a smoke check that the same helper used
 	// there behaves for the exact env name Run wires it to.
-	lookup := MapLookup(map[string]string{"STREMIO_CREATE_METADATA_TIMEOUT": "45"})
-	if got := envDuration(lookup, "STREMIO_CREATE_METADATA_TIMEOUT", 90*time.Second); got != 45*time.Second {
-		t.Errorf("STREMIO_CREATE_METADATA_TIMEOUT = %s, want 45s", got)
+	lookup := MapLookup(map[string]string{"RIVULET_CREATE_METADATA_TIMEOUT": "45"})
+	if got := envDuration(lookup, "RIVULET_CREATE_METADATA_TIMEOUT", 90*time.Second); got != 45*time.Second {
+		t.Errorf("RIVULET_CREATE_METADATA_TIMEOUT = %s, want 45s", got)
 	}
 }
 
@@ -319,16 +319,16 @@ func TestHLSConfigSeekPreroll(t *testing.T) {
 		want time.Duration
 	}{
 		{"unset", map[string]string{}, 10 * time.Second},
-		{"empty", map[string]string{"STREMIO_HLS_SEEK_PREROLL": ""}, 10 * time.Second},
-		{"zero seconds disables", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "0"}, media.SeekPrerollNone},
-		{"zero duration disables", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "0s"}, media.SeekPrerollNone},
-		{"plain seconds", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "2"}, 2 * time.Second},
-		{"duration string", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "2500ms"}, 2500 * time.Millisecond},
-		{"negative seconds", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "-3"}, 10 * time.Second},
-		{"negative duration", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "-3s"}, 10 * time.Second},
-		{"invalid", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "soon"}, 10 * time.Second},
-		{"at the default", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "10"}, media.MaxSeekPreroll},
-		{"above the default clamped", map[string]string{"STREMIO_HLS_SEEK_PREROLL": "30"}, media.MaxSeekPreroll},
+		{"empty", map[string]string{"RIVULET_HLS_SEEK_PREROLL": ""}, 10 * time.Second},
+		{"zero seconds disables", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "0"}, media.SeekPrerollNone},
+		{"zero duration disables", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "0s"}, media.SeekPrerollNone},
+		{"plain seconds", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "2"}, 2 * time.Second},
+		{"duration string", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "2500ms"}, 2500 * time.Millisecond},
+		{"negative seconds", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "-3"}, 10 * time.Second},
+		{"negative duration", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "-3s"}, 10 * time.Second},
+		{"invalid", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "soon"}, 10 * time.Second},
+		{"at the default", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "10"}, media.MaxSeekPreroll},
+		{"above the default clamped", map[string]string{"RIVULET_HLS_SEEK_PREROLL": "30"}, media.MaxSeekPreroll},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

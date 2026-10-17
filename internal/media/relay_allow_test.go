@@ -5,7 +5,7 @@
 package media
 
 // Tests for the relay's private-destination allowlist
-// (STREMIO_HLS_PRIVATE_ALLOW: the relay and the pre-flight checks).
+// (RIVULET_HLS_PRIVATE_ALLOW: the relay and the pre-flight checks).
 
 import (
 	"context"
@@ -171,7 +171,7 @@ func TestStartHLSPrivateAllow(t *testing.T) {
 	m := newOverrideTestManager(t, false, DefaultHLSConfig(), nil)
 	seed(m)
 	if _, err := m.StartHLSContext(context.Background(), "lan", lanMediaURL, types.HLSSessionOptions{}); err == nil {
-		t.Fatal("LAN mediaURL accepted without STREMIO_HLS_PRIVATE_ALLOW")
+		t.Fatal("LAN mediaURL accepted without RIVULET_HLS_PRIVATE_ALLOW")
 	}
 
 	cfg := DefaultHLSConfig()

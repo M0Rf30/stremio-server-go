@@ -32,7 +32,7 @@ import (
 // creates inside the test's own directory tree.
 func nzbReplaceEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 	t.Setenv("TMP", tmp)

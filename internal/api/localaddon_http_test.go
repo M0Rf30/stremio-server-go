@@ -131,7 +131,7 @@ func TestLocalAddonFileRejectsUnknownHash(t *testing.T) {
 }
 
 // TestLocalAddonFileGating pins that the file endpoint is opt-in (404 unless
-// STREMIO_LOCAL_FILES_PUBLIC_URL is set) and read-only (GET/HEAD).
+// RIVULET_LOCAL_FILES_PUBLIC_URL is set) and read-only (GET/HEAD).
 func TestLocalAddonFileGating(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "movie.mkv")

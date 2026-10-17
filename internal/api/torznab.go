@@ -11,9 +11,9 @@
 //	GET /torznab/stream/<type>/<id>.json
 //	     → {streams:[{infoHash,...}]} from a Torznab indexer (Prowlarr/Jackett/NZBHydra/Bitmagnet)
 //
-// The indexer is queried via its Torznab RSS/XML API (GET to STREMIO_TORZNAB_URL).
+// The indexer is queried via its Torznab RSS/XML API (GET to RIVULET_TORZNAB_URL).
 // Titles are resolved via Cinemeta (v3-cinemeta.strem.io) and cached for 6 hours.
-// If STREMIO_TORZNAB_URL is unset the manifest still serves but all stream
+// If RIVULET_TORZNAB_URL is unset the manifest still serves but all stream
 // requests return an empty result set.
 package api
 

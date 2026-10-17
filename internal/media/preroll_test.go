@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// ── Container-aware seek pre-roll (STREMIO_HLS_SEEK_PREROLL) ────────────────
+// ── Container-aware seek pre-roll (RIVULET_HLS_SEEK_PREROLL) ────────────────
 
 func TestIsSeekIndexed(t *testing.T) {
 	cases := []struct {

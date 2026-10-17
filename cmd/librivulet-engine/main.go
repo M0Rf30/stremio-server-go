@@ -75,7 +75,7 @@ func ServerVersion() *C.char {
 // server lifetime — callers embed it in a dedicated worker thread. logPath
 // receives appended log output (created if missing); a nil/empty logPath
 // falls back to the process's stderr. envJSON is a JSON object of string
-// env-var values (APP_PATH, HTTP_PORT, STREMIO_*, ...) — the same knobs the
+// env-var values (APP_PATH, HTTP_PORT, RIVULET_*, ...) — the same knobs the
 // rivulet-engine executable reads from its real environment; a nil/empty
 // envJSON means "use every default".
 //
@@ -129,7 +129,7 @@ func ServerStart(logPath *C.char, envJSON *C.char) (ret C.int) {
 	defer applyOSEnv(envMap)()
 
 	cfg := app.Config{Lookup: app.MapLookup(envMap)}
-	if v, ok := envMap["STREMIO_SERVER_VERSION"]; ok && v != "" {
+	if v, ok := envMap["RIVULET_SERVER_VERSION"]; ok && v != "" {
 		cfg.Version = v
 	}
 
@@ -220,12 +220,12 @@ func openLogFile(path string, warn io.Writer) (io.Writer, func()) {
 // packages (not threaded through Lookup); envJSON values for them must be
 // mirrored into the process environment for library mode to honour them.
 var osGetenvKeys = []string{
-	"STREMIO_LOG_LEVEL",
-	"STREMIO_LOG_FORMAT",
-	"STREMIO_HWACCEL",
-	"STREMIO_ARCHIVE_ALLOW_PRIVATE",
-	"STREMIO_ARCHIVE_LOCAL_ROOT",
-	"STREMIO_FTP_ALLOW_PRIVATE",
+	"RIVULET_LOG_LEVEL",
+	"RIVULET_LOG_FORMAT",
+	"RIVULET_HWACCEL",
+	"RIVULET_ARCHIVE_ALLOW_PRIVATE",
+	"RIVULET_ARCHIVE_LOCAL_ROOT",
+	"RIVULET_FTP_ALLOW_PRIVATE",
 	"LOCAL_FILES_DIR",
 }
 

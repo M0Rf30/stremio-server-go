@@ -208,7 +208,7 @@ func TestHLSPersistWithoutWorkDirWarns(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(base), "stremio-hls-") || filepath.Base(base) == persistDirName {
 		t.Errorf("base = %q, want a random stremio-hls-* dir", base)
 	}
-	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "STREMIO_HLS_PERSIST requires STREMIO_HLS_WORK_DIR") {
+	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "RIVULET_HLS_PERSIST requires RIVULET_HLS_WORK_DIR") {
 		t.Errorf("missing warning; logs:\n%s", got)
 	}
 }
@@ -227,7 +227,7 @@ func TestHLSPersistDefaultTTLWarns(t *testing.T) {
 			t.Fatalf("ttl=%s: persistence not enabled", tc.ttl)
 		}
 		_ = lock.Close()
-		if got := strings.Contains(logs.String(), "STREMIO_HLS_SESSION_TTL is still the default"); got != tc.warn {
+		if got := strings.Contains(logs.String(), "RIVULET_HLS_SESSION_TTL is still the default"); got != tc.warn {
 			t.Errorf("ttl=%s: default-TTL warning = %v, want %v; logs:\n%s", tc.ttl, got, tc.warn, logs)
 		}
 	}
@@ -636,7 +636,7 @@ func TestHLSPersistFingerprintMismatchRemoved(t *testing.T) {
 	}
 }
 
-// TestHLSPersistSeekPreroll: a changed STREMIO_HLS_SEEK_PREROLL discards
+// TestHLSPersistSeekPreroll: a changed RIVULET_HLS_SEEK_PREROLL discards
 // restored sessions in an indexed container (their segments start decoding
 // from different frames) and keeps every other session; an unchanged one
 // keeps them all, and the container class survives the round trip.
@@ -705,7 +705,7 @@ func TestHLSPersistMaxSessionsOnLoad(t *testing.T) {
 	if n := m2.Sessions(); n != 2 {
 		t.Errorf("Sessions() = %d, want 2", n)
 	}
-	if !strings.Contains(logs.String(), "over STREMIO_HLS_MAX_SESSIONS") {
+	if !strings.Contains(logs.String(), "over RIVULET_HLS_MAX_SESSIONS") {
 		t.Errorf("MaxSessions discard not logged:\n%s", logs.String())
 	}
 }
@@ -981,7 +981,7 @@ func TestHLSPersistRestoreHonoursSessionTTL(t *testing.T) {
 	}
 }
 
-// TestHLSPersistIdleEvictionDisabled: with STREMIO_HLS_SESSION_TTL=0
+// TestHLSPersistIdleEvictionDisabled: with RIVULET_HLS_SESSION_TTL=0
 // (DisableIdleEviction) persisted sessions are not discarded on load for
 // being idle, unless they carry their own ttl, and the default-TTL warning
 // (normalize turns the 0 into the 60s default) is not logged.
@@ -1001,7 +1001,7 @@ func TestHLSPersistIdleEvictionDisabled(t *testing.T) {
 	if n := m2.Sessions(); n != 1 {
 		t.Errorf("Sessions() = %d, want 1", n)
 	}
-	if strings.Contains(logs.String(), "STREMIO_HLS_SESSION_TTL is still the default") {
+	if strings.Contains(logs.String(), "RIVULET_HLS_SESSION_TTL is still the default") {
 		t.Errorf("default-TTL warning logged with idle eviction disabled; logs:\n%s", logs)
 	}
 }

@@ -26,10 +26,10 @@ import (
 )
 
 // TestArchiveDialControl_BlocksLoopbackByDefault proves archiveFetchClient's
-// dialer refuses a loopback target when STREMIO_ARCHIVE_ALLOW_PRIVATE is
+// dialer refuses a loopback target when RIVULET_ARCHIVE_ALLOW_PRIVATE is
 // unset — the default, secure posture.
 func TestArchiveDialControl_BlocksLoopbackByDefault(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "")
 	if err := archiveDialControl("tcp", "127.0.0.1:8080", nil); err == nil {
 		t.Error("archiveDialControl(loopback) = nil, want error")
 	}
@@ -39,7 +39,7 @@ func TestArchiveDialControl_BlocksLoopbackByDefault(t *testing.T) {
 // relaxes the same dial-time guard, and that archiveDialControl re-reads the
 // env var per call rather than baking the decision in at package-init time.
 func TestArchiveDialControl_AllowsLoopbackWhenOptedIn(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	if err := archiveDialControl("tcp", "127.0.0.1:8080", nil); err != nil {
 		t.Errorf("archiveDialControl(loopback) with opt-in = %v, want nil", err)
 	}
@@ -49,7 +49,7 @@ func TestArchiveDialControl_AllowsLoopbackWhenOptedIn(t *testing.T) {
 // address is refused even when private hosts are opted in — matching
 // netguard.ValidateIP's unconditional check.
 func TestArchiveDialControl_AlwaysBlocksCloudMetadata(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	if err := archiveDialControl("tcp", "169.254.169.254:80", nil); err == nil {
 		t.Error("archiveDialControl(cloud-metadata) with opt-in = nil, want error")
 	}
@@ -60,7 +60,7 @@ func TestArchiveDialControl_AlwaysBlocksCloudMetadata(t *testing.T) {
 // that 30x-redirects to 127.0.0.1 must be refused by CheckRedirect before the
 // client ever issues the second request.
 func TestArchiveCheckRedirect_BlocksRedirectToLoopback(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "")
 	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:9/internal", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestArchiveCheckRedirect_BlocksRedirectToLoopback(t *testing.T) {
 // TestArchiveCheckRedirect_AllowsPublicTarget proves legitimate redirects
 // (e.g. CDN 301s) between public hosts are still permitted.
 func TestArchiveCheckRedirect_AllowsPublicTarget(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "")
 	req, err := http.NewRequest(http.MethodGet, "http://1.1.1.1/file.zip", nil)
 	if err != nil {
 		t.Fatal(err)

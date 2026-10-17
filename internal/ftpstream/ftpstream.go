@@ -35,13 +35,13 @@ import (
 	"github.com/rivulet-kodi/rivulet-engine/internal/netguard"
 )
 
-// ftpAllowPrivate reports whether STREMIO_FTP_ALLOW_PRIVATE opts into
+// ftpAllowPrivate reports whether RIVULET_FTP_ALLOW_PRIVATE opts into
 // reaching private/loopback/RFC1918 addresses (e.g. a LAN NAS) from the
 // unauthenticated /ftp?lz= route. Default is false (secure): only public
 // addresses are reachable. The cloud-metadata address (169.254.169.254) is
 // always blocked regardless, via netguard.ValidateIP's unconditional check.
 func ftpAllowPrivate() bool {
-	v := strings.TrimSpace(os.Getenv("STREMIO_FTP_ALLOW_PRIVATE"))
+	v := strings.TrimSpace(os.Getenv("RIVULET_FTP_ALLOW_PRIVATE"))
 	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
 }
 
@@ -91,7 +91,7 @@ func ftpDialControl(network, address string, c syscall.RawConn) error {
 
 // httpGuardedClient is a package-level HTTP client whose dialer rejects the
 // cloud-metadata address and, by default, all private/loopback/RFC1918
-// addresses at connect time (see ftpDialControl / STREMIO_FTP_ALLOW_PRIVATE).
+// addresses at connect time (see ftpDialControl / RIVULET_FTP_ALLOW_PRIVATE).
 // Reused across requests to pool connections.
 var httpGuardedClient = &http.Client{
 	Transport: &http.Transport{

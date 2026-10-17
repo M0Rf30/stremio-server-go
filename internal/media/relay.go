@@ -128,7 +128,7 @@ type mediaRelay struct {
 	// again.
 	selfClient *http.Client
 
-	// privateAllow holds the private destinations (STREMIO_HLS_PRIVATE_ALLOW,
+	// privateAllow holds the private destinations (RIVULET_HLS_PRIVATE_ALLOW,
 	// HLSConfig.PrivateAllow) that stay reachable while blockPrivate is set;
 	// nil (the default) allows none. The dialer reads it on every connect, so the IP actually dialed
 	// for the initial URL, every redirect and every nested playlist or

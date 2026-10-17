@@ -126,7 +126,7 @@ type hlsSession struct {
 	// changes again mid-playback; a new session picks up the new values.
 	tc sessionConfig
 	// ttl is this session's own idle-eviction TTL in nanoseconds, from the
-	// ?ttl= per-session override (STREMIO_HLS_SESSION_OVERRIDES). 0 means
+	// ?ttl= per-session override (RIVULET_HLS_SESSION_OVERRIDES). 0 means
 	// "use HLSConfig.SessionTTL". Unlike tc it is not frozen at creation: a
 	// later master.m3u8 request carrying ?ttl= replaces it (see StartHLS), so
 	// a caller can extend or shorten a session's lifetime without affecting
@@ -286,21 +286,21 @@ func verifyEncoder(codec string, preInput, preEncode []string) bool {
 
 // selectEncoder probes available H.264 encoders and returns the best one that
 // actually works on this machine.  Called once in newHLS(). driDevice is the
-// VAAPI render node to use (HLSConfig.VAAPIDevice; STREMIO_HLS_VAAPI_DEVICE,
+// VAAPI render node to use (HLSConfig.VAAPIDevice; RIVULET_HLS_VAAPI_DEVICE,
 // default "/dev/dri/renderD128") — configurable for multi-GPU hosts (issue
 // #20).
 //
 // Selection rules:
-//   - STREMIO_HWACCEL=0                            → always libx264 (hard switch)
-//   - STREMIO_HWACCEL=nvenc|qsv|vaapi|…            → explicit; listed encoder used
+//   - RIVULET_HWACCEL=0                            → always libx264 (hard switch)
+//   - RIVULET_HWACCEL=nvenc|qsv|vaapi|…            → explicit; listed encoder used
 //     without the verify step (user accepts responsibility)
-//   - STREMIO_HWACCEL="" or "auto" (default)       → auto; only verified encoders
+//   - RIVULET_HWACCEL="" or "auto" (default)       → auto; only verified encoders
 //     chosen; priority: NVENC > QSV > VideoToolbox > VAAPI > V4L2M2M > libx264
 func selectEncoder(driDevice string) hwEncoder {
 	sw := hwEncoder{codec: "libx264"} // software fallback
 
 	// Hard software-only override.
-	if os.Getenv("STREMIO_HWACCEL") == "0" {
+	if os.Getenv("RIVULET_HWACCEL") == "0" {
 		return sw
 	}
 
@@ -308,7 +308,7 @@ func selectEncoder(driDevice string) hwEncoder {
 	listed := func(enc string) bool { return strings.Contains(out, enc) }
 
 	// Explicit profile override: use the requested encoder if listed.
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("STREMIO_HWACCEL"))) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RIVULET_HWACCEL"))) {
 	case "nvenc", "nvidia", "cuda":
 		if listed("h264_nvenc") {
 			return hwEncoder{codec: "h264_nvenc", isHW: true}
@@ -383,7 +383,7 @@ func newHLS(selfBase string, cfg HLSConfig, settings SettingsSource) *hlsManager
 	if enc.isHW {
 		logging.For("media").Info("HLS transcode using hardware encoder", "encoder", enc.codec, "device", enc.driDevice)
 	} else {
-		logging.For("media").Warn("HLS transcode using software encoder; expect high CPU", "encoder", enc.codec, "hint", "set STREMIO_HWACCEL=vaapi and ensure /dev/dri access")
+		logging.For("media").Warn("HLS transcode using software encoder; expect high CPU", "encoder", enc.codec, "hint", "set RIVULET_HWACCEL=vaapi and ensure /dev/dri access")
 	}
 	// Only probe ffmpeg's filter list when tone mapping was requested, so
 	// the default configuration spawns exactly the processes it always did.
@@ -421,7 +421,7 @@ func newHLS(selfBase string, cfg HLSConfig, settings SettingsSource) *hlsManager
 // manager instance a fresh, unpredictable, 0700 (owner-only) directory
 // instead of a fixed, shared, 0755 path — which a co-resident user on a
 // multi-user host could pre-create (or read) before this process ever
-// started. workDir != "" (HLSConfig.WorkDir / STREMIO_HLS_WORK_DIR, issue
+// started. workDir != "" (HLSConfig.WorkDir / RIVULET_HLS_WORK_DIR, issue
 // #20) creates the same kind of fresh stremio-hls-* directory, rooted under
 // workDir instead of the OS default temp dir — e.g. to place HLS segments on
 // a specific fast or large disk. Falls back to the workDir-less behaviour if
@@ -433,7 +433,7 @@ func newHLSBaseDir(workDir string) string {
 				return base
 			}
 		}
-		logging.For("media").Warn("STREMIO_HLS_WORK_DIR unusable; falling back to the OS temp dir", "work_dir", workDir)
+		logging.For("media").Warn("RIVULET_HLS_WORK_DIR unusable; falling back to the OS temp dir", "work_dir", workDir)
 	}
 	base, err := os.MkdirTemp("", "stremio-hls-*")
 	if err != nil {
@@ -491,7 +491,7 @@ type probeMediaResult struct {
 // probeMedia runs a single ffprobe with -show_format -show_streams and returns
 // the media duration, every audio stream, whether the video is high-bit-depth,
 // and the first video stream's resolution. timeout bounds the ffprobe child
-// process (HLSConfig.ProbeTimeout; STREMIO_HLS_PROBE_TIMEOUT, default 30s —
+// process (HLSConfig.ProbeTimeout; RIVULET_HLS_PROBE_TIMEOUT, default 30s —
 // issue #20: slow-starting torrents/debrid links can exceed the historical
 // fixed 30s). mediaURL is routed through the loopback relay (SEC-4) unless it
 // matches selfBase. The caller must NOT hold any session lock when calling
@@ -671,7 +671,7 @@ func doviFromSideData(c *videoColor, list []json.RawMessage) {
 // bitrate cap and output resolution (issue #20) — see deriveBandwidthCodecs.
 //
 // opts carries the per-session query overrides. They are ignored entirely
-// unless HLSConfig.SessionOverrides (STREMIO_HLS_SESSION_OVERRIDES) is on;
+// unless HLSConfig.SessionOverrides (RIVULET_HLS_SESSION_OVERRIDES) is on;
 // when on, they are validated on every request (an invalid value is an error
 // wrapping types.ErrInvalidHLSOption) and then:
 //   - on the request that creates the session, all of them apply: quality
@@ -700,7 +700,7 @@ func (m *hlsManager) StartHLSContext(ctx context.Context, id, mediaURL string, o
 	// non-private, non-metadata host — or a media route on this server's
 	// own origin (classifySelfPath), which is how the https UI on :12470 asks for a stream this
 	// server serves on :11470 — or a private host on cfg.PrivateAllow
-	// (STREMIO_HLS_PRIVATE_ALLOW).
+	// (RIVULET_HLS_PRIVATE_ALLOW).
 	if err := validateMediaURL(mediaURL, m.selfBase, m.cfg.PrivateAllow); err != nil {
 		return "", fmt.Errorf("hls: %w", err)
 	}
@@ -1463,7 +1463,7 @@ func (m *hlsManager) currentConcurrency() int {
 // For other HW encoders, an explicit "format=yuv420p" filter is prepended when
 // s.highBitDepth is true.
 //
-// HDR→SDR tone mapping (STREMIO_TRANSCODE_TONEMAP, off by default): for a
+// HDR→SDR tone mapping (RIVULET_TRANSCODE_TONEMAP, off by default): for a
 // PQ/HLG source the video filter becomes the software zscale+tonemap chain
 // (see tonemapChain/buildVideoFilter) and BT.709 colour tags are added; all
 // other sources, and every source with the knob off, are unaffected.
@@ -1976,7 +1976,7 @@ var errShuttingDown = errors.New("hls: shutting down")
 
 // DeleteHLS explicitly ends session id, for front ends that manage their own
 // session lifecycle instead of relying on the idle reaper (and the only way
-// to end a session when idle eviction is disabled, STREMIO_HLS_SESSION_TTL=0).
+// to end a session when idle eviction is disabled, RIVULET_HLS_SESSION_TTL=0).
 //
 // The session is removed from m.sessions immediately, so every later HLSFile
 // call gets "unknown session" and a later StartHLS starts from scratch. Its
@@ -2089,7 +2089,7 @@ func (m *hlsManager) reaper() {
 // interval is derived from the global TTL only (min(30s, SessionTTL/2)), so
 // a per-session TTL shorter than the global one (possible only when the
 // global TTL is above the 60s override floor) is honoured with up to one
-// reaper interval (<= 30s unless STREMIO_HLS_REAPER_INTERVAL raises it) of
+// reaper interval (<= 30s unless RIVULET_HLS_REAPER_INTERVAL raises it) of
 // extra slack; a longer one simply survives more ticks.
 //
 // A session with inFlight > 0 (an HLSFile call — segment transcode, subtitle
@@ -2100,7 +2100,7 @@ func (m *hlsManager) reaper() {
 // every subsequent request. Deleting from a map during range is safe and
 // defined in Go.
 //
-// HLSConfig.DisableIdleEviction (STREMIO_HLS_SESSION_TTL=0) turns off idle
+// HLSConfig.DisableIdleEviction (RIVULET_HLS_SESSION_TTL=0) turns off idle
 // eviction for sessions relying on the global TTL, but a session carrying
 // its own per-session ?ttl= override is still evicted on schedule: an
 // explicit per-session ttl wins over the global disable flag, consistent
@@ -2132,7 +2132,7 @@ func (m *hlsManager) evictIdle() {
 		}
 		perSessionTTL := s.ttl.Load() > 0
 		if m.cfg.DisableIdleEviction && !perSessionTTL {
-			// STREMIO_HLS_SESSION_TTL=0: idle eviction is off for sessions
+			// RIVULET_HLS_SESSION_TTL=0: idle eviction is off for sessions
 			// that rely on the global TTL. A session carrying its own
 			// ?ttl= override still wins (per-session override > env,
 			// matching effectiveSessionConfig's precedence) and is still

@@ -175,9 +175,9 @@ services:
       BT_LISTEN_PORT: "11471"
       HTTPS_PORT: "12470"      # enable HTTPS; set 0 to disable
       # idle-torrent reclaim (default 300s; 0 = disabled)
-      STREMIO_TORRENT_IDLE_TIMEOUT: "300"
+      RIVULET_TORRENT_IDLE_TIMEOUT: "300"
       # optional: stream through a bounded RAM cache instead of disk (bytes; 0 = disk)
-      # STREMIO_MEMORY_CACHE_SIZE: "536870912"   # 512 MiB
+      # RIVULET_MEMORY_CACHE_SIZE: "536870912"   # 512 MiB
     volumes:
       - /mnt/POOL/apps/stremio:/data
     healthcheck:
@@ -195,7 +195,7 @@ Notes:
   the tag and redeploy to upgrade.
 - **Port `12470` is only needed** for the Stremio **web app** (browser HTTPS,
   mixed-content rules). It also requires a browser-trusted certificate — see
-  [HTTPS.md](HTTPS.md) (the `*.stremio.rocks` flow, needs `STREMIO_CERT_AUTHKEY`).
+  [HTTPS.md](HTTPS.md) (the `*.stremio.rocks` flow, needs `RIVULET_CERT_AUTHKEY`).
   With the **desktop/mobile** apps you can drop the `12470` line and set
   `HTTPS_PORT: "0"`.
 - **Peer port `11471`** is optional but improves peering; if TrueNAS is behind
@@ -215,24 +215,24 @@ Notes:
 | `APP_PATH` | `/data` | data/cache root (settings, cert, HLS cache) |
 | `WEB_UI_LOCATION` | `https://web.stremio.com/` | redirect target for `GET /` |
 | `LOCAL_FILES_DIR` | _(unset)_ | directory scanned by the local-files addon; mount a volume and set this to enable |
-| `STREMIO_HWACCEL` | _(auto)_ | `0` forces software libx264; or pin `vaapi` / `nvenc` / `qsv` / `videotoolbox` / `v4l2m2m` |
-| `STREMIO_HTTP_LOG` | _(unset)_ | set to `1` to log each request path |
-| `STREMIO_MEMORY_CACHE_SIZE` | `0` | in-RAM piece-cache budget in bytes; `0` writes pieces to `/data`. Set `>0` to never touch disk (ideal on ephemeral Spaces / low-disk hosts) |
-| `STREMIO_MEM_LIMIT` | _(unset)_ | soft memory ceiling in bytes (`GOMEMLIMIT` also honoured); RSS high-water is returned to the OS every 5 min |
-| `STREMIO_DISABLE_WEBTORRENT` | `1` (image) | WebTorrent/WebRTC (pion) peers are off by default in the image — cuts ~60% of goroutines & RAM; set `0` to re-enable |
-| `STREMIO_DISABLE_TRACKERS` | _(unset)_ | `1` = DHT/PEX/webseeds only (no tracker announces); for private / DHT-only operation |
-| `STREMIO_TRACKERS_URL` | _(curated list)_ | source URL for the public tracker list; empty / `off` skips the remote fetch (embedded + DHT/PEX only) |
-| `STREMIO_BT_ENCRYPTION` | `prefer` | peer-connection encryption; `require` refuses plaintext peers (DPI evasion), `disable` turns obfuscation off |
-| `STREMIO_BT_PROXY` | _(unset)_ | SOCKS5/HTTP proxy for tracker announces, webseeds, metainfo + tracker-list fetch (e.g. `socks5://127.0.0.1:9050`). Peer connections stay direct |
-| `STREMIO_DHT_BOOTSTRAP` | _(defaults)_ | extra comma-separated `host:port` DHT bootstrap nodes, appended to the defaults, for filtered networks |
-| `STREMIO_BT_ANONYMOUS` | _(unset)_ | `1` hides the client version/fingerprint advertised to peers |
-| `STREMIO_PROXY_PASSWORD` | _(unset)_ | `api_password` required on `/proxy/*` (set as a **secret**) |
-| `STREMIO_PROXY_SECRET` | _(auto)_ | signing key for signed proxy URLs; set explicitly on ephemeral hosts (an auto value changes on every restart) |
-| `STREMIO_PROXY_PUBLIC_URL` | _(derive)_ | external base URL written into rewritten manifests — required behind an edge proxy (HF Spaces) |
-| `STREMIO_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for `/proxy` fetches (`socks5`/`http`/`https`) |
-| `STREMIO_BITMAGNET_URL` | _(unset)_ | Bitmagnet GraphQL endpoint → enables the `/bitmagnet` add-on |
-| `STREMIO_TORZNAB_URL` | _(unset)_ | Torznab indexer base URL → enables the `/torznab` add-on |
-| `STREMIO_TORZNAB_APIKEY` | _(unset)_ | API key for the Torznab indexer (required by Prowlarr / Jackett) |
+| `RIVULET_HWACCEL` | _(auto)_ | `0` forces software libx264; or pin `vaapi` / `nvenc` / `qsv` / `videotoolbox` / `v4l2m2m` |
+| `RIVULET_HTTP_LOG` | _(unset)_ | set to `1` to log each request path |
+| `RIVULET_MEMORY_CACHE_SIZE` | `0` | in-RAM piece-cache budget in bytes; `0` writes pieces to `/data`. Set `>0` to never touch disk (ideal on ephemeral Spaces / low-disk hosts) |
+| `RIVULET_MEM_LIMIT` | _(unset)_ | soft memory ceiling in bytes (`GOMEMLIMIT` also honoured); RSS high-water is returned to the OS every 5 min |
+| `RIVULET_DISABLE_WEBTORRENT` | `1` (image) | WebTorrent/WebRTC (pion) peers are off by default in the image — cuts ~60% of goroutines & RAM; set `0` to re-enable |
+| `RIVULET_DISABLE_TRACKERS` | _(unset)_ | `1` = DHT/PEX/webseeds only (no tracker announces); for private / DHT-only operation |
+| `RIVULET_TRACKERS_URL` | _(curated list)_ | source URL for the public tracker list; empty / `off` skips the remote fetch (embedded + DHT/PEX only) |
+| `RIVULET_BT_ENCRYPTION` | `prefer` | peer-connection encryption; `require` refuses plaintext peers (DPI evasion), `disable` turns obfuscation off |
+| `RIVULET_BT_PROXY` | _(unset)_ | SOCKS5/HTTP proxy for tracker announces, webseeds, metainfo + tracker-list fetch (e.g. `socks5://127.0.0.1:9050`). Peer connections stay direct |
+| `RIVULET_DHT_BOOTSTRAP` | _(defaults)_ | extra comma-separated `host:port` DHT bootstrap nodes, appended to the defaults, for filtered networks |
+| `RIVULET_BT_ANONYMOUS` | _(unset)_ | `1` hides the client version/fingerprint advertised to peers |
+| `RIVULET_PROXY_PASSWORD` | _(unset)_ | `api_password` required on `/proxy/*` (set as a **secret**) |
+| `RIVULET_PROXY_SECRET` | _(auto)_ | signing key for signed proxy URLs; set explicitly on ephemeral hosts (an auto value changes on every restart) |
+| `RIVULET_PROXY_PUBLIC_URL` | _(derive)_ | external base URL written into rewritten manifests — required behind an edge proxy (HF Spaces) |
+| `RIVULET_PROXY_UPSTREAM` | _(unset)_ | outbound upstream proxy for `/proxy` fetches (`socks5`/`http`/`https`) |
+| `RIVULET_BITMAGNET_URL` | _(unset)_ | Bitmagnet GraphQL endpoint → enables the `/bitmagnet` add-on |
+| `RIVULET_TORZNAB_URL` | _(unset)_ | Torznab indexer base URL → enables the `/torznab` add-on |
+| `RIVULET_TORZNAB_APIKEY` | _(unset)_ | API key for the Torznab indexer (required by Prowlarr / Jackett) |
 
 ---
 
@@ -251,8 +251,8 @@ a HuggingFace Space without persistent storage, or any low-disk host:
 podman run -d \
   --name rivulet-engine \
   -p 11470:11470 \
-  -e STREMIO_MEMORY_CACHE_SIZE=536870912 \
-  -e STREMIO_MEM_LIMIT=1073741824 \
+  -e RIVULET_MEMORY_CACHE_SIZE=536870912 \
+  -e RIVULET_MEM_LIMIT=1073741824 \
   rivulet-engine
 ```
 
@@ -269,15 +269,15 @@ fingerprint BitTorrent via DPI:
 podman run -d \
   --name rivulet-engine \
   --network host \
-  -e STREMIO_BT_ENCRYPTION=require \
-  -e STREMIO_BT_PROXY=socks5://127.0.0.1:9050 \
-  -e STREMIO_BT_ANONYMOUS=1 \
+  -e RIVULET_BT_ENCRYPTION=require \
+  -e RIVULET_BT_PROXY=socks5://127.0.0.1:9050 \
+  -e RIVULET_BT_ANONYMOUS=1 \
   -v stremio-data:/data \
   rivulet-engine
 ```
 
 `--network host` (or a shared pod) lets the container reach the host's Tor
-SOCKS port. Supply `STREMIO_DHT_BOOTSTRAP=host:port,…` as well when the default
+SOCKS port. Supply `RIVULET_DHT_BOOTSTRAP=host:port,…` as well when the default
 DHT routers are filtered. Peer connections themselves are not tunneled — see the
 [censorship-resistance notes](../README.md#censorship-resistance).
 
@@ -291,17 +291,17 @@ password and secret as **secrets**, not in the image:
 podman run -d \
   --name rivulet-engine \
   -p 11470:11470 \
-  -e STREMIO_PROXY_PUBLIC_URL=https://your-host.example \
-  -e STREMIO_PROXY_PASSWORD=change-me \
-  -e STREMIO_PROXY_SECRET=$(openssl rand -hex 32) \
-  -e STREMIO_PROXY_IP_ACL=10.0.0.0/8 \
+  -e RIVULET_PROXY_PUBLIC_URL=https://your-host.example \
+  -e RIVULET_PROXY_PASSWORD=change-me \
+  -e RIVULET_PROXY_SECRET=$(openssl rand -hex 32) \
+  -e RIVULET_PROXY_IP_ACL=10.0.0.0/8 \
   -v stremio-data:/data \
   rivulet-engine
 ```
 
-`STREMIO_PROXY_PUBLIC_URL` must be the externally reachable base URL, otherwise
+`RIVULET_PROXY_PUBLIC_URL` must be the externally reachable base URL, otherwise
 rewritten child segment/key URLs are unreachable behind the edge proxy. Pin
-`STREMIO_PROXY_SECRET` explicitly so signed URLs survive restarts.
+`RIVULET_PROXY_SECRET` explicitly so signed URLs survive restarts.
 
 ### Private / DHT-only (no tracker announces)
 
@@ -311,7 +311,7 @@ Discover peers via DHT, PEX, and webseeds only — no outbound tracker announces
 podman run -d \
   --name rivulet-engine \
   -p 11470:11470 \
-  -e STREMIO_DISABLE_TRACKERS=1 \
+  -e RIVULET_DISABLE_TRACKERS=1 \
   -v stremio-data:/data \
   rivulet-engine
 ```
@@ -324,9 +324,9 @@ Enable the catalog add-ons that resolve streams from a self-hosted indexer:
 podman run -d \
   --name rivulet-engine \
   -p 11470:11470 \
-  -e STREMIO_TORZNAB_URL=http://prowlarr:9696/1/api \
-  -e STREMIO_TORZNAB_APIKEY=your-api-key \
-  -e STREMIO_BITMAGNET_URL=http://bitmagnet:3333/graphql \
+  -e RIVULET_TORZNAB_URL=http://prowlarr:9696/1/api \
+  -e RIVULET_TORZNAB_APIKEY=your-api-key \
+  -e RIVULET_BITMAGNET_URL=http://bitmagnet:3333/graphql \
   -v stremio-data:/data \
   rivulet-engine
 ```
@@ -350,11 +350,11 @@ podman run -d \
   -v stremio-data:/data \
   --device /dev/dri \
   --group-add keep-groups \
-  -e STREMIO_HWACCEL=vaapi \
+  -e RIVULET_HWACCEL=vaapi \
   rivulet-engine
 ```
 
-Use `STREMIO_HWACCEL=qsv` for QSV on the same device node.
+Use `RIVULET_HWACCEL=qsv` for QSV on the same device node.
 
 ### NVENC (NVIDIA)
 
@@ -366,7 +366,7 @@ docker run -d \
   -p 11470:11470 \
   -v stremio-data:/data \
   --gpus all \
-  -e STREMIO_HWACCEL=nvenc \
+  -e RIVULET_HWACCEL=nvenc \
   rivulet-engine
 ```
 
@@ -377,7 +377,7 @@ With CDI: `--device nvidia.com/gpu=all` (Podman 4.7+, CDI configured).
 Force software transcode to avoid auto-detect overhead on systems without a GPU:
 
 ```sh
--e STREMIO_HWACCEL=0
+-e RIVULET_HWACCEL=0
 ```
 
 ---
@@ -415,12 +415,12 @@ Force software transcode to avoid auto-detect overhead on systems without a GPU:
 
    | Key | Value |
    |---|---|
-   | `STREMIO_HWACCEL` | `0` |
-   | `STREMIO_HTTP_LOG` | `1` |
-   | `STREMIO_MEMORY_CACHE_SIZE` | `536870912` |
-   | `STREMIO_PROXY_PUBLIC_URL` | `https://<your-space>.hf.space` |
-   | `STREMIO_PROXY_PASSWORD` | _(secret)_ |
-   | `STREMIO_PROXY_SECRET` | _(secret, 32-byte hex)_ |
+   | `RIVULET_HWACCEL` | `0` |
+   | `RIVULET_HTTP_LOG` | `1` |
+   | `RIVULET_MEMORY_CACHE_SIZE` | `536870912` |
+   | `RIVULET_PROXY_PUBLIC_URL` | `https://<your-space>.hf.space` |
+   | `RIVULET_PROXY_PASSWORD` | _(secret)_ |
+   | `RIVULET_PROXY_SECRET` | _(secret, 32-byte hex)_ |
 
    Secrets are injected as environment variables at runtime and are not visible
    in build logs.
@@ -448,7 +448,7 @@ Force software transcode to avoid auto-detect overhead on systems without a GPU:
   above) to retain cache and settings across restarts.
 
 - **CPU Spaces have no GPU** — HuggingFace CPU Spaces provide no GPU device.
-  Set `STREMIO_HWACCEL=0` to force software transcoding; the auto-detect path
+  Set `RIVULET_HWACCEL=0` to force software transcoding; the auto-detect path
   will fall back to libx264 anyway, but setting it explicitly avoids startup
   probe noise.
 

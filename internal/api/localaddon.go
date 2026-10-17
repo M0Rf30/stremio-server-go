@@ -371,7 +371,7 @@ var (
 var imdbSem = make(chan struct{}, 20)
 
 // localIMDBDisabled gates the local-files add-on's IMDB resolution
-// (STREMIO_LOCAL_IMDB). Zero value = enabled; New() sets it from cfg.LocalIMDB.
+// (RIVULET_LOCAL_IMDB). Zero value = enabled; New() sets it from cfg.LocalIMDB.
 var localIMDBDisabled atomic.Bool
 
 // — Scan cache —
@@ -799,7 +799,7 @@ func (s *server) localFileStreamURL(m localMeta) string {
 // Using the opaque local hash instead of accepting a filesystem path prevents
 // arbitrary path access. http.ServeFile provides HEAD and byte-range support.
 //
-// The endpoint is opt-in: it only exists when STREMIO_LOCAL_FILES_PUBLIC_URL
+// The endpoint is opt-in: it only exists when RIVULET_LOCAL_FILES_PUBLIC_URL
 // is set. Without it the add-on emits same-host file:// URLs and nothing needs
 // HTTP access, so indexed files are not downloadable by other hosts that can
 // reach the (by default all-interfaces) listener.

@@ -426,7 +426,7 @@ func TestNzbCreate_ConcurrentIdenticalCreatesBuildOnce(t *testing.T) {
 // answers with the leader's outcome — here its failure; a create for another
 // payload builds on its own. Once the leader is done nothing is left behind.
 func TestNzbReuseOrLead_JoinsInFlightBuildAndSharesFailure(t *testing.T) {
-	t.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	const key, sig = "nzb-flight-key", `["sig"]`
 	t.Cleanup(func() {
 		nzbSessionsMu.Lock()

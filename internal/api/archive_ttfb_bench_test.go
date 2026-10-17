@@ -120,7 +120,7 @@ func benchArchiveTTFB(b *testing.B, ext string, write func(b *testing.B, dir, en
 	dir := b.TempDir()
 	const entry = "big.mkv"
 	archivePath := write(b, dir, entry, size)
-	b.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", dir)
+	b.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", dir)
 
 	srv := httptest.NewServer(benchHandler())
 	defer srv.Close()
@@ -230,7 +230,7 @@ func BenchmarkArchiveThroughput_Stored(b *testing.B) {
 	dir := b.TempDir()
 	const entry = "big.mkv"
 	archivePath := writeBenchZip(b, dir, entry, zip.Store, size)
-	b.Setenv("STREMIO_ARCHIVE_LOCAL_ROOT", dir)
+	b.Setenv("RIVULET_ARCHIVE_LOCAL_ROOT", dir)
 
 	srv := httptest.NewServer(benchHandler())
 	defer srv.Close()

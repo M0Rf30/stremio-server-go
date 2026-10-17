@@ -72,20 +72,20 @@ func certNeedsRenewal(h *certHolder) (bool, string) {
 
 // renewCertLoop provisions a browser-trusted cert from api.strem.io and hot-swaps
 // it into holder when needed, then re-checks every renewCheckInterval. It is a
-// no-op while no authKey is available (STREMIO_CERT_AUTHKEY, or one cached by
+// no-op while no authKey is available (RIVULET_CERT_AUTHKEY, or one cached by
 // a prior /get-https call), so it never disturbs an existing self-signed setup
 // unless the user has opted into HTTPS provisioning. Returns when ctx is done,
 // so a restart (Stop then Start) never leaks this goroutine.
 func renewCertLoop(ctx context.Context, appPath string, holder *certHolder, lookup Lookup) {
 	check := func() {
-		authKey := getenv(lookup, "STREMIO_CERT_AUTHKEY", "")
+		authKey := getenv(lookup, "RIVULET_CERT_AUTHKEY", "")
 		if authKey == "" {
 			authKey = api.CachedAuthKey(appPath)
 		}
 		if authKey == "" {
 			return // nothing to provision with; leave the existing cert alone
 		}
-		ip := getenv(lookup, "STREMIO_CERT_IP", api.PrimaryIPv4())
+		ip := getenv(lookup, "RIVULET_CERT_IP", api.PrimaryIPv4())
 		if ip == "" {
 			return
 		}

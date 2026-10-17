@@ -15,7 +15,7 @@ import (
 	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
 )
 
-// HDR→SDR tone mapping for HLS transcodes (STREMIO_TRANSCODE_TONEMAP).
+// HDR→SDR tone mapping for HLS transcodes (RIVULET_TRANSCODE_TONEMAP).
 //
 // Without it, HDR10/HDR10+/HLG sources only get a pixel-format conversion
 // (format=yuv420p / format=nv12), which keeps the PQ/HLG transfer curve and

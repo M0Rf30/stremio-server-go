@@ -26,7 +26,7 @@ CORS is permissive by default for non-browser callers: any request without an
 `Origin` header (curl, native players) gets `Access-Control-Allow-Origin: *`.
 Browser-originated requests to `/proxy/*` (and other state-changing routes)
 are checked against the server-wide Origin allowlist before being routed — see
-`STREMIO_ALLOWED_ORIGINS` in the [README](../README.md#environment) — and get
+`RIVULET_ALLOWED_ORIGINS` in the [README](../README.md#environment) — and get
 `Access-Control-Allow-Origin: <that origin>` + `Vary: Origin` back instead of
 `*`. A disallowed `Origin` (including `null`) is rejected with `403` before
 the proxy ever dials out.
@@ -50,7 +50,7 @@ the proxy ever dials out.
 | `d` | Destination URL. Plain or base64url/base64-std (auto-detected); `+` decodes to space. |
 | `h_<Name>` | Header sent to the upstream (e.g. `h_User-Agent=VLC`, `h_Referer=...`). |
 | `r_<Name>` | Header forced on the response (`Access-Control-*` is ignored). |
-| `api_password` | Required only when `STREMIO_PROXY_PASSWORD` is set. |
+| `api_password` | Required only when `RIVULET_PROXY_PASSWORD` is set. |
 | `method`, `key`, `key_id`, `iv` | Decryption parameters (hex or base64). `method` is `AES-128`, `cenc`, or `cbcs`. (`SAMPLE-AES` is not currently supported and returns an error.) |
 | `proxy` | Outbound upstream proxy for this request. Accepted schemes: `socks5`, `socks5h`, `http`, `https`. Example: `proxy=socks5://127.0.0.1:1080`. Ignored when the scheme is not one of the four above. |
 
@@ -77,12 +77,12 @@ are returned as a single `200` body (no `Range`/`206`).
 
 All three modes are optional and composable:
 
-- **API password** (`STREMIO_PROXY_PASSWORD`) — clients must send a matching
+- **API password** (`RIVULET_PROXY_PASSWORD`) — clients must send a matching
   `api_password` (constant-time compared).
 - **Signed URLs** — `POST /generate_url` with
   `{"endpoint":"/proxy/stream","params":{"d":"<url>"},"expiry_seconds":3600,"ip":"<optional client ip>"}`
   returns `{"url":"...?token=<tok>","expires_at":<unix>}`. The token is an
-  AES-GCM sealed blob (signed with `STREMIO_PROXY_SECRET`) carrying the params,
+  AES-GCM sealed blob (signed with `RIVULET_PROXY_SECRET`) carrying the params,
   expiry, and optional pinned client IP. A valid `token` bypasses the password.
   The sealed `params` (including the destination `d`) are enforced against the
   live request: a token only authorizes the exact param values it was minted
@@ -90,13 +90,13 @@ All three modes are optional and composable:
   must be `/proxy/stream`, `/proxy/ip`, or under `/proxy/hls/` / `/proxy/mpd/`;
   `expiry_seconds` is required (1 s to 1 year) and `d` must be an http(s) URL,
   otherwise the request gets `400`.
-- **IP allowlist** (`STREMIO_PROXY_IP_ACL`) — comma-separated CIDRs; non-matching
+- **IP allowlist** (`RIVULET_PROXY_IP_ACL`) — comma-separated CIDRs; non-matching
   clients get `403`. `X-Forwarded-For` is honoured only from a loopback/private
   peer, using the right-most hop that is not itself a private address.
 
 Independent of the three modes above, any browser-originated request (one
 carrying an `Origin` header) to `/proxy/*` is also checked against the
-server-wide Origin allowlist (`STREMIO_ALLOWED_ORIGINS`, see the
+server-wide Origin allowlist (`RIVULET_ALLOWED_ORIGINS`, see the
 [README](../README.md#environment)) before any proxy logic runs — this stops
 an arbitrary web page from relaying through `/proxy` just because the port is
 reachable from the browser. Non-browser callers (no `Origin` header) are
@@ -113,15 +113,15 @@ loopback, link-local, and ULA destinations are blocked as well.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `STREMIO_PROXY_PASSWORD` | _(unset)_ | `api_password` required on proxy requests. Unset = no password. |
-| `STREMIO_PROXY_SECRET` | _(auto)_ | Key for signed URLs (hex/base64). Auto-generated and persisted at `<APP_PATH>/proxy-secret` if unset. |
-| `STREMIO_PROXY_IP_ACL` | _(unset)_ | Comma-separated CIDR allowlist. Unset = allow all. |
-| `STREMIO_PROXY_PREBUFFER` | `3` | Number of upcoming segments to prefetch. `0` disables. |
-| `STREMIO_PROXY_SEG_CACHE_TTL` | `300` | Segment cache TTL in seconds. `0` disables caching. |
-| `STREMIO_PROXY_PUBLIC_URL` | _(derive)_ | External base URL written into rewritten manifests. Unset = derived from the request; `X-Forwarded-Proto`/`Host` are honoured only from a loopback/private peer (a reverse proxy). |
-| `STREMIO_PROXY_UPSTREAM` | _(unset)_ | Global outbound upstream proxy for all stream-proxy fetches. Overridden per-request by the `proxy` query param. Supported schemes: `socks5`, `socks5h`, `http`, `https`. Example: `socks5://user:pass@proxy.example:1080`. |
+| `RIVULET_PROXY_PASSWORD` | _(unset)_ | `api_password` required on proxy requests. Unset = no password. |
+| `RIVULET_PROXY_SECRET` | _(auto)_ | Key for signed URLs (hex/base64). Auto-generated and persisted at `<APP_PATH>/proxy-secret` if unset. |
+| `RIVULET_PROXY_IP_ACL` | _(unset)_ | Comma-separated CIDR allowlist. Unset = allow all. |
+| `RIVULET_PROXY_PREBUFFER` | `3` | Number of upcoming segments to prefetch. `0` disables. |
+| `RIVULET_PROXY_SEG_CACHE_TTL` | `300` | Segment cache TTL in seconds. `0` disables caching. |
+| `RIVULET_PROXY_PUBLIC_URL` | _(derive)_ | External base URL written into rewritten manifests. Unset = derived from the request; `X-Forwarded-Proto`/`Host` are honoured only from a loopback/private peer (a reverse proxy). |
+| `RIVULET_PROXY_UPSTREAM` | _(unset)_ | Global outbound upstream proxy for all stream-proxy fetches. Overridden per-request by the `proxy` query param. Supported schemes: `socks5`, `socks5h`, `http`, `https`. Example: `socks5://user:pass@proxy.example:1080`. |
 
-`STREMIO_PROXY_PUBLIC_URL` matters behind a reverse proxy or on a hosted
+`RIVULET_PROXY_PUBLIC_URL` matters behind a reverse proxy or on a hosted
 platform (e.g. a HuggingFace Space): set it to the externally reachable origin
 so rewritten manifest URLs point back at a host the player can actually reach.
 
@@ -146,8 +146,8 @@ curl -X POST http://127.0.0.1:11470/generate_url \
 ## Security
 
 As with the rest of the server, this is a **localhost-trust** service by
-default. If you expose the proxy to a network, set `STREMIO_PROXY_PASSWORD`
-(and/or `STREMIO_PROXY_IP_ACL`) and prefer signed URLs — otherwise it is an
+default. If you expose the proxy to a network, set `RIVULET_PROXY_PASSWORD`
+(and/or `RIVULET_PROXY_IP_ACL`) and prefer signed URLs — otherwise it is an
 open relay that will fetch and decrypt arbitrary public URLs on behalf of any
 caller. An SSRF guard always blocks cloud-metadata addresses
 (`169.254.169.254`); configuring any auth mechanism (password, IP-ACL, or

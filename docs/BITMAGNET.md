@@ -82,11 +82,11 @@ podman volume rm rivulet-engine_bitmagnet-pgdata rivulet-engine_bitmagnet-config
 
 ## Wire rivulet-engine
 
-Set `STREMIO_BITMAGNET_URL` to the Bitmagnet GraphQL endpoint before starting
+Set `RIVULET_BITMAGNET_URL` to the Bitmagnet GraphQL endpoint before starting
 the server:
 
 ```sh
-STREMIO_BITMAGNET_URL=http://localhost:3333/graphql ./rivulet-engine
+RIVULET_BITMAGNET_URL=http://localhost:3333/graphql ./rivulet-engine
 ```
 
 If the variable is unset, the `/bitmagnet` routes serve the manifest but return
@@ -117,7 +117,7 @@ When Stremio requests streams for a title:
    via its DHT engine.
 
 > **Metadata source / privacy.** Step 1 calls a Cinemeta-compatible metadata
-> add-on, set by `STREMIO_METADATA_URL` (default `https://v3-cinemeta.strem.io`).
+> add-on, set by `RIVULET_METADATA_URL` (default `https://v3-cinemeta.strem.io`).
 > Point it at a self-hosted Cinemeta mirror or a TMDB/aiometadata add-on's
 > configured base, or set it to empty/`off` to disable the lookup — the add-on
 > then queries Bitmagnet by the raw IMDB id (lower match quality).

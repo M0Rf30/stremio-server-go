@@ -27,7 +27,7 @@ import (
 // extractions/op ≈ 1); now only the first op does (both ≈ 1/b.N).
 func BenchmarkArchiveCreateSeek(b *testing.B) {
 	const size = 8 << 20
-	b.Setenv("STREMIO_ARCHIVE_ALLOW_PRIVATE", "1")
+	b.Setenv("RIVULET_ARCHIVE_ALLOW_PRIVATE", "1")
 	tmp := b.TempDir()
 	b.Setenv("TMPDIR", tmp)
 	b.Setenv("TMP", tmp)

@@ -14,7 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	_ "net/http/pprof" //nolint:gosec // G108: pprof is opt-in via STREMIO_PPROF, on its own listener, never the main handler
+	_ "net/http/pprof" //nolint:gosec // G108: pprof is opt-in via RIVULET_PPROF, on its own listener, never the main handler
 	"net/url"
 	"os"
 	"path/filepath"
@@ -109,69 +109,69 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	if err != nil {
 		return err
 	}
-	publicURL := publicBaseURL(lookup, "STREMIO_PUBLIC_URL")
-	// STREMIO_PUBLIC_URL is the general base the stream proxy falls back to
+	publicURL := publicBaseURL(lookup, "RIVULET_PUBLIC_URL")
+	// RIVULET_PUBLIC_URL is the general base the stream proxy falls back to
 	// when its own URL is unset. It deliberately does NOT enable the
 	// local-files HTTP endpoint: that stays an explicit opt-in via
-	// STREMIO_LOCAL_FILES_PUBLIC_URL, since it exposes file downloads.
-	proxyPublicURL := strings.TrimRight(getenv(lookup, "STREMIO_PROXY_PUBLIC_URL", ""), "/")
+	// RIVULET_LOCAL_FILES_PUBLIC_URL, since it exposes file downloads.
+	proxyPublicURL := strings.TrimRight(getenv(lookup, "RIVULET_PROXY_PUBLIC_URL", ""), "/")
 	if proxyPublicURL == "" {
 		proxyPublicURL = publicURL
 	}
-	localFilesPublicURL := strings.TrimRight(getenv(lookup, "STREMIO_LOCAL_FILES_PUBLIC_URL", ""), "/")
+	localFilesPublicURL := strings.TrimRight(getenv(lookup, "RIVULET_LOCAL_FILES_PUBLIC_URL", ""), "/")
 	tcfg := types.Config{
 		HTTPPort:            envInt(lookup, "HTTP_PORT", 11470),
 		HTTPSPort:           envInt(lookup, "HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
 		AppPath:             appPath,
 		CacheRoot:           appPath,
-		MemoryCacheSize:     envInt64(lookup, "STREMIO_MEMORY_CACHE_SIZE", 0),                                                    // bytes; 0 = disabled (write pieces to disk)
+		MemoryCacheSize:     envInt64(lookup, "RIVULET_MEMORY_CACHE_SIZE", 0),                                                    // bytes; 0 = disabled (write pieces to disk)
 		StorageMmap:         strings.EqualFold(strings.TrimSpace(getenv(lookup, "TORRENT_STORAGE_DEFAULT_FILE_IO", "")), "mmap"), // default classic pread/pwrite; "mmap" opts in
 		ListenPort:          envInt(lookup, "BT_LISTEN_PORT", 0),
 		WebUI:               getenv(lookup, "WEB_UI_LOCATION", "https://web.stremio.com/"),
 		PublicURL:           publicURL,
 		Version:             version,
-		TrackersMax:         envInt(lookup, "STREMIO_TRACKERS_MAX", 5),
-		ProxyPassword:       getenv(lookup, "STREMIO_PROXY_PASSWORD", ""),
+		TrackersMax:         envInt(lookup, "RIVULET_TRACKERS_MAX", 5),
+		ProxyPassword:       getenv(lookup, "RIVULET_PROXY_PASSWORD", ""),
 		ProxySecret:         proxySecretVal,
-		ProxyIPACL:          getenv(lookup, "STREMIO_PROXY_IP_ACL", ""),
-		ProxyPrebuffer:      envInt(lookup, "STREMIO_PROXY_PREBUFFER", 3),
-		ProxySegCacheTTL:    envInt(lookup, "STREMIO_PROXY_SEG_CACHE_TTL", 300),
+		ProxyIPACL:          getenv(lookup, "RIVULET_PROXY_IP_ACL", ""),
+		ProxyPrebuffer:      envInt(lookup, "RIVULET_PROXY_PREBUFFER", 3),
+		ProxySegCacheTTL:    envInt(lookup, "RIVULET_PROXY_SEG_CACHE_TTL", 300),
 		ProxyPublicURL:      proxyPublicURL,
-		ProxyUpstream:       getenv(lookup, "STREMIO_PROXY_UPSTREAM", ""),
-		ProxyPrivateAllow:   getenv(lookup, "STREMIO_PROXY_PRIVATE_ALLOW", ""), // IPs/CIDRs/hostnames reachable even when private destinations are blocked
-		ExtractorsFile:      getenv(lookup, "STREMIO_EXTRACTORS_FILE", ""),
-		ExtractorsURL:       optionalURL(lookup, "STREMIO_EXTRACTORS_URL"), // remote extractor definitions; "" / off disables
-		ExtractorsPubKey:    getenv(lookup, "STREMIO_EXTRACTORS_PUBKEY", ""),
-		BitmagnetURL:        getenv(lookup, "STREMIO_BITMAGNET_URL", ""),
-		TorznabURL:          getenv(lookup, "STREMIO_TORZNAB_URL", ""),
-		TorznabAPIKey:       getenv(lookup, "STREMIO_TORZNAB_APIKEY", ""),
-		MetadataURL:         metadataURL(lookup),                                 // Cinemeta-compatible meta addon base; "" disables (STREMIO_METADATA_URL)
-		DisableTrackers:     envBool(lookup, "STREMIO_DISABLE_TRACKERS", false),  // disable all tracker announces (DHT/PEX/webseeds still used); accepts 1/true/0/false
-		DisableWebtorrent:   envBool(lookup, "STREMIO_DISABLE_WEBTORRENT", true), // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers
-		EnableDLNA:          envBool(lookup, "STREMIO_ENABLE_DLNA", false),       // default disabled; set =1/true to enable /casting DLNA discovery + control
-		PeersPerTorrent:     envInt(lookup, "STREMIO_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
-		TrackersURL:         trackersURL(lookup),                                 // remote tracker list; "" disables remote fetch (STREMIO_TRACKERS_URL)
-		LocalIMDB:           envBool(lookup, "STREMIO_LOCAL_IMDB", true),         // local-files addon IMDB resolution; default on
+		ProxyUpstream:       getenv(lookup, "RIVULET_PROXY_UPSTREAM", ""),
+		ProxyPrivateAllow:   getenv(lookup, "RIVULET_PROXY_PRIVATE_ALLOW", ""), // IPs/CIDRs/hostnames reachable even when private destinations are blocked
+		ExtractorsFile:      getenv(lookup, "RIVULET_EXTRACTORS_FILE", ""),
+		ExtractorsURL:       optionalURL(lookup, "RIVULET_EXTRACTORS_URL"), // remote extractor definitions; "" / off disables
+		ExtractorsPubKey:    getenv(lookup, "RIVULET_EXTRACTORS_PUBKEY", ""),
+		BitmagnetURL:        getenv(lookup, "RIVULET_BITMAGNET_URL", ""),
+		TorznabURL:          getenv(lookup, "RIVULET_TORZNAB_URL", ""),
+		TorznabAPIKey:       getenv(lookup, "RIVULET_TORZNAB_APIKEY", ""),
+		MetadataURL:         metadataURL(lookup),                                 // Cinemeta-compatible meta addon base; "" disables (RIVULET_METADATA_URL)
+		DisableTrackers:     envBool(lookup, "RIVULET_DISABLE_TRACKERS", false),  // disable all tracker announces (DHT/PEX/webseeds still used); accepts 1/true/0/false
+		DisableWebtorrent:   envBool(lookup, "RIVULET_DISABLE_WEBTORRENT", true), // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers
+		EnableDLNA:          envBool(lookup, "RIVULET_ENABLE_DLNA", false),       // default disabled; set =1/true to enable /casting DLNA discovery + control
+		PeersPerTorrent:     envInt(lookup, "RIVULET_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
+		TrackersURL:         trackersURL(lookup),                                 // remote tracker list; "" disables remote fetch (RIVULET_TRACKERS_URL)
+		LocalIMDB:           envBool(lookup, "RIVULET_LOCAL_IMDB", true),         // local-files addon IMDB resolution; default on
 		LocalFilesPublicURL: localFilesPublicURL,
-		BTEncryption:        getenv(lookup, "STREMIO_BT_ENCRYPTION", "prefer"),
-		BTProxy:             getenv(lookup, "STREMIO_BT_PROXY", ""),
-		DHTBootstrap:        getenv(lookup, "STREMIO_DHT_BOOTSTRAP", ""),
-		BTAnonymous:         envBool(lookup, "STREMIO_BT_ANONYMOUS", false),
-		IdleTimeout:         time.Duration(envInt(lookup, "STREMIO_TORRENT_IDLE_TIMEOUT", 300)) * time.Second, // 0 = disabled
-		MaxSeedRatio:        envFloat(lookup, "STREMIO_MAX_SEED_RATIO", 0),                                    // 0 = unlimited seeding
-		HTTPLog:             envBool(lookup, "STREMIO_HTTP_LOG", false),                                       // structured access-log line per request
-		AllowedOrigins:      allowedOriginsExtra,                                                              // extra CORS origins (STREMIO_ALLOWED_ORIGINS)
-		AllowAllOrigins:     allowAllOrigins,                                                                  // STREMIO_ALLOWED_ORIGINS="*" => legacy no-check CORS
+		BTEncryption:        getenv(lookup, "RIVULET_BT_ENCRYPTION", "prefer"),
+		BTProxy:             getenv(lookup, "RIVULET_BT_PROXY", ""),
+		DHTBootstrap:        getenv(lookup, "RIVULET_DHT_BOOTSTRAP", ""),
+		BTAnonymous:         envBool(lookup, "RIVULET_BT_ANONYMOUS", false),
+		IdleTimeout:         time.Duration(envInt(lookup, "RIVULET_TORRENT_IDLE_TIMEOUT", 300)) * time.Second, // 0 = disabled
+		MaxSeedRatio:        envFloat(lookup, "RIVULET_MAX_SEED_RATIO", 0),                                    // 0 = unlimited seeding
+		HTTPLog:             envBool(lookup, "RIVULET_HTTP_LOG", false),                                       // structured access-log line per request
+		AllowedOrigins:      allowedOriginsExtra,                                                              // extra CORS origins (RIVULET_ALLOWED_ORIGINS)
+		AllowAllOrigins:     allowAllOrigins,                                                                  // RIVULET_ALLOWED_ORIGINS="*" => legacy no-check CORS
 		// CreateMetadataWait bounds /create, /{infoHash}/create, and
 		// /{infoHash}/{fileIdx}'s wait for a torrent's metadata (issue #20).
-		CreateMetadataWait: envDuration(lookup, "STREMIO_CREATE_METADATA_TIMEOUT", 90*time.Second),
-		DVREnabled:         envBool(lookup, "STREMIO_DVR_ENABLED", false), // opt-in /record DVR (EasyProxy-compatible)
-		DVRDir:             getenv(lookup, "STREMIO_DVR_DIR", ""),         // "" = <APP_PATH>/recordings
-		DVRDefaultDuration: envDuration(lookup, "STREMIO_DVR_DEFAULT_DURATION", 4*time.Hour),
-		DVRMaxDuration:     envDuration(lookup, "STREMIO_DVR_MAX_DURATION", 8*time.Hour),
-		DVRMaxActive:       envInt(lookup, "STREMIO_DVR_MAX_ACTIVE", 2),
-		DVRMaxBytes:        envInt64(lookup, "STREMIO_DVR_MAX_BYTES", 0), // 0 = unlimited
-		DVRRetentionDays:   envInt(lookup, "STREMIO_DVR_RETENTION_DAYS", 7),
+		CreateMetadataWait: envDuration(lookup, "RIVULET_CREATE_METADATA_TIMEOUT", 90*time.Second),
+		DVREnabled:         envBool(lookup, "RIVULET_DVR_ENABLED", false), // opt-in /record DVR (EasyProxy-compatible)
+		DVRDir:             getenv(lookup, "RIVULET_DVR_DIR", ""),         // "" = <APP_PATH>/recordings
+		DVRDefaultDuration: envDuration(lookup, "RIVULET_DVR_DEFAULT_DURATION", 4*time.Hour),
+		DVRMaxDuration:     envDuration(lookup, "RIVULET_DVR_MAX_DURATION", 8*time.Hour),
+		DVRMaxActive:       envInt(lookup, "RIVULET_DVR_MAX_ACTIVE", 2),
+		DVRMaxBytes:        envInt64(lookup, "RIVULET_DVR_MAX_BYTES", 0), // 0 = unlimited
+		DVRRetentionDays:   envInt(lookup, "RIVULET_DVR_RETENTION_DAYS", 7),
 	}
 	if tcfg.DisableWebtorrent {
 		logging.For("engine").Info("webtorrent/webrtc peers disabled")
@@ -214,7 +214,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 
 	// Optional soft memory ceiling for RAM-constrained hosts (the runtime also
 	// honors the native GOMEMLIMIT env). 0 = unset.
-	if lim := envInt64(lookup, "STREMIO_MEM_LIMIT", 0); lim > 0 {
+	if lim := envInt64(lookup, "RIVULET_MEM_LIMIT", 0); lim > 0 {
 		debug.SetMemoryLimit(lim)
 		logging.For("runtime").Info("soft memory limit set", "bytes", lim)
 	}
@@ -496,7 +496,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 				}
 			})
 			// Auto-provision/renew a browser-trusted cert from api.strem.io when an
-			// authKey is available (env STREMIO_CERT_AUTHKEY or cached by a prior
+			// authKey is available (env RIVULET_CERT_AUTHKEY or cached by a prior
 			// /get-https call). Hot-swaps the live cert; no restart needed. Stops
 			// when ctx is cancelled.
 			safeGo("https", func() { renewCertLoop(ctx, appPath, holder, lookup) })
@@ -510,13 +510,13 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		}
 	})
 
-	// Optional pprof endpoint for diagnostics; disabled unless STREMIO_PPROF is
-	// set (e.g. STREMIO_PPROF=127.0.0.1:6060). Handlers come from net/http/pprof.
+	// Optional pprof endpoint for diagnostics; disabled unless RIVULET_PPROF is
+	// set (e.g. RIVULET_PPROF=127.0.0.1:6060). Handlers come from net/http/pprof.
 	// The address is operator-supplied and NOT forced to loopback, so warn when
 	// it would expose heap/goroutine dumps beyond the local host.
 	// ppSrv is declared here so it can join the graceful-shutdown WaitGroup below.
 	var ppSrv *http.Server
-	if addr := getenv(lookup, "STREMIO_PPROF", ""); addr != "" {
+	if addr := getenv(lookup, "RIVULET_PPROF", ""); addr != "" {
 		ppSrv = &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
 		if !isLoopbackAddr(addr) {
 			logging.For("pprof").Warn("pprof bound to a non-loopback address; heap and goroutine dumps are exposed", "addr", addr)
@@ -581,10 +581,10 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 }
 
 // proxySecret returns the proxy signing secret.
-// Priority: STREMIO_PROXY_SECRET env var > <appPath>/proxy-secret file > auto-generated.
+// Priority: RIVULET_PROXY_SECRET env var > <appPath>/proxy-secret file > auto-generated.
 // A generated secret is persisted to <appPath>/proxy-secret (mode 0o600).
 func proxySecret(appPath string, lookup Lookup) (string, error) {
-	if s, ok := lookup("STREMIO_PROXY_SECRET"); ok && s != "" {
+	if s, ok := lookup("RIVULET_PROXY_SECRET"); ok && s != "" {
 		return s, nil
 	}
 	secretFile := filepath.Join(appPath, "proxy-secret")
@@ -681,66 +681,66 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 	// envDuration keeps unset/negative/invalid at the 60s default but returns
 	// an explicit "0" (or "0s") as 0, which means "never evict idle sessions"
 	// (sessions then live until DELETE /hlsv2/{id}), like
-	// STREMIO_TORRENT_IDLE_TIMEOUT=0. SessionTTL itself stays 0 here;
+	// RIVULET_TORRENT_IDLE_TIMEOUT=0. SessionTTL itself stays 0 here;
 	// media's normalize resolves it back to the default, which is harmless
 	// because DisableIdleEviction short-circuits the reaper, and
 	// DefaultReaperInterval(0) keeps the 30s tick instead of a zero interval.
-	sessionTTL := envDuration(lookup, "STREMIO_HLS_SESSION_TTL", d.SessionTTL)
-	maxWidth := envInt(lookup, "STREMIO_TRANSCODE_MAX_WIDTH", d.MaxWidth)
+	sessionTTL := envDuration(lookup, "RIVULET_HLS_SESSION_TTL", d.SessionTTL)
+	maxWidth := envInt(lookup, "RIVULET_TRANSCODE_MAX_WIDTH", d.MaxWidth)
 	if maxWidth < 0 {
-		logging.For("config").Warn("negative STREMIO_TRANSCODE_MAX_WIDTH", "value", maxWidth, "default", d.MaxWidth)
+		logging.For("config").Warn("negative RIVULET_TRANSCODE_MAX_WIDTH", "value", maxWidth, "default", d.MaxWidth)
 		maxWidth = d.MaxWidth
 	}
-	maxHeight := envInt(lookup, "STREMIO_TRANSCODE_MAX_HEIGHT", d.MaxHeight)
+	maxHeight := envInt(lookup, "RIVULET_TRANSCODE_MAX_HEIGHT", d.MaxHeight)
 	if maxHeight < 0 {
-		logging.For("config").Warn("negative STREMIO_TRANSCODE_MAX_HEIGHT", "value", maxHeight, "default", d.MaxHeight)
+		logging.For("config").Warn("negative RIVULET_TRANSCODE_MAX_HEIGHT", "value", maxHeight, "default", d.MaxHeight)
 		maxHeight = d.MaxHeight
 	}
 	return media.HLSConfig{
 		SessionTTL:     sessionTTL,
-		ReaperInterval: envDuration(lookup, "STREMIO_HLS_REAPER_INTERVAL", media.DefaultReaperInterval(sessionTTL)),
-		NegProbeTTL:    envDuration(lookup, "STREMIO_HLS_NEG_PROBE_TTL", d.NegProbeTTL),
-		PosProbeTTL:    envDuration(lookup, "STREMIO_HLS_POS_PROBE_TTL", d.PosProbeTTL),
-		MaxSessions:    envInt(lookup, "STREMIO_HLS_MAX_SESSIONS", d.MaxSessions),
-		WorkDir:        getenv(lookup, "STREMIO_HLS_WORK_DIR", d.WorkDir),
-		Persist:        envBool(lookup, "STREMIO_HLS_PERSIST", d.Persist),
+		ReaperInterval: envDuration(lookup, "RIVULET_HLS_REAPER_INTERVAL", media.DefaultReaperInterval(sessionTTL)),
+		NegProbeTTL:    envDuration(lookup, "RIVULET_HLS_NEG_PROBE_TTL", d.NegProbeTTL),
+		PosProbeTTL:    envDuration(lookup, "RIVULET_HLS_POS_PROBE_TTL", d.PosProbeTTL),
+		MaxSessions:    envInt(lookup, "RIVULET_HLS_MAX_SESSIONS", d.MaxSessions),
+		WorkDir:        getenv(lookup, "RIVULET_HLS_WORK_DIR", d.WorkDir),
+		Persist:        envBool(lookup, "RIVULET_HLS_PERSIST", d.Persist),
 
 		DisableIdleEviction: sessionTTL == 0,
 
-		SessionOverrides: envBool(lookup, "STREMIO_HLS_SESSION_OVERRIDES", d.SessionOverrides),
-		VideoBitrate:     envBitrate(lookup, "STREMIO_TRANSCODE_VIDEO_BITRATE", d.VideoBitrate),
-		VideoMaxrate:     envBitrate(lookup, "STREMIO_TRANSCODE_MAXRATE", d.VideoMaxrate),
-		VideoBufsize:     envBitrate(lookup, "STREMIO_TRANSCODE_BUFSIZE", d.VideoBufsize),
+		SessionOverrides: envBool(lookup, "RIVULET_HLS_SESSION_OVERRIDES", d.SessionOverrides),
+		VideoBitrate:     envBitrate(lookup, "RIVULET_TRANSCODE_VIDEO_BITRATE", d.VideoBitrate),
+		VideoMaxrate:     envBitrate(lookup, "RIVULET_TRANSCODE_MAXRATE", d.VideoMaxrate),
+		VideoBufsize:     envBitrate(lookup, "RIVULET_TRANSCODE_BUFSIZE", d.VideoBufsize),
 		MaxWidth:         maxWidth,
 		MaxHeight:        maxHeight,
 
-		VAAPIQP:     envInt(lookup, "STREMIO_TRANSCODE_VAAPI_QP", d.VAAPIQP),
-		NVENCPreset: getenv(lookup, "STREMIO_TRANSCODE_NVENC_PRESET", d.NVENCPreset),
-		QSVPreset:   getenv(lookup, "STREMIO_TRANSCODE_QSV_PRESET", d.QSVPreset),
-		X264Preset:  getenv(lookup, "STREMIO_TRANSCODE_X264_PRESET", d.X264Preset),
-		X264CRF:     envInt(lookup, "STREMIO_TRANSCODE_X264_CRF", d.X264CRF),
-		Tonemap:     envTonemap(lookup, "STREMIO_TRANSCODE_TONEMAP"),
+		VAAPIQP:     envInt(lookup, "RIVULET_TRANSCODE_VAAPI_QP", d.VAAPIQP),
+		NVENCPreset: getenv(lookup, "RIVULET_TRANSCODE_NVENC_PRESET", d.NVENCPreset),
+		QSVPreset:   getenv(lookup, "RIVULET_TRANSCODE_QSV_PRESET", d.QSVPreset),
+		X264Preset:  getenv(lookup, "RIVULET_TRANSCODE_X264_PRESET", d.X264Preset),
+		X264CRF:     envInt(lookup, "RIVULET_TRANSCODE_X264_CRF", d.X264CRF),
+		Tonemap:     envTonemap(lookup, "RIVULET_TRANSCODE_TONEMAP"),
 
-		AudioChannels: envInt(lookup, "STREMIO_TRANSCODE_AUDIO_CHANNELS", d.AudioChannels),
-		AudioBitrate:  envBitrate(lookup, "STREMIO_TRANSCODE_AUDIO_BITRATE", d.AudioBitrate),
+		AudioChannels: envInt(lookup, "RIVULET_TRANSCODE_AUDIO_CHANNELS", d.AudioChannels),
+		AudioBitrate:  envBitrate(lookup, "RIVULET_TRANSCODE_AUDIO_BITRATE", d.AudioBitrate),
 
 		// 0 (unset) resolves to runtime.NumCPU() inside newHLS/HLSConfig.normalize.
-		SegmentConcurrency: envInt(lookup, "STREMIO_TRANSCODE_CONCURRENCY", 0),
-		VAAPIDevice:        getenv(lookup, "STREMIO_HLS_VAAPI_DEVICE", d.VAAPIDevice),
+		SegmentConcurrency: envInt(lookup, "RIVULET_TRANSCODE_CONCURRENCY", 0),
+		VAAPIDevice:        getenv(lookup, "RIVULET_HLS_VAAPI_DEVICE", d.VAAPIDevice),
 
-		SegmentTimeout:  envDuration(lookup, "STREMIO_HLS_SEGMENT_TIMEOUT", d.SegmentTimeout),
-		SubtitleTimeout: envDuration(lookup, "STREMIO_HLS_SUBTITLE_TIMEOUT", d.SubtitleTimeout),
-		ProbeTimeout:    envDuration(lookup, "STREMIO_HLS_PROBE_TIMEOUT", d.ProbeTimeout),
+		SegmentTimeout:  envDuration(lookup, "RIVULET_HLS_SEGMENT_TIMEOUT", d.SegmentTimeout),
+		SubtitleTimeout: envDuration(lookup, "RIVULET_HLS_SUBTITLE_TIMEOUT", d.SubtitleTimeout),
+		ProbeTimeout:    envDuration(lookup, "RIVULET_HLS_PROBE_TIMEOUT", d.ProbeTimeout),
 
 		SeekPreroll: seekPreroll(lookup, d.SeekPreroll),
 
 		// Per-session transcoded-segment disk cap: 0 = derived from bitrate,
-		// negative = unlimited (STREMIO_HLS_SEGMENT_CACHE_BYTES).
-		SegmentCacheBytes: envInt64(lookup, "STREMIO_HLS_SEGMENT_CACHE_BYTES", d.SegmentCacheBytes),
+		// negative = unlimited (RIVULET_HLS_SEGMENT_CACHE_BYTES).
+		SegmentCacheBytes: envInt64(lookup, "RIVULET_HLS_SEGMENT_CACHE_BYTES", d.SegmentCacheBytes),
 
-		// Private hosts a media URL may point at (STREMIO_HLS_PRIVATE_ALLOW);
+		// Private hosts a media URL may point at (RIVULET_HLS_PRIVATE_ALLOW);
 		// unset allows none.
-		PrivateAllow: envPrivateAllow(lookup, "STREMIO_HLS_PRIVATE_ALLOW"),
+		PrivateAllow: envPrivateAllow(lookup, "RIVULET_HLS_PRIVATE_ALLOW"),
 	}
 }
 

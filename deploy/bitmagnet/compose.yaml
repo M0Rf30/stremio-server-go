@@ -7,7 +7,7 @@
 #   podman compose -f deploy/bitmagnet/compose.yaml up -d
 #
 # WebUI + GraphQL: http://localhost:3333   (GraphiQL at /graphql)
-# Point the server at it:  STREMIO_BITMAGNET_URL=http://localhost:3333/graphql
+# Point the server at it:  RIVULET_BITMAGNET_URL=http://localhost:3333/graphql
 #
 # Notes:
 # - First start runs DB migrations; the DHT crawler begins populating immediately,

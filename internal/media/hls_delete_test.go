@@ -5,7 +5,7 @@
 package media
 
 // Tests for explicit HLS session deletion (DeleteHLS) and for idle eviction
-// being disabled (HLSConfig.DisableIdleEviction, STREMIO_HLS_SESSION_TTL=0).
+// being disabled (HLSConfig.DisableIdleEviction, RIVULET_HLS_SESSION_TTL=0).
 // All offline: sessions are injected directly and the only HLSFile paths
 // exercised are ones served without ffmpeg (playlists, an already-extracted
 // sub<k>.vtt).
@@ -234,7 +234,7 @@ func TestCloseHLSClearsDraining(t *testing.T) {
 	}
 }
 
-// ── DisableIdleEviction (STREMIO_HLS_SESSION_TTL=0) ─────────────────────────
+// ── DisableIdleEviction (RIVULET_HLS_SESSION_TTL=0) ─────────────────────────
 
 func TestEvictIdleDisabledNeverEvicts(t *testing.T) {
 	m := newTestHLSManager(t)
@@ -260,7 +260,7 @@ func TestEvictIdleDisabledNeverEvicts(t *testing.T) {
 }
 
 func TestNormalizeDisableIdleEvictionKeepsSaneReaper(t *testing.T) {
-	// What internal/app builds for STREMIO_HLS_SESSION_TTL=0.
+	// What internal/app builds for RIVULET_HLS_SESSION_TTL=0.
 	cfg := HLSConfig{
 		SessionTTL:          0,
 		ReaperInterval:      DefaultReaperInterval(0),

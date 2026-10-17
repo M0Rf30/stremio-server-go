@@ -161,7 +161,7 @@ func ftpLZPath(t *testing.T, ftpURL string) string {
 // through the real handler against an FTP server and asserts they share one
 // logged-in control connection (before pooling: N dials, N logins, N SIZE).
 func TestHandlerFTP_SequentialRangesReuseSession(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	data := make([]byte, 5000)
 	for i := range data {
 		data[i] = byte('a' + i%26)
@@ -206,7 +206,7 @@ func TestHandlerFTP_SequentialRangesReuseSession(t *testing.T) {
 // used to throw the logged-in control connection away (N aborts = N logins);
 // the aborted transfers must now share one session.
 func TestHandlerFTP_AbortedRangesReuseSession(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	data := make([]byte, 1<<20)
 	for i := range data {
 		data[i] = byte('a' + i%26)
@@ -268,7 +268,7 @@ func TestHandlerFTP_AbortedRangesReuseSession(t *testing.T) {
 // byte 0 (previously: RETR seeked to the offset, closed, then a second login
 // and RETR from 0).
 func TestHandlerFTP_UnknownSizeRangeOpensOnce(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	data := make([]byte, 1000)
 	for i := range data {
 		data[i] = byte('a' + i%26)
@@ -302,7 +302,7 @@ func TestHandlerFTP_UnknownSizeRangeOpensOnce(t *testing.T) {
 // identical: a source that reports no total size (chunked, Range ignored) is
 // answered 200 with the whole body.
 func TestHandlerFTP_HTTPUnknownSizeStillFallsBack(t *testing.T) {
-	t.Setenv("STREMIO_FTP_ALLOW_PRIVATE", "1")
+	t.Setenv("RIVULET_FTP_ALLOW_PRIVATE", "1")
 	data := []byte(strings.Repeat("0123456789", 100))
 	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
